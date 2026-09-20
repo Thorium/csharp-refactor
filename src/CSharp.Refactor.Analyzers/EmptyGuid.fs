@@ -27,7 +27,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
     |> Seq.choose (fun node ->
         let creation =
             match node with
-            | :? ObjectCreationExpressionSyntax as c when c.ArgumentList = null || c.ArgumentList.Arguments.Count = 0 ->
+            | :? ObjectCreationExpressionSyntax as c when isNull c.ArgumentList || c.ArgumentList.Arguments.Count = 0 ->
                 let t = model.GetTypeInfo(c).Type
 
                 if isSystemGuid t then

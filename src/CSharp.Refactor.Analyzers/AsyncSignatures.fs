@@ -541,7 +541,7 @@ let private isTestMethod (model: SemanticModel) (m: MethodDeclarationSyntax) =
         | :? IMethodSymbol as ctor ->
             let asm = ctor.ContainingAssembly.Name
 
-            testFrameworks |> List.exists (fun f -> asm.StartsWith f)
+            testFrameworks |> List.exists asm.StartsWith
         | _ -> false)
 
 let private globalSetters =
@@ -565,7 +565,7 @@ let private touchesSharedState (model: SemanticModel) (m: MethodDeclarationSynta
         | :? AssignmentExpressionSyntax as a ->
             let text = a.Left.ToString()
 
-            globalSetters |> List.exists (fun g -> text.Contains g)
+            globalSetters |> List.exists text.Contains
             || (match model.GetSymbolInfo(a.Left).Symbol with
                 | :? IFieldSymbol as f ->
                     f.IsStatic && not (SymbolEqualityComparer.Default.Equals(f.ContainingType, own))
@@ -575,7 +575,7 @@ let private touchesSharedState (model: SemanticModel) (m: MethodDeclarationSynta
                 | _ -> false)
         | :? InvocationExpressionSyntax as inv ->
             let text = inv.Expression.ToString()
-            globalSetters |> List.exists (fun g -> text.Contains g)
+            globalSetters |> List.exists text.Contains
         | _ -> false)
 
 let private testTasks (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =

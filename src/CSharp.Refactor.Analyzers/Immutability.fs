@@ -62,7 +62,7 @@ let private reflectiveAttribute (s: ISymbol) =
     s.GetAttributes()
     |> Seq.exists (fun a ->
         let name = a.AttributeClass.Name
-        reflectiveAttributeWords |> List.exists (fun w -> name.Contains w))
+        reflectiveAttributeWords |> List.exists name.Contains)
 
 /// Is the type an Entity Framework entity: a `DbSet<T>` of it anywhere?
 let private isEntity (model: SemanticModel) (t: INamedTypeSymbol) =

@@ -157,9 +157,7 @@ type private ScriptReferenceResolver(scriptDirectory: string, unresolved: Resize
             unresolved.Add reference
             ImmutableArray<PortableExecutableReference>.Empty
         else
-            found
-            |> List.map (fun p -> MetadataReference.CreateFromFile p)
-            |> ImmutableArray.CreateRange
+            found |> List.map MetadataReference.CreateFromFile |> ImmutableArray.CreateRange
 
     override x.Equals(other: obj) = obj.ReferenceEquals(x, other)
     override _.GetHashCode() = scriptDirectory.GetHashCode()

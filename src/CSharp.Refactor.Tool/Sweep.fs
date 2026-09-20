@@ -733,7 +733,7 @@ let private runPass
         // count is its baseline
         let otherProjects =
             changed
-            |> Seq.collect (fun file -> solution.GetDocumentIdsWithFilePath file)
+            |> Seq.collect solution.GetDocumentIdsWithFilePath
             |> Seq.map (fun d -> d.ProjectId)
             |> Seq.filter (fun p -> p <> projectId)
             |> Seq.distinct

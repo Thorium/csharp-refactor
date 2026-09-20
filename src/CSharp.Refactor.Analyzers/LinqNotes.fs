@@ -259,7 +259,7 @@ let private queriesInLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestio
 
     outerVariables
     |> List.choose (fun (body, variable, sourceText) ->
-        if batchWords |> List.exists (fun w -> sourceText.Contains w) then
+        if batchWords |> List.exists sourceText.Contains then
             None
         else
             let mentions (n: SyntaxNode) =
@@ -279,7 +279,7 @@ let private queriesInLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                         let name = Linq.nameOf inv
 
                         (name = "Contains" || name = "Skip" || name = "Take")
-                        && (Linq.receiverOf inv |> Option.exists (fun r -> mentions r))
+                        && (Linq.receiverOf inv |> Option.exists mentions)
                     | _ -> false)
 
             // an enumeration of a queryable that mentions the outer variable

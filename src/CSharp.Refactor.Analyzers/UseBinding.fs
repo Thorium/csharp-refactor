@@ -598,7 +598,7 @@ let private selfActive
     (scope: SyntaxNode)
     (name: string)
     =
-    selfActiveNames |> List.exists (fun s -> t.Name.Contains s)
+    selfActiveNames |> List.exists t.Name.Contains
     || (match init with
         | :? BaseObjectCreationExpressionSyntax as c when not (isNull c.ArgumentList) ->
             c.ArgumentList.Arguments

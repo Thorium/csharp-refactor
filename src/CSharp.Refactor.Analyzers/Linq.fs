@@ -200,7 +200,7 @@ let enclosingLoop (node: SyntaxNode) : StatementSyntax option =
         | :? ForStatementSyntax as f when
             within f.Statement
             || within f.Condition
-            || (f.Incrementors |> Seq.exists (fun i -> within i))
+            || (f.Incrementors |> Seq.exists within)
             ->
             Some(a :?> StatementSyntax)
         | :? ForEachStatementSyntax as f when within f.Statement -> Some(a :?> StatementSyntax)

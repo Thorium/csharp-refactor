@@ -557,7 +557,7 @@ let private weakCrypto (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
             | null -> None
             | t when
                 t.ContainingNamespace.ToDisplayString() = "System.Security.Cryptography"
-                && (weakHashes |> List.exists (fun w -> t.Name.StartsWith w))
+                && (weakHashes |> List.exists t.Name.StartsWith)
                 && not (websocketHandshake && t.Name.StartsWith "SHA1")
                 && not (strongerSibling c)
                 ->

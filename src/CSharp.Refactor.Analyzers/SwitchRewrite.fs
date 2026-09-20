@@ -120,7 +120,7 @@ type Section =
 let blocked (whole: IfStatementSyntax) (sections: Section list) : bool =
     let bodies = sections |> List.map (fun s -> s.Body)
 
-    bodies |> List.exists (fun b -> hasEscapingJump b)
+    bodies |> List.exists hasEscapingJump
     || bodies |> List.exists Text.spansLines
     || commentsOutsideBodies whole bodies
     // a non-block body on several lines would not re-indent

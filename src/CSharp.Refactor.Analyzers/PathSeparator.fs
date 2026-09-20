@@ -84,7 +84,7 @@ let private existsOnDisk (s: string) =
 
 let private pathNamed (e: ExpressionSyntax) =
     let name = e.ToString().ToLowerInvariant()
-    pathWords |> List.exists (fun w -> name.Contains w)
+    pathWords |> List.exists name.Contains
 
 /// A name bound one hop to something URL-shaped in the enclosing member.
 let private boundToUrl (model: SemanticModel) (e: ExpressionSyntax) =

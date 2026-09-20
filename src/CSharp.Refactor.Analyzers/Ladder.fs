@@ -185,7 +185,7 @@ let private serializerWords =
 
 let private serialized (s: ISymbol) =
     s.GetAttributes()
-    |> Seq.exists (fun a -> serializerWords |> List.exists (fun w -> a.AttributeClass.Name.Contains w))
+    |> Seq.exists (fun a -> serializerWords |> List.exists a.AttributeClass.Name.Contains)
 
 let private requiredMembers (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     if not (RuleContext.languageAtLeast ctx 11) then

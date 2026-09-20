@@ -160,7 +160,7 @@ let fixAllAllowing
 
     let errors =
         errorsOf compilation
-        |> List.filter (fun e -> not (allowed |> List.exists (fun id -> e.Contains id)))
+        |> List.filter (fun e -> not (allowed |> List.exists e.Contains))
 
     if not errors.IsEmpty then
         failwithf "fixed source does not compile:\n%s\n---\n%s" (String.Join("\n", errors)) result

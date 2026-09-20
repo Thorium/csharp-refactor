@@ -617,7 +617,7 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                             names
                             |> List.exists (fun name ->
                                 let l = name.ToLowerInvariant()
-                                secretWords |> List.exists (fun w -> l.Contains w))
+                                secretWords |> List.exists l.Contains)
 
                         let accessible =
                             match self.DeclaredAccessibility with
@@ -645,7 +645,7 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                             || message.Trim() = ""
                             || mentionsParameter
                             || lower.Contains(m.Identifier.ValueText.ToLowerInvariant())
-                            || invariants |> List.exists (fun i -> lower.Contains i)
+                            || invariants |> List.exists lower.Contains
                             || secretSmelling
                             || not accessible
                         then
