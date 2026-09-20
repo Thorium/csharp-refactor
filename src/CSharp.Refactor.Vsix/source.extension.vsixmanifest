@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011" xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
+  <Metadata>
+    <!-- Version is a PLACEHOLDER: CreateVsix.ps1 stamps the real one from
+         Directory.Build.props, the single version source for the repo, and
+         fails if it cannot. Bump it there, never here. -->
+    <Identity Id="CSharp.Refactor.Vsix.6d2b7f3e-8a41-4c9d-b1e5-2f7c0a9d4e18" Version="0.0.0" Language="en-US" Publisher="Tuomas Hietanen" />
+    <DisplayName>CSharp.Refactor</DisplayName>
+    <Description xml:space="preserve">Functional refactoring hints and one-click quick fixes for C#: the CSharp.Refactor Roslyn analyzers, applied to every C# project opened in Visual Studio.</Description>
+    <MoreInfo>https://github.com/Thorium/csharp-refactor</MoreInfo>
+    <License>LICENSE</License>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Pro" Version="[17.0,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[17.0,19.0)">
+      <ProductArchitecture>amd64</ProductArchitecture>
+    </InstallationTarget>
+  </Installation>
+  <Prerequisites>
+    <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.0,)" DisplayName="Visual Studio core editor" />
+    <Prerequisite Id="Microsoft.VisualStudio.Component.Roslyn.LanguageServices" Version="[17.0,)" DisplayName="C# and Visual Basic" />
+  </Prerequisites>
+  <Assets>
+    <!-- the diagnostics: an analyzer VS adds to every C# project it opens -->
+    <Asset Type="Microsoft.VisualStudio.Analyzer" d:Source="File" Path="CSharp.Refactor.Analyzers.dll" />
+    <!-- the light bulbs: the CodeFixProvider is a MEF part -->
+    <Asset Type="Microsoft.VisualStudio.MefComponent" d:Source="File" Path="CSharp.Refactor.Analyzers.dll" />
+  </Assets>
+</PackageManifest>

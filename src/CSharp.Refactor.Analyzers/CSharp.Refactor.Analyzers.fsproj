@@ -1,0 +1,112 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.0: Visual Studio hosts Roslyn on .NET Framework, so a
+         Roslyn analyzer that must load everywhere targets this and nothing
+         newer. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <WarnOn>3390;$(WarnOn)</WarnOn>
+    <!-- NuGet convention for Roslyn analyzers: csc, VS, VS Code and Rider
+         load them from analyzers/dotnet/cs. IncludeBuildOutput=false plus
+         the explicit None packs keep the dlls FLAT in that folder, with
+         FSharp.Core beside the analyzer where the compiler's loader
+         resolves dependencies from. -->
+    <IsPackable>true</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <PackageId>CSharp.Refactor.Analyzers</PackageId>
+    <Description>Functional refactoring suggestions (light bulb quick fixes) for C#, built on Roslyn. Correctness, performance and idiom rules; every one is Info severity, so they never gate a build.</Description>
+    <PackageTags>csharp;analyzers;refactoring;codefix;roslyn</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <DevelopmentDependency>true</DevelopmentDependency>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <!-- an analyzer must not be trimmed down to a reference assembly -->
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <!-- FSharp.Core must sit beside the analyzer dll in bin (and in the
+         package): the compiler resolves an analyzer's dependencies from its
+         own directory. Roslyn itself is the host's and is never copied. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Configuration.fs" />
+    <Compile Include="Suggestion.fs" />
+    <Compile Include="Text.fs" />
+    <Compile Include="RuleCatalog.fs" />
+    <Compile Include="Guards.fs" />
+    <Compile Include="Index.fs" />
+    <Compile Include="Linq.fs" />
+    <Compile Include="Usings.fs" />
+    <Compile Include="InterpolationHoles.fs" />
+    <Compile Include="EmptyGuid.fs" />
+    <Compile Include="RedundantSyntax.fs" />
+    <Compile Include="BooleanSimplify.fs" />
+    <Compile Include="BoolReturn.fs" />
+    <Compile Include="NestedIfMerge.fs" />
+    <Compile Include="SwitchShapes.fs" />
+    <Compile Include="NullableMatch.fs" />
+    <Compile Include="SwitchRewrite.fs" />
+    <Compile Include="TypeTestChain.fs" />
+    <Compile Include="IfChainSwitch.fs" />
+    <Compile Include="Loops.fs" />
+    <Compile Include="EnumCoverage.fs" />
+    <Compile Include="PyramidFlip.fs" />
+    <Compile Include="FlagLoop.fs" />
+    <Compile Include="HintEngine.fs" />
+    <Compile Include="AttributeMerge.fs" />
+    <Compile Include="CommentDoc.fs" />
+    <Compile Include="QualifiedNames.fs" />
+    <Compile Include="LinqNotes.fs" />
+    <Compile Include="CollectionFixes.fs" />
+    <Compile Include="ConversionMove.fs" />
+    <Compile Include="SelectFusion.fs" />
+    <Compile Include="Accumulation.fs" />
+    <Compile Include="FillLoop.fs" />
+    <Compile Include="ContainsSet.fs" />
+    <Compile Include="AsyncShapes.fs" />
+    <Compile Include="Locks.fs" />
+    <Compile Include="ConcurrentCache.fs" />
+    <Compile Include="Lifetimes.fs" />
+    <Compile Include="AsyncSignatures.fs" />
+    <Compile Include="AwaitableTwin.fs" />
+    <Compile Include="ExceptionRules.fs" />
+    <Compile Include="DisposableDesign.fs" />
+    <Compile Include="UseBinding.fs" />
+    <Compile Include="StringShapes.fs" />
+    <Compile Include="CultureTime.fs" />
+    <Compile Include="RegexRules.fs" />
+    <Compile Include="PathSeparator.fs" />
+    <Compile Include="SourceHygiene.fs" />
+    <Compile Include="LoggingRules.fs" />
+    <Compile Include="TypeNotes.fs" />
+    <Compile Include="Immutability.fs" />
+    <Compile Include="StructShapes.fs" />
+    <Compile Include="ClockMigration.fs" />
+    <Compile Include="SecurityRules.fs" />
+    <Compile Include="Ladder.fs" />
+    <Compile Include="LadderShapes.fs" />
+    <Compile Include="ClosureCaptures.fs" />
+    <Compile Include="GuardedRegions.fs" />
+    <Compile Include="ParseAndNumbers.fs" />
+    <Compile Include="EnumerationMutation.fs" />
+    <Compile Include="Analyzers.fs" />
+    <Compile Include="References.fs" />
+    <Compile Include="CodeFixes.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The pin: the lowest Roslyn whose syntax model reads the C# we need
+         (C# 13). Loads in any newer host, binding to the host's copy. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="4.14.0" PrivateAssets="all" ExcludeAssets="runtime" />
+    <PackageReference Update="FSharp.Core" Version="9.0.303" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="bin\$(Configuration)\netstandard2.0\CSharp.Refactor.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="bin\$(Configuration)\netstandard2.0\CSharp.Refactor.Analyzers.xml" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <None Include="bin\$(Configuration)\netstandard2.0\FSharp.Core.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+  </ItemGroup>
+
+</Project>

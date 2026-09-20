@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <GenerateProgramFile>true</GenerateProgramFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Harness.fs" />
+    <Compile Include="CatalogTests.fs" />
+    <Compile Include="GuardsTests.fs" />
+    <Compile Include="InterpolationHolesTests.fs" />
+    <Compile Include="EmptyGuidTests.fs" />
+    <Compile Include="RedundantSyntaxTests.fs" />
+    <Compile Include="ControlFlowTests.fs" />
+    <Compile Include="NullableMatchTests.fs" />
+    <Compile Include="SwitchChainTests.fs" />
+    <Compile Include="LoopsTests.fs" />
+    <Compile Include="EnumCoverageTests.fs" />
+    <Compile Include="EarlyExitTests.fs" />
+    <Compile Include="HintEngineTests.fs" />
+    <Compile Include="FamilyHTests.fs" />
+    <Compile Include="CollectionTests.fs" />
+    <Compile Include="LoopToLinqTests.fs" />
+    <Compile Include="AsyncTests.fs" />
+    <Compile Include="ExceptionTests.fs" />
+    <Compile Include="UseBindingTests.fs" />
+    <Compile Include="M2ReviewTests.fs" />
+    <Compile Include="StringTests.fs" />
+    <Compile Include="RegexTests.fs" />
+    <Compile Include="HygieneTests.fs" />
+    <Compile Include="TypeTests.fs" />
+    <Compile Include="ShapeTests.fs" />
+    <Compile Include="SecurityTests.fs" />
+    <Compile Include="LadderTests.fs" />
+    <Compile Include="M3ReviewTests.fs" />
+    <Compile Include="DefectTests.fs" />
+    <Compile Include="DefectReviewTests.fs" />
+    <Compile Include="HostTests.fs" />
+    <Compile Include="RulesMdTests.fs" />
+    <Compile Include="ToolTests.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <!-- the test host drives the real analyzer and fix provider through a
+         workspace, so it needs the same Roslyn the analyzer was built
+         against (or newer) -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\CSharp.Refactor.Analyzers\CSharp.Refactor.Analyzers.fsproj" />
+    <ProjectReference Include="..\..\src\CSharp.Refactor.Tool\CSharp.Refactor.Tool.fsproj" />
+  </ItemGroup>
+
+</Project>

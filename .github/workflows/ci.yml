@@ -1,0 +1,192 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # exact pin, as on the F# side: dotnet-fsharplint crashes on a
+          # runner-picked newer SDK; 10.0.302 is validated
+          dotnet-version: 10.0.302
+
+      - name: Restore tools
+        run: dotnet tool restore
+
+      - name: Check formatting
+        run: dotnet fantomas --check src tests
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Test
+        run: dotnet test -c Release --no-build
+
+      # fsharplint reaches MSBuild through Ionide.ProjInfo, whose assemblies
+      # want the SDK's runtime; launched through `dotnet exec --roll-forward
+      # LatestMajor` for the reason the F# side documents
+      - name: Lint
+        shell: bash
+        run: |
+          LINT=$(find ~/.nuget/packages/dotnet-fsharplint -name dotnet-fsharplint.dll | sort | tail -1)
+          echo "linting with $LINT"
+          for p in src/CSharp.Refactor.Analyzers/CSharp.Refactor.Analyzers.fsproj \
+                   src/CSharp.Refactor.Tool/CSharp.Refactor.Tool.fsproj \
+                   tests/CSharp.Refactor.Tests/CSharp.Refactor.Tests.fsproj \
+                   tests/CSharp.Refactor.PropertyTests/CSharp.Refactor.PropertyTests.fsproj; do
+            dotnet exec --roll-forward LatestMajor "$LINT" lint "$p"
+          done
+
+      # dogfood: the sample project must come out clean after one apply, and
+      # the analyzer must load through the packed nupkg by PackageReference
+      - name: Sweep the sample and check idempotency
+        shell: bash
+        run: |
+          cp -r tests/Sample /tmp/sample && sed -i "/<Analyzer Include/d" /tmp/sample/Sample.csproj
+          dotnet run -c Release --no-build --project src/CSharp.Refactor.Tool -- /tmp/sample/Sample.csproj
+          dotnet run -c Release --no-build --project src/CSharp.Refactor.Tool -- /tmp/sample/Sample.csproj --dry-run --fail-on-findings
+
+      - name: Pack
+        run: |
+          dotnet pack src/CSharp.Refactor.Analyzers -c Release -o artifacts
+          dotnet pack src/CSharp.Refactor.Tool -c Release -o artifacts
+
+      - name: Consume the analyzer package by PackageReference
+        shell: bash
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          cat > Consumer.csproj <<'XML'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net10.0</TargetFramework>
+              <RestoreSources>$GITHUB_WORKSPACE/artifacts;https://api.nuget.org/v3/index.json</RestoreSources>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="CSharp.Refactor.Analyzers" Version="*" PrivateAssets="all" />
+            </ItemGroup>
+          </Project>
+          XML
+          sed -i "s|\$GITHUB_WORKSPACE|$GITHUB_WORKSPACE|" Consumer.csproj
+          printf 'using System;\nclass C { Guid G() => new Guid(); string S() => $"x"; }\n' > C.cs
+          dotnet build -p:ErrorLog=f.sarif
+          grep -c '"ruleId": *"CR0090"' f.sarif
+          grep -c '"ruleId": *"CR0103"' f.sarif
+          ! ls bin/Debug/net10.0 | grep -i -E "fsharp|refactor"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/*.nupkg
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Pack
+        run: |
+          dotnet pack src/CSharp.Refactor.Analyzers -c Release -o artifacts
+          dotnet pack src/CSharp.Refactor.Tool -c Release -o artifacts
+
+      - name: Push to NuGet
+        run: >
+          dotnet nuget push artifacts/*.nupkg
+          --api-key ${{ secrets.NUGET_API_KEY }}
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+  # the Visual Studio extension: analyzer + MEF assets, packaged by hand
+  vsix:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Build VSIX
+        run: powershell -NoProfile -File src/CSharp.Refactor.Vsix/CreateVsix.ps1
+
+      - name: Validate package opens as OPC
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName WindowsBase
+          $p = [System.IO.Packaging.Package]::Open('src/CSharp.Refactor.Vsix/artifacts/CSharp.Refactor.vsix', 'Open', 'Read')
+          $p.GetParts() | ForEach-Object { $_.Uri.ToString() }
+          $p.Close()
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: src/CSharp.Refactor.Vsix/artifacts/CSharp.Refactor.vsix
+
+      - name: Publish to VS Marketplace
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          PAT: ${{ secrets.VS_MARKETPLACE_PAT }}
+        run: |
+          if (-not $env:PAT) { Write-Host 'VS_MARKETPLACE_PAT not set; skipping marketplace publish'; exit 0 }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -property installationPath
+          $vsixPublisher = Join-Path $vsPath 'VSSDK\VisualStudioIntegration\Tools\Bin\VsixPublisher.exe'
+          & $vsixPublisher publish -payload src/CSharp.Refactor.Vsix/artifacts/CSharp.Refactor.vsix -publishManifest src/CSharp.Refactor.Vsix/publishManifest.json -personalAccessToken $env:PAT
+
+  # the VS Code extension: bundles the analyzers and wires them through the
+  # MSBuild user ImportBefore props (with consent) on activation
+  vscode-ext:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build VS Code extension
+        shell: pwsh
+        run: pwsh -File src/CSharp.Refactor.VsCode/CreateVsCodeVsix.ps1
+
+      - name: Upload VS Code extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: src/CSharp.Refactor.VsCode/artifacts/*.vsix
+
+      - name: Publish to VS Code Marketplace
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        working-directory: src/CSharp.Refactor.VsCode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if (-not $env:VSCE_PAT) { Write-Host 'VSCE_PAT not set; skipping marketplace publish'; exit 0 }
+          npx vsce publish --packagePath (Get-ChildItem artifacts/*.vsix | Select-Object -First 1 -ExpandProperty FullName)

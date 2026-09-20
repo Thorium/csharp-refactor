@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- build order only: the Analyzer items below point at the analyzer's own build output -->
+    <ProjectReference Include="..\..\src\CSharp.Refactor.Analyzers\CSharp.Refactor.Analyzers.fsproj" ReferenceOutputAssembly="false" />
+    <Analyzer Include="..\..\src\CSharp.Refactor.Analyzers\bin\$(Configuration)\netstandard2.0\CSharp.Refactor.Analyzers.dll" />
+    <Analyzer Include="..\..\src\CSharp.Refactor.Analyzers\bin\$(Configuration)\netstandard2.0\FSharp.Core.dll" />
+  </ItemGroup>
+</Project>

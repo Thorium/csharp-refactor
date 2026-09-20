@@ -1,0 +1,3 @@
+root = true
+[*.cs]
+dotnet_diagnostic.CR0103.severity = warning

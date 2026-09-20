@@ -1,0 +1,84 @@
+{
+    "name": "csharp-refactor-vscode",
+    "displayName": "CSharp.Refactor",
+    "description": "Functional refactoring hints with one-click fixes for C# - the CSharp.Refactor Roslyn analyzers, wired into every C# project on this machine with your consent.",
+    "version": "0.1.0",
+    "publisher": "TuomasHietanen",
+    "license": "Unlicense",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Thorium/csharp-refactor"
+    },
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Linters",
+        "Programming Languages",
+        "Other"
+    ],
+    "keywords": [
+        "csharp",
+        "C#",
+        "refactoring",
+        "analyzers",
+        "roslyn",
+        "quickfix"
+    ],
+    "activationEvents": [
+        "onLanguage:csharp",
+        "workspaceContains:**/*.csproj",
+        "workspaceContains:**/*.sln",
+        "workspaceContains:**/*.slnx"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "csharpRefactor.enable",
+                "title": "CSharp.Refactor: Wire analyzers into every C# project (MSBuild ImportBefore)"
+            },
+            {
+                "command": "csharpRefactor.disable",
+                "title": "CSharp.Refactor: Remove the machine-wide wiring"
+            },
+            {
+                "command": "csharpRefactor.status",
+                "title": "CSharp.Refactor: Status (versions and wiring)"
+            },
+            {
+                "command": "csharpRefactor.run",
+                "title": "CSharp.Refactor: Run the tool on this workspace"
+            },
+            {
+                "command": "csharpRefactor.runApiChanges",
+                "title": "CSharp.Refactor: Run the tool with --api-changes (rewrites the public surface)"
+            },
+            {
+                "command": "csharpRefactor.report",
+                "title": "CSharp.Refactor: Write a SARIF report for this workspace"
+            },
+            {
+                "command": "csharpRefactor.createConfig",
+                "title": "CSharp.Refactor: Create or open the configuration (.editorconfig block)"
+            },
+            {
+                "command": "csharpRefactor.reviewNotes",
+                "title": "CSharp.Refactor: Review advisory notes as a page"
+            }
+        ]
+    },
+    "csharpRefactorBuild": {
+        "analyzers": "0.1.0",
+        "built": "2026-09-19 12:04 UTC"
+    },
+    "scripts": {
+        "compile": "tsc -p ."
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@types/vscode": "^1.75.0",
+        "@vscode/vsce": "^3.1.0",
+        "typescript": "^5.4.0"
+    }
+}

@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- the newest installed runtime: MSBuildWorkspace loads the SDK's own
+         MSBuild, which wants the runtime that SDK shipped with -->
+    <RollForward>LatestMajor</RollForward>
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>csharp-refactor</ToolCommandName>
+    <PackageId>csharp-refactor</PackageId>
+    <Description>Applies the CSharp.Refactor analyzers' quick fixes to C# code from the command line. Point it at a project, a solution, a directory or a glob; --dry-run reports without editing.</Description>
+    <PackageProjectUrl>https://github.com/Thorium/csharp-refactor</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>csharp;analyzers;refactoring;codefix;roslyn;dotnet-tool</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <WarnOn>3390;$(WarnOn)</WarnOn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Out.fs" />
+    <Compile Include="Options.fs" />
+    <Compile Include="Processes.fs" />
+    <Compile Include="FileWalk.fs" />
+    <Compile Include="Workspace.fs" />
+    <Compile Include="Targets.fs" />
+    <Compile Include="LegacyProjects.fs" />
+    <Compile Include="Scripts.fs" />
+    <Compile Include="Reports.fs" />
+    <Compile Include="ConfigFile.fs" />
+    <Compile Include="Sweep.fs" />
+    <Compile Include="Mcp.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Update="FSharp.Core" Version="9.0.303" />
+    <PackageReference Include="Microsoft.Build.Locator" Version="1.9.1" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.0.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.0.0" />
+    <ProjectReference Include="..\CSharp.Refactor.Analyzers\CSharp.Refactor.Analyzers.fsproj" />
+  </ItemGroup>
+
+</Project>

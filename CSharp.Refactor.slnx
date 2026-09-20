@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CSharp.Refactor.Analyzers/CSharp.Refactor.Analyzers.fsproj" />
+    <Project Path="src/CSharp.Refactor.Tool/CSharp.Refactor.Tool.fsproj" />
+  </Folder>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/PerfClaims/PerfClaims.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CSharp.Refactor.Tests/CSharp.Refactor.Tests.fsproj" />
+    <Project Path="tests/CSharp.Refactor.PropertyTests/CSharp.Refactor.PropertyTests.fsproj" />
+    <Project Path="tests/Sample/Sample.csproj" />
+  </Folder>
+</Solution>

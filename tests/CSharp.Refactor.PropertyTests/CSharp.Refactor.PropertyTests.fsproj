@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <GenerateProgramFile>true</GenerateProgramFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- the compile-and-run harness of the example-based suite, shared by
+         link so the two suites cannot drift on how a C# input is compiled -->
+    <Compile Include="..\CSharp.Refactor.Tests\Harness.fs" Link="Harness.fs" />
+    <Compile Include="BoolExpr.fs" />
+    <Compile Include="Bodies.fs" />
+    <Compile Include="Interpreter.fs" />
+    <Compile Include="Programs.fs" />
+    <Compile Include="Mutation.fs" />
+    <Compile Include="RobustnessTests.fs" />
+    <Compile Include="BooleanSemanticsTests.fs" />
+    <Compile Include="FixTests.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="FsCheck.Xunit" Version="3.4.0" />
+    <!-- the harness compiles against the same Roslyn the analyzer was
+         built against (or newer), as the example-based suite does -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\CSharp.Refactor.Analyzers\CSharp.Refactor.Analyzers.fsproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The performance claims, measured: one before/after pair per performance
+       rule, on both axes (wall clock and allocation), in the language the
+       rules rewrite. In-process so no child build is spawned.
+
+           cd benchmarks/PerfClaims; dotnet run -c Release   (a filter such as *CR0023* may follow the two dashes)
+
+       RESULTS.md beside this file records the numbers a rule's default rests on. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.15.2" />
+  </ItemGroup>
+
+</Project>

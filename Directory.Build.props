@@ -1,0 +1,15 @@
+<Project>
+
+  <!-- One version for the whole solution: the analyzers package, the
+       csharp-refactor tool and both editor extensions release in lockstep.
+       Bump HERE (and only here) before tagging. -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>Tuomas Hietanen</Authors>
+    <PackageLicenseExpression>Unlicense</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Thorium/csharp-refactor</RepositoryUrl>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+</Project>
