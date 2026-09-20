@@ -2,6 +2,12 @@
 
 **[Get it from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=TuomasHietanen.cSharp-refactor)**
 
+Tools > CSharp.Refactor -menu to drive the command line tool for the full project:
+
+<img width="343" height="182" alt="image" src="https://github.com/user-attachments/assets/2f5cfa7b-be8d-42bd-84bb-6c366d169483" />
+
+And IDE light bulbs while you type
+
 <img width="1044" height="297" alt="image" src="https://github.com/user-attachments/assets/ad113d88-3536-47e1-b669-fd6e4ca4e776" />
 
 A VSIX whose payload is the analyzer assembly with FSharp.Core beside it,
