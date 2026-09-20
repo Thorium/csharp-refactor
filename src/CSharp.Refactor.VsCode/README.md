@@ -1,5 +1,7 @@
 # CSharp.Refactor for VS Code
 
+**[Get it from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=TuomasHietanen.csharp-refactor-vscode)**
+
 Functional refactoring hints with one-click quick fixes for C#, delivered
 through the C# extension's Roslyn language server.
 
