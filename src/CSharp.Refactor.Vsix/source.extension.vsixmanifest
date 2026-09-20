@@ -22,11 +22,16 @@
       <ProductArchitecture>amd64</ProductArchitecture>
     </InstallationTarget>
   </Installation>
+  <Dependencies>
+    <Dependency Id="Microsoft.Framework.NDP" DisplayName="Microsoft .NET Framework" d:Source="Manual" Version="[4.8,)" />
+  </Dependencies>
   <Prerequisites>
     <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.0,)" DisplayName="Visual Studio core editor" />
     <Prerequisite Id="Microsoft.VisualStudio.Component.Roslyn.LanguageServices" Version="[17.0,)" DisplayName="C# and Visual Basic" />
   </Prerequisites>
   <Assets>
+    <!-- the Tools menu: a registered package, which the analyzer is not -->
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="File" Path="CSharp.Refactor.Vsix.pkgdef" />
     <!-- the diagnostics: an analyzer VS adds to every C# project it opens -->
     <Asset Type="Microsoft.VisualStudio.Analyzer" d:Source="File" Path="CSharp.Refactor.Analyzers.dll" />
     <!-- the light bulbs: the CodeFixProvider is a MEF part -->

@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- the Tools > CSharp.Refactor menu: a classic in-proc Visual Studio
+         package, which devenv hosts on .NET Framework, so this project
+         targets net48 and is Windows/VS-only — deliberately NOT in
+         CSharp.Refactor.slnx (CI builds that on Linux). The analyzers and
+         light bulbs need none of this: Roslyn loads them from the VSIX's
+         analyzer asset. Build it directly:
+             dotnet build src/CSharp.Refactor.Vsix -c Release
+         then create the VSIX with CreateVsix.ps1 (see README.md here). -->
+    <TargetFramework>net48</TargetFramework>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <AutoGenerateBindingRedirects>false</AutoGenerateBindingRedirects>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <IsPackable>false</IsPackable>
+    <Description>The Tools menu of the CSharp.Refactor Visual Studio extension: runs the csharp-refactor tool on the open solution, writes its SARIF report, opens its configuration.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Commands.fs" />
+    <!-- produced by CompileCommandTable below, before resources are gathered -->
+    <EmbeddedResource Include="$(IntermediateOutputPath)CSharpRefactor.cto" LogicalName="Menus.ctmenu" />
+    <!-- and the same table INSIDE a managed resource set, which is the form
+         UseManagedResourcesOnly actually makes the shell look for; written by
+         EmbedCtoResources below. A standalone Menus.ctmenu stream merges
+         nothing, silently. -->
+    <EmbeddedResource Include="$(IntermediateOutputPath)VSPackage.resources" LogicalName="VSPackage.resources" />
+    <EmbeddedResource Include="$(IntermediateOutputPath)CSharpRefactorPackage.resources" LogicalName="CSharpRefactorPackage.resources" />
+    <None Include="CSharpRefactor.vsct" />
+    <None Include="CSharp.Refactor.Vsix.pkgdef" />
+    <None Include="source.extension.vsixmanifest" />
+    <None Include="CreateVsix.ps1" />
+    <None Include="EmbedCto.ps1" />
+    <None Include="README.md" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- the SAME FSharp.Core the analyzers ship with: both dlls sit in one
+         extension folder and share one FSharp.Core.dll -->
+    <PackageReference Update="FSharp.Core" Version="9.0.303" />
+    <!-- the ONE shell dependency: menu commands need a registered package -->
+    <PackageReference Include="Microsoft.VisualStudio.Shell.15.0" Version="17.14.40264" />
+    <PackageReference Include="Microsoft.VisualStudio.Threading" Version="17.14.15" />
+    <!-- VSCT.exe for CompileCommandTable; ExcludeAssets keeps its MSBuild
+         targets out, which is what fights SDK-style fsproj -->
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="17.9.3184" ExcludeAssets="all" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <!-- The command table, compiled and embedded. `UseManagedResourcesOnly =
+       true` on the package attribute means Visual Studio looks for the
+       compiled table as a MANAGED resource named Menus.ctmenu inside this
+       assembly — inside a resource SET (VSPackage.resources), the way the
+       VSSDK's MergeWithCTO produces it. -->
+  <Target Name="EmbedCtoResources" DependsOnTargets="CompileCommandTable" BeforeTargets="PrepareResources" Inputs="$(IntermediateOutputPath)CSharpRefactor.cto" Outputs="$(IntermediateOutputPath)VSPackage.resources;$(IntermediateOutputPath)CSharpRefactorPackage.resources">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\EmbedCto.ps1&quot; -Cto &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)CSharpRefactor.cto&quot; -OutDir &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath.TrimEnd('\'))&quot;" />
+  </Target>
+
+  <Target Name="CompileCommandTable" BeforeTargets="PrepareResources" Inputs="CSharpRefactor.vsct" Outputs="$(IntermediateOutputPath)CSharpRefactor.cto">
+    <PropertyGroup>
+      <VsctBin>$(PkgMicrosoft_VSSDK_BuildTools)\tools\vssdk\bin</VsctBin>
+    </PropertyGroup>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Exec Command="&quot;$(VsctBin)\VSCT.exe&quot; &quot;$(MSBuildProjectDirectory)\CSharpRefactor.vsct&quot; &quot;$(MSBuildProjectDirectory)\$(IntermediateOutputPath)CSharpRefactor.cto&quot; &quot;-I$(VsctBin)\..\inc&quot; -Len-US" />
+  </Target>
+
+</Project>

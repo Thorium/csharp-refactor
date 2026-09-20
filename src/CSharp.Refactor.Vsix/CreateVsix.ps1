@@ -2,9 +2,10 @@
 # payload + extension.vsixmanifest + [Content_Types].xml — assembled by
 # hand here, as the F# side's is, because the VSSDK packaging targets fight
 # SDK-style projects. The payload is the analyzer assembly with FSharp.Core
-# beside it: no package code, no MEF glue of our own — Visual Studio adds a
-# `Microsoft.VisualStudio.Analyzer` asset to every C# project it opens and
-# renders the diagnostics and light bulbs itself.
+# beside it — Visual Studio adds a `Microsoft.VisualStudio.Analyzer` asset to
+# every C# project it opens and renders the diagnostics and light bulbs
+# itself — plus the package assembly behind the Tools > CSharp.Refactor
+# menu, registered by the hand-written pkgdef.
 #
 #     powershell -File CreateVsix.ps1
 #     VSIXInstaller /rootSuffix:Exp artifacts\CSharp.Refactor.vsix   # test instance
@@ -18,6 +19,11 @@ $repo = Resolve-Path (Join-Path $here "..\..")
 dotnet build (Join-Path $repo "src\CSharp.Refactor.Analyzers") -c $Configuration
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# the menu package (net48): its FSharp.Core is the analyzers' version, so
+# the one copy staged below serves both
+dotnet build $here -c $Configuration
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 $staging = Join-Path $here "obj\vsix-staging"
 if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
 New-Item -ItemType Directory -Force $staging | Out-Null
@@ -26,6 +32,13 @@ $bin = Join-Path $repo "src\CSharp.Refactor.Analyzers\bin\$Configuration\netstan
 foreach ($f in "CSharp.Refactor.Analyzers.dll", "CSharp.Refactor.Analyzers.xml", "FSharp.Core.dll") {
     Copy-Item (Join-Path $bin $f) $staging
 }
+
+# the menu commands: the package assembly and its registration. The compiled
+# command table rides inside the assembly as the Menus.ctmenu managed
+# resource (UseManagedResourcesOnly); CreatePkgDef.exe is not used — it must
+# load the fresh assembly, which Application Control denies here
+Copy-Item (Join-Path $here "bin\$Configuration\net48\CSharp.Refactor.Vsix.dll") $staging
+Copy-Item (Join-Path $here "CSharp.Refactor.Vsix.pkgdef") $staging
 Copy-Item (Join-Path $repo "LICENSE") $staging
 Copy-Item (Join-Path $repo "icon.png") $staging
 

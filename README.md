@@ -88,7 +88,11 @@ fixes, and nothing from it reaches your compiled output or your `bin`.
 
 Install the [CSharp.Refactor extension](src/CSharp.Refactor.Vsix/README.md):
 every C# project opened in the IDE gets the suggestions and `Ctrl+.` fixes,
-with no project change and no effect on builds. Or use the package reference
+with no project change and no effect on builds. Its Tools > CSharp.Refactor
+menu runs the `csharp-refactor` tool on the open solution (apply or dry run,
+with or without `--api-changes`), writes the SARIF report, opens the notes
+page and the `.editorconfig` block — the VS Code extension's commands, in
+Visual Studio. Or use the package reference
 above; both work, and a project with both sees each finding once.
 
 ### VS Code
