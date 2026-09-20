@@ -1,5 +1,7 @@
 # CSharp.Refactor for Visual Studio
 
+**[Get it from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=TuomasHietanen.cSharp-refactor)**
+
 A VSIX whose payload is the analyzer assembly with FSharp.Core beside it,
 declared as a `Microsoft.VisualStudio.Analyzer` asset (the diagnostics, added
 to every C# project VS opens) and a `Microsoft.VisualStudio.MefComponent`
