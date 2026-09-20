@@ -93,6 +93,12 @@ let private mutableStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                         let publicToken = modifiers |> Seq.find (fun m -> m.IsKind SyntaxKind.PublicKeyword)
                         let staticToken = modifiers |> Seq.find (fun m -> m.IsKind SyntaxKind.StaticKeyword)
 
+                        // `readonly` compiles only where every write is a static constructor's
+                        // or the initialiser's: a method's write is what the note is about,
+                        // so the offer stands only for the constructor-written case
+                        let readonlyFits =
+                            not selfUpdate && sites |> List.forall (fun w -> w = Index.OwnConstructor)
+
                         Some
                             {
                                 Code = MutableStaticCode
@@ -106,11 +112,12 @@ let private mutableStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                                             MutableStaticCode
                                             [ Suggestion.replace publicToken.Span "private" ]
                                         |> Suggestion.editorOnly
-                                        Suggestion.fix
-                                            "Make it readonly"
-                                            MutableStaticCode
-                                            [ Suggestion.insert staticToken.Span.End " readonly" ]
-                                        |> Suggestion.editorOnly
+                                        if readonlyFits then
+                                            Suggestion.fix
+                                                "Make it readonly"
+                                                MutableStaticCode
+                                                [ Suggestion.insert staticToken.Span.End " readonly" ]
+                                            |> Suggestion.editorOnly
                                     ]
                             }
                     else

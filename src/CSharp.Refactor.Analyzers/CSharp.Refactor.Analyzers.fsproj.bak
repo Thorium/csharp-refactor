@@ -21,7 +21,6 @@
     <PackageProjectUrl>https://github.com/Thorium/csharp-refactor</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Thorium/csharp-refactor</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>csharp;analyzers;refactoring;codefix;roslyn</PackageTags>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <DevelopmentDependency>true</DevelopmentDependency>

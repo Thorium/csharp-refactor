@@ -16,9 +16,11 @@
     <Compile Include="Interpreter.fs" />
     <Compile Include="Programs.fs" />
     <Compile Include="Mutation.fs" />
+    <Compile Include="Decorations.fs" />
     <Compile Include="RobustnessTests.fs" />
     <Compile Include="BooleanSemanticsTests.fs" />
     <Compile Include="FixTests.fs" />
+    <Compile Include="ConventionTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

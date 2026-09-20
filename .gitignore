@@ -14,5 +14,6 @@ src/CSharp.Refactor.VsCode/analyzers/
 src/CSharp.Refactor.VsCode/node_modules/
 src/CSharp.Refactor.VsCode/out/
 src/CSharp.Refactor.VsCode/LICENSE
+src/CSharp.Refactor.VsCode/icon.png
 
 /benchmarks/PerfClaims/BenchmarkDotNet.Artifacts/results/

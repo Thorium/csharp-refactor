@@ -34,7 +34,7 @@ let MonitorCode = "CR0048"
 
 // ---- CR0047 ----
 
-let private weakLocks (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+let private weakLocks (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     let text = tree.GetText()
 
     let lockType = model.Compilation.GetTypeByMetadataName "System.Threading.Lock"
@@ -87,14 +87,19 @@ let private weakLocks (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                             (e :? TypeOfExpressionSyntax)
                             || m.Modifiers |> Seq.exists (fun t -> t.IsKind SyntaxKind.StaticKeyword)
 
+                        // the gate's type and spelling at the file's language version: `Lock` is
+                        // C# 13's, the target-typed `new()` C# 9's
                         let gateType, init =
                             if
                                 not (isNull lockType)
+                                && ctx.LanguageVersion >= LanguageVersion.CSharp13
                                 && Linq.resolvesBare model m.SpanStart "System.Threading" "Lock"
                             then
                                 "Lock", "new()"
-                            else
+                            elif ctx.LanguageVersion >= LanguageVersion.CSharp9 then
                                 "object", "new()"
+                            else
+                                "object", "new object()"
 
                         let indent = Text.leadingWhitespace text m.SpanStart
                         let newline = Text.newlineAt text m.SpanStart
@@ -250,5 +255,5 @@ let private monitorLocks (tree: SyntaxTree) (model: SemanticModel) : Suggestion 
         | _ -> None)
     |> List.ofSeq
 
-let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Suggestion list =
-    weakLocks tree model @ monitorLocks tree model
+let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
+    weakLocks tree model ctx @ monitorLocks tree model

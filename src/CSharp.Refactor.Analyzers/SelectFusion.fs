@@ -75,7 +75,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun node ->
         match node with
-        | :? InvocationExpressionSyntax as outer when isSelect outer ->
+        // inside an expression tree the two lambdas are the provider's to translate as written
+        | :? InvocationExpressionSyntax as outer when isSelect outer && not (Text.insideExpressionTree model outer) ->
             match outer.Expression with
             | :? MemberAccessExpressionSyntax as m ->
                 match m.Expression, simpleLambda outer.ArgumentList.Arguments.[0] with

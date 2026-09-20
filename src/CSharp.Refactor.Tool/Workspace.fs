@@ -9,6 +9,7 @@ module CSharp.Refactor.Tool.Workspace
 open System
 open System.IO
 open System.Text.RegularExpressions
+open Microsoft.CodeAnalysis.Text
 
 let private projectExtensions = [ ".csproj"; ".fsproj"; ".vbproj" ]
 
@@ -247,7 +248,31 @@ let referencersOf (workspace: string list) (project: string) : string list =
 /// so the fallback is done here, as Roslyn's internal loader does it. The
 /// text carries the encoding it was decoded with; the sweep writes it back
 /// the same way.
-let readSource (path: string) : Microsoft.CodeAnalysis.Text.SourceText =
+/// The code page a file that is not UTF-8 is read in: the system's ANSI page on
+/// Windows, Windows-1252 where the platform has none (Linux and macOS answer
+/// UTF-8 to `GetEncoding 0`, which would put U+FFFD back in) — a legacy file
+/// came from a Windows machine.
+let legacyEncoding () : Text.Encoding =
+    Text.Encoding.RegisterProvider Text.CodePagesEncodingProvider.Instance
+    let system = Text.Encoding.GetEncoding 0
+
+    if system.CodePage = 65001 then
+        Text.Encoding.GetEncoding 1252
+    else
+        system
+
+/// Is the text a loader read the text of the file, or did invalid UTF-8 come
+/// back as U+FFFD? Roslyn's own loaders fall back to the system page on
+/// Windows and to UTF-8 elsewhere.
+let replacedInvalidBytes (path: string) (text: SourceText) =
+    text.ToString().Contains(char 0xFFFD)
+    && (try
+            Text.UTF8Encoding(false, true).GetString(File.ReadAllBytes path) |> ignore
+            false
+        with :? Text.DecoderFallbackException ->
+            true)
+
+let readSource (path: string) : SourceText =
     // the code page the fallback decodes with (registering twice is harmless)
     Text.Encoding.RegisterProvider Text.CodePagesEncodingProvider.Instance
     let bytes = File.ReadAllBytes path
@@ -255,15 +280,9 @@ let readSource (path: string) : Microsoft.CodeAnalysis.Text.SourceText =
     let decode (encoding: Text.Encoding) =
         use stream = new MemoryStream(bytes)
 
-        Microsoft.CodeAnalysis.Text.SourceText.From(
-            stream,
-            encoding,
-            Microsoft.CodeAnalysis.Text.SourceHashAlgorithm.Sha1,
-            false,
-            true
-        )
+        SourceText.From(stream, encoding, SourceHashAlgorithm.Sha1, false, true)
 
     try
         decode (Text.UTF8Encoding(false, true))
     with :? Text.DecoderFallbackException ->
-        decode (Text.Encoding.GetEncoding 0)
+        decode (legacyEncoding ())

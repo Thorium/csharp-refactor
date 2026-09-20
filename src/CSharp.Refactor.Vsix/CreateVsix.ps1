@@ -27,6 +27,7 @@ foreach ($f in "CSharp.Refactor.Analyzers.dll", "CSharp.Refactor.Analyzers.xml",
     Copy-Item (Join-Path $bin $f) $staging
 }
 Copy-Item (Join-Path $repo "LICENSE") $staging
+Copy-Item (Join-Path $repo "icon.png") $staging
 
 # the packaged manifest is the PROCESSED form: VS's own build strips the
 # design-time d: namespace before packaging, and the installer's reader

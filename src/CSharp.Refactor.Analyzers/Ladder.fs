@@ -544,19 +544,41 @@ let private fieldKeyword (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCon
 
                     let fieldDecl = declarator.Parent.Parent :?> FieldDeclarationSyntax
 
-                    // every reference to the field in the type is inside this property's accessors
+                    // every reference to the field in the type — every PART of the type, a
+                    // partial one being declared across files — is inside this property's
+                    // accessors; a `nameof` or a string spelling the name (reflection by
+                    // name) reaches the field too
                     let typeDecl = p.Parent :?> TypeDeclarationSyntax
+                    let index = Index.ofCompilation model.Compilation
 
                     let outside =
-                        typeDecl.DescendantNodes()
-                        |> Seq.exists (fun x ->
-                            match x with
-                            | :? IdentifierNameSyntax as id when
-                                id.Identifier.ValueText = backing.Name
-                                && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, backing)
-                                ->
-                                not (p.AccessorList.Span.Contains id.Span)
-                            | _ -> false)
+                        backing.ContainingType.DeclaringSyntaxReferences
+                        |> Seq.exists (fun part ->
+                            let partNode = part.GetSyntax()
+
+                            let partModel =
+                                if partNode.SyntaxTree = tree then
+                                    model
+                                else
+                                    model.Compilation.GetSemanticModel partNode.SyntaxTree
+
+                            partNode.DescendantNodes()
+                            |> Seq.exists (fun x ->
+                                match x with
+                                | :? IdentifierNameSyntax as id when
+                                    id.Identifier.ValueText = backing.Name
+                                    && SymbolEqualityComparer.Default.Equals(
+                                        partModel.GetSymbolInfo(id).Symbol,
+                                        backing
+                                    )
+                                    ->
+                                    not (
+                                        obj.ReferenceEquals(partNode, typeDecl)
+                                        && p.AccessorList.Span.Contains id.Span
+                                    )
+                                | _ -> false))
+                        || Index.namedByNameOf index backing
+                        || Index.mentionedAsString index backing.Name
 
                     let fieldNameTaken =
                         typeDecl.DescendantTokens()

@@ -14,7 +14,6 @@
     <Description>Applies the CSharp.Refactor analyzers' quick fixes to C# code from the command line. Point it at a project, a solution, a directory or a glob; --dry-run reports without editing.</Description>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/csharp-refactor</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/Thorium/csharp-refactor</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>csharp;analyzers;refactoring;codefix;roslyn;dotnet-tool</PackageTags>
     <PackageIcon>icon.png</PackageIcon>

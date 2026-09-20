@@ -186,14 +186,18 @@ module Rules =
         let failures = ResizeArray<string * exn>()
 
         let suggestions =
-            typedNamed
-            |> List.collect (fun (name, rule) ->
-                try
-                    rule tree model ctx
-                with ex ->
-                    failures.Add(name, ex)
-                    [])
-            |> List.filter (notShadowed ctx)
+            // a generated file is the generator's to write, not ours to tidy
+            if Text.isGeneratedFile tree then
+                []
+            else
+                typedNamed
+                |> List.collect (fun (name, rule) ->
+                    try
+                        rule tree model ctx
+                    with ex ->
+                        failures.Add(name, ex)
+                        [])
+                |> List.filter (notShadowed ctx)
 
         let kept =
             suggestions

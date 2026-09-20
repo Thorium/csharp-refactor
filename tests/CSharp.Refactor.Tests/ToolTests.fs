@@ -438,3 +438,100 @@ let ``a legacy project's file that is not UTF-8 is read in the system code page,
         Assert.NotEqual(65001, text.Encoding.CodePage)
     }
     :> System.Threading.Tasks.Task
+
+// ---- the MCP server ----
+
+/// `csharp-refactor --mcp` over stdio, as an agent host drives it: the
+/// handshake, the tool list, `list_rules`, and an `analyze` of a project
+/// that reports its findings and, by default, edits nothing.
+[<Fact>]
+let ``the MCP server answers the handshake, lists its tools and rules, and analyzes a project without editing it`` () =
+    task {
+        let dir = tempDir ()
+
+        do!
+            File.WriteAllTextAsync(
+                Path.Combine(dir, "Sample.csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"
+            )
+
+        let source = "using System;\nclass C { Guid A() => new Guid(); }\n"
+        do! File.WriteAllTextAsync(Path.Combine(dir, "C.cs"), source)
+
+        let toolDll =
+            Path.Combine(Path.GetDirectoryName(typeof<Options>.Assembly.Location), "CSharp.Refactor.Tool.dll")
+
+        let psi =
+            Diagnostics.ProcessStartInfo(
+                "dotnet",
+                $"\"{toolDll}\" --mcp",
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            )
+
+        use p = Diagnostics.Process.Start psi
+        let stderr = p.StandardError.ReadToEndAsync()
+
+        let target = Path.Combine(dir, "Sample.csproj").Replace("\\", "\\\\")
+
+        for request in
+            [
+                """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}"""
+                """{"jsonrpc":"2.0","method":"notifications/initialized"}"""
+                """{"jsonrpc":"2.0","id":2,"method":"tools/list"}"""
+                """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_rules","arguments":{}}}"""
+                $"""{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"analyze","arguments":{{"target":"{target}","codes":"CR0090"}}}}}}"""
+            ] do
+            p.StandardInput.WriteLine request
+
+        p.StandardInput.Close()
+        let! output = p.StandardOutput.ReadToEndAsync()
+
+        if not (p.WaitForExit 300_000) then
+            p.Kill()
+            failwith "the MCP server did not exit when its input closed"
+
+        let responses =
+            output.Split '\n'
+            |> Array.filter (fun l -> l.Trim() <> "")
+            |> Array.map (fun l -> Text.Json.JsonDocument.Parse(l).RootElement)
+
+        let byId (id: int) =
+            responses
+            |> Array.find (fun r ->
+                r.TryGetProperty "id"
+                |> fun (ok, v) -> ok && v.ValueKind = Text.Json.JsonValueKind.Number && v.GetInt32() = id)
+
+        // the handshake names the server
+        Assert.Contains(
+            "csharp-refactor",
+            (byId 1).GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString()
+        )
+
+        let tools =
+            (byId 2).GetProperty("result").GetProperty("tools").EnumerateArray()
+            |> Seq.map (fun t -> t.GetProperty("name").GetString())
+            |> List.ofSeq
+
+        Assert.Equal<string list>([ "analyze"; "list_rules" ], List.sort tools)
+
+        // a tool result carries its JSON as text content
+        let content (r: Text.Json.JsonElement) =
+            r.GetProperty("result").GetProperty("content").[0].GetProperty("text").GetString()
+
+        let rules = Text.Json.JsonDocument.Parse(content (byId 3)).RootElement
+        Assert.Equal(CSharp.Refactor.RuleCatalog.rules.Length, rules.GetArrayLength())
+
+        let analysis = Text.Json.JsonDocument.Parse(content (byId 4)).RootElement
+        Assert.Equal(1, analysis.GetProperty("findingCount").GetInt32())
+        Assert.False(analysis.GetProperty("applied").GetBoolean())
+        Assert.Contains("CR0090", content (byId 4))
+        // a dry run by default: the file is as it was
+        Assert.Equal(source, File.ReadAllText(Path.Combine(dir, "C.cs")))
+        Assert.Equal(0, p.ExitCode)
+        let! _ = stderr
+        ()
+    }
+    :> System.Threading.Tasks.Task

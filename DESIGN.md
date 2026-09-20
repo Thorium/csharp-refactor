@@ -644,8 +644,9 @@ Guards.
   collection filled, or a mutation after the loop stands it down; the
   `Select` lambda must not close over a `ref`/`Span` (cannot be captured).
 - **CR0029** — both calls resolve to `Enumerable.Select` (an `IQueryable`
-  chain is a query the provider translates); both lambdas are expression
-  lambdas; substituting the first body for the second's parameter
+  chain is a query the provider translates), and the chain is not inside an
+  expression tree (there too the lambdas are the provider's as written);
+  both lambdas are expression lambdas; substituting the first body for the second's parameter
   duplicates nothing (the parameter is used once, or the first body is a
   pure atom) and captures nothing (names checked); `Select(x => x)` is
   removed only where the result type is unchanged (typed). Both forms are
@@ -754,7 +755,10 @@ Guards.
 - **CR0047** — typed: the operand is `this`, a `string`, a `Type`, or a
   boxed value type; the editor's lock object lands beside the field the body
   guards or before the enclosing member; `System.Threading.Lock` is offered
-  where it resolves.
+  where it resolves and the file is C# 13; the initialiser is `new()` from
+  C# 9 and `new object()` below.
+  (The gate's language version came out of the property suite: an offer
+  spelled C# 13 into a C# 10 file.)
 - **CR0048** — single-argument `Enter` (the `ref bool taken` overload
   carries protocol), identical operand text in `Enter` and `Exit`, the
   `try`/`finally` immediately follows; a bare `Enter` with no `try` is the
@@ -915,7 +919,10 @@ Guards.
   setters are API (an external caller assigning after construction breaks);
   Entity Framework entities (`DbSet<T>` heuristic) stand down.
 - **CR0084** — churn gate: two or more assignment sites or a self-update;
-  a set-once seam stays quiet; `private`/`internal` types stay quiet.
+  a set-once seam stays quiet; `private`/`internal` types stay quiet. The
+  editor offers `private` always and `readonly` only where every write is
+  a constructor's (a method's write is what the note is about, and
+  `readonly` would not compile there).
 - **CR0086** — the callee is `virtual`/`abstract` on the constructed type or
   a base, not `sealed`-overridden in this type; a `sealed` class stays quiet
   (nothing can override).
@@ -999,6 +1006,8 @@ Guards.
   anchor before a final newline, `RegexOptions` or `MatchEvaluator` overloads;
   the ordinal `StartsWith` overload is spelled.
 - **CR0109** — literal pattern, constant options, single-line construction;
+  a pattern the engine rejects is CR0107's (hoisted into a generated regex
+  it would fail the build, where the call only threw when reached);
   `[GeneratedRegex]` resolvable and the containing type chain declared in
   this file (every part gains `partial`); otherwise a `private static readonly
   Regex` field above the member's doc comment; a name clash is a note; one
@@ -1177,7 +1186,10 @@ Guards.
   vetoes); `System.Threading.Lock` resolves; measured (the dedicated type
   skips the object-header lock path).
 - **CR0153** — the backing field is private, unattributed, and referenced
-  only inside the getter and setter of one property of the same type
+  only inside the getter and setter of one property of the same type —
+  in every part of a partial type, across files; a `nameof` of the field or
+  a string literal spelling its name anywhere in the compilation
+  (reflection by name) vetoes
   (a constructor writing it vetoes — that constructor would have to
   target the property, which changes when the setter runs); no
   `[ThreadStatic]`/`volatile`; the field's initialiser moves to the
@@ -1610,6 +1622,30 @@ A `PackageReference` to the NuGet package. Nothing to build.
   `CompilationWithAnalyzers`: descriptor completeness, `.editorconfig`
   reading, the yields-to gate, generated-code skipping, pragma handling and
   the suppression policy, the deep-stack worker.
+- **Property tests** (`tests/CSharp.Refactor.PropertyTests`, FsCheck): a
+  generated program — a class of members, one shape per rule, 121 of the
+  124 rules reached (CR0017 is CR0160's wherever both read a shape;
+  CR0156/CR0158 need C# 15) — under the invariants every rule promises:
+  every fix compiles, no rule throws on damaged text, fixes reach a fixed
+  point, the boolean rewrites keep the truth table. Where a wrong rewrite
+  would compile, a shape carries a decoy that makes it fail to (an
+  `[Obsolete(error)]` `FormattableString` overload for CR0100/CR0101, a
+  tuple handed to `object` for CR0082). The conventions of real files are
+  properties too: `#region`s, a `#if` and a comment inside a member, CRLF,
+  tabs, a `#pragma` — every fix compiles and leaves what was there; and the
+  language ladder — at every version from C# 7.3 to 13, a fix uses no syntax
+  newer than the file's. Each runs over random programs and, deterministically,
+  over every shape alone. The cross-cutting conditions the F# suite tries rule
+  by rule (shadowing, reflection and `nameof`, expression trees, `dynamic`,
+  `unsafe`, partial types across files, interface and override members,
+  generated files, a framework lacking the type a fix introduces) are the
+  example suite's `CrossCuttingTests`. The 2026-09-20 pass that built this
+  found and fixed: CR0084's `readonly` offer on a method-written field,
+  CR0109 hoisting a pattern the engine rejects, CR0047 spelling `Lock` and
+  `new()` below their versions, CR0009's `or` pattern below C# 9 and a bare
+  LF into a CRLF file, CR0029 fusing inside an expression tree, CR0153 blind
+  to a partial type's other file and to reflection by name, and the tool
+  rewriting files with an `<auto-generated>` header.
 - **Catalog tests** keep `Rules.md` complete: every code has a row and a
   section; category, default, API and priority match the catalog; every F#
   twin named exists in FSharp.Refactor's `Rules.md`.

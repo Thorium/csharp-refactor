@@ -5,6 +5,7 @@ module CSharp.Refactor.Tests.DefectReviewTests
 open Xunit
 open CSharp.Refactor.Roslyn
 open CSharp.Refactor.Tests.Harness
+open Microsoft.CodeAnalysis.CSharp
 
 [<Fact>]
 let ``CR0160 copies an outer loop's variable read from an inner loop, and leaves a cell another closure writes`` () =
@@ -293,3 +294,73 @@ class C
     Assert.Contains("db.ExecuteSqlCommand(\"DELETE FROM \" + table + \" WHERE 1 = 1\")", fixedSource)
     Assert.Contains("db.ExecuteSqlCommand(string.Format(\"DELETE FROM {0} WHERE 1 = 1\", table))", fixedSource)
     Assert.Contains("db.Plain($\"DELETE FROM {table} WHERE 1 = 1\")", fixedSource)
+
+// ---- what the property suite's coverage pass found (2026-09-20) ----
+
+[<Fact>]
+let ``CR0084 offers readonly only where every write is a constructor's`` () =
+    let source =
+        """
+static class Globals
+{
+    public static int Counter;
+    public static int Fixed;
+    static Globals() { Fixed = 1; Fixed = 2; }
+    public static void A() { Counter++; }
+    public static void B() { Counter = 0; }
+}
+"""
+
+    let fired = suggestCode "CR0084" source
+    Assert.Equal<string list>([ "Counter"; "Fixed" ], firedText source fired)
+
+    let titles (name: string) =
+        fired
+        |> List.find (fun s -> normalize source |> fun t -> t.Substring(s.Span.Start, s.Span.Length) = name)
+        |> fun s -> s.Fixes |> List.map (fun f -> f.Title)
+    // a method's write is what the note is about: `readonly` would not compile there
+    Assert.Equal<string list>([ "Make it private" ], titles "Counter")
+    Assert.Equal<string list>([ "Make it private"; "Make it readonly" ], titles "Fixed")
+
+[<Fact>]
+let ``CR0109 leaves a pattern the engine rejects to CR0107`` () =
+    // hoisted into a generated regex it would fail the build, where the call only threw when reached
+    let source =
+        """
+using System.Text.RegularExpressions;
+class C
+{
+    bool A(string s) => Regex.IsMatch(s, "(unclosed");
+}
+"""
+
+    Assert.Empty(suggestCode "CR0109" source)
+    Assert.Equal(1, (suggestCode "CR0107" source).Length)
+
+[<Fact>]
+let ``CR0047's gate and CR0009's or-pattern follow the file's language version`` () =
+    let source =
+        "using System;\nusing System.Threading;\nclass C\n{\n    int count;\n    void A() { lock (this) { count++; } }\n    string B(int k) => k switch\n    {\n        1 => \"a\",\n        2 => \"a\",\n        _ => \"b\",\n    };\n}\n"
+
+    let at (version: LanguageVersion) =
+        let compilation, tree = compileRaw version source
+        suggestRaw compilation tree
+
+    let gate (version: LanguageVersion) =
+        at version
+        |> List.find (fun s -> s.Code = "CR0047")
+        |> fun s -> s.Fixes.Head.Edits.Head.Replacement.Trim()
+
+    Assert.Equal("private readonly object _gate = new object();", gate LanguageVersion.CSharp8)
+
+    Assert.Equal("private readonly object _gate = new();", gate LanguageVersion.CSharp12)
+    Assert.Equal("private readonly Lock _gate = new();", gate LanguageVersion.CSharp13)
+    // an `or` pattern is C# 9's
+    Assert.Empty(at LanguageVersion.CSharp8 |> List.filter (fun s -> s.Code = "CR0009"))
+
+    Assert.Equal(
+        1,
+        at LanguageVersion.CSharp9
+        |> List.filter (fun s -> s.Code = "CR0009")
+        |> List.length
+    )

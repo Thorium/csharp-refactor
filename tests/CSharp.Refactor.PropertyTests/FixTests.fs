@@ -44,7 +44,7 @@ let ``applying fixes one at a time reaches a fixed point, compiling throughout``
 
                 let patched = applyFix source fix
                 let compilation, _ = compile patched
-                let errors = errorsOf compilation
+                let errors = errorsAfterFix compilation
 
                 if not errors.IsEmpty then
                     failwithf

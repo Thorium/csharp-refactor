@@ -38,6 +38,7 @@
     <Compile Include="M3ReviewTests.fs" />
     <Compile Include="DefectTests.fs" />
     <Compile Include="DefectReviewTests.fs" />
+    <Compile Include="CrossCuttingTests.fs" />
     <Compile Include="HostTests.fs" />
     <Compile Include="RulesMdTests.fs" />
     <Compile Include="ToolTests.fs" />

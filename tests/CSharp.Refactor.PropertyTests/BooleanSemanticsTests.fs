@@ -50,7 +50,7 @@ let private rewriteToFixedPoint (body: Body) : int =
 
             let patched = applyFix source fix
             let compilation, _ = compile patched
-            let errors = errorsOf compilation
+            let errors = errorsAfterFix compilation
 
             if not errors.IsEmpty then
                 failwithf

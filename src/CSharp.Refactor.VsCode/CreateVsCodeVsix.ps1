@@ -21,6 +21,7 @@ foreach ($f in "CSharp.Refactor.Analyzers.dll", "CSharp.Refactor.Analyzers.xml",
     Copy-Item (Join-Path $bin $f) $analyzerDir
 }
 Copy-Item (Join-Path $repo "LICENSE") $here -Force
+Copy-Item (Join-Path $repo "icon.png") $here -Force
 
 $repoVersion = [regex]::Match(
     [IO.File]::ReadAllText((Join-Path $repo "Directory.Build.props")),

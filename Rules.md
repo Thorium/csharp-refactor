@@ -372,7 +372,8 @@ Two `Select`s in a row are one, and an identity `Select` is none:
 order, so nothing runs sooner or later; measured (PerfClaims) a third
 faster fused — the runtime does not compose consecutive `Select`s for
 free — so parity holds with margin. Guards:
-both calls resolve to `Enumerable.Select` (an `IQueryable` chain is a query
+both calls resolve to `Enumerable.Select` outside an expression tree (an
+`IQueryable` chain, or a lambda inside `Expression<…>`, is a query
 the provider translates); both lambdas are expression lambdas of one
 parameter; substituting the first body for the second's parameter
 duplicates nothing (the parameter is used once, or the first body is a
@@ -637,7 +638,8 @@ lock on a boxed value: a lock on something any other code can lock too
 (`this` and a `Type` are reachable from anywhere, a string may be interned),
 or on a fresh box every time (a value type). Priority. Note; the editor
 offers a `private readonly Lock _gate = new();` (`object` where
-`System.Threading.Lock` does not resolve), static when the lock was on a
+`System.Threading.Lock` does not resolve or the file is below C# 13, and
+`new object()` below C# 9), static when the lock was on a
 type, inserted before the enclosing member, when the locked thing belongs
 to this file by nature (`this`, a literal, `typeof`); a process-wide
 singleton from elsewhere (`Console.Out`) gets the note alone. F# twin:
@@ -1008,7 +1010,9 @@ the property's effective accessibility.
 `public static int Counter;` — a public mutable static written from two
 or more sites in the compilation, or updated from itself (`Counter++`,
 `Counter += n`), is shared state anything can race on. Note; the editor
-offers `private` and `readonly`. A set-once seam (one assignment site)
+offers `private`, and `readonly` where every write is a constructor's (a
+method's write is what the note is about, and `readonly` would not
+compile there). A set-once seam (one assignment site)
 stays quiet, as do `private`/`internal`, `readonly` and `const` fields.
 F# twin: FR0062. Yields to CA2211.
 
@@ -1243,7 +1247,9 @@ never under a directive; a construction becomes the reference, a static
 call an instance call with the pattern dropped (`Regex.Replace(s, "p",
 "r")` → `PRegex().Replace(s, "r")`); a call carrying a timeout stays, a
 construction carrying one hoists whole as a field. Guards: a literal
-pattern and constant options, on one line, not inside an expression tree;
+pattern the engine accepts (one it rejects is CR0107's: hoisted into a
+generated regex it would fail the build, where the call only threw when
+reached) and constant options, on one line, not inside an expression tree;
 the name comes from the local the result is bound to (`var emitted =
 Regex.Matches(…)` → `EmittedRegex`; a local named for the type itself —
 `regex`, `rx`, `pattern` — names nothing), else the pattern's words of
@@ -1846,8 +1852,11 @@ become `field`, the field declaration goes, its initialiser moves to the
 property. Guards: the field is private, unattributed, not `volatile`,
 of the property's own type (`field` takes that type, and a wider
 backing field would change what the accessors compute); a constructor or
-any other member referencing it vetoes (a constructor writing it would
-have to target the property, which changes when the setter runs); the
+any other member referencing it — in any part of a partial type, across
+files — vetoes (a constructor writing it would have to target the
+property, which changes when the setter runs); a `nameof` of the field or
+a string literal spelling its name anywhere in the compilation (reflection
+by name) vetoes; the
 initialiser, which moves among the initialisers in textual order, is
 pure; the name `field` is not already an identifier in the type (the
 contextual keyword would shadow it); no comment on the field line.

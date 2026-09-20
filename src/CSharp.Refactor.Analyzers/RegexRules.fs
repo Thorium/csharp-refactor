@@ -376,7 +376,15 @@ let private hoists (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
             && not (Text.insideExpressionTree model n)
             ->
             match literalOf pattern, optionsOf model args.Arguments with
-            | Some(patternText, patternToken), Some _ ->
+            // a pattern the engine rejects is CR0107's: hoisted into a generated regex
+            // it would fail the build, where the call only threw when reached
+            | Some(patternText, patternToken), Some options when
+                (try
+                    Regex(patternText, defaultArg options RegexOptions.None) |> ignore
+                    true
+                 with :? ArgumentException ->
+                     false)
+                ->
                 let staticCall =
                     match n with
                     | :? InvocationExpressionSyntax -> true

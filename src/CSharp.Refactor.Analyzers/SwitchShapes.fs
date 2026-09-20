@@ -180,11 +180,13 @@ let private labelBindsNothing (l: SwitchLabelSyntax) =
 
 let private hasComment (node: SyntaxNode) = Text.holdsCommentOrDirective node
 
-let private endOfLine (token: SyntaxToken) =
+/// The line break after a token: its own where it ends a line, else the
+/// file's (a `case 1: return x;` on one line has none of its own).
+let private endOfLine (text: SourceText) (token: SyntaxToken) =
     token.TrailingTrivia
     |> Seq.tryFind (fun t -> t.IsKind SyntaxKind.EndOfLineTrivia)
     |> Option.map (fun t -> t.ToString())
-    |> Option.defaultValue "\n"
+    |> Option.defaultValue (Text.newlineAt text token.SpanStart)
 
 /// Contiguous runs of a list, grouped by a key.
 let private runsBy (key: 'a -> string option) (items: 'a list) : 'a list list =
@@ -199,7 +201,7 @@ let private runsBy (key: 'a -> string option) (items: 'a list) : 'a list list =
 
     go [] [] None items
 
-let private mergeArms (root: SyntaxNode) (text: SourceText) (wrapColumn: int) : Suggestion list =
+let private mergeArms (root: SyntaxNode) (text: SourceText) (wrapColumn: int) (orPatterns: bool) : Suggestion list =
     let sections =
         root.DescendantNodes()
         |> Seq.choose (fun n ->
@@ -234,7 +236,7 @@ let private mergeArms (root: SyntaxNode) (text: SourceText) (wrapColumn: int) : 
                                     let colon = lastLabel.ColonToken
                                     let lastStatement = sec.Statements.[sec.Statements.Count - 1]
                                     let span = TextSpan.FromBounds(colon.Span.End, lastStatement.FullSpan.End)
-                                    Suggestion.replace span (endOfLine colon))
+                                    Suggestion.replace span (endOfLine text colon))
 
                             let first = run.Head
                             let last = run.[run.Length - 1]
@@ -247,7 +249,8 @@ let private mergeArms (root: SyntaxNode) (text: SourceText) (wrapColumn: int) : 
                                     Fixes = [ Suggestion.fix "Stack the labels" MergeCode edits ]
                                 })
                 )
-            | :? SwitchExpressionSyntax as s ->
+            // an `or` pattern is C# 9's: below it the arms stay as they are
+            | :? SwitchExpressionSyntax as s when orPatterns ->
                 let runs =
                     s.Arms
                     |> List.ofSeq
@@ -289,7 +292,7 @@ let private mergeArms (root: SyntaxNode) (text: SourceText) (wrapColumn: int) : 
                                 if armColumn + oneLine.Length + 1 <= wrapColumn then
                                     " or "
                                 else
-                                    "\n" + String(' ', armColumn + 4) + "or "
+                                    Text.newlineAt text run.Head.SpanStart + String(' ', armColumn + 4) + "or "
 
                             let patterns =
                                 dropped |> List.map (fun a -> a.Pattern.ToString()) |> String.concat joiner
@@ -522,5 +525,5 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
     let wrapColumn = RuleContext.wrapColumn ctx MergeCode
 
     guardIsConstant root model
-    @ mergeArms root (tree.GetText()) wrapColumn
+    @ mergeArms root (tree.GetText()) wrapColumn (ctx.LanguageVersion >= LanguageVersion.CSharp9)
     @ unimplemented root model

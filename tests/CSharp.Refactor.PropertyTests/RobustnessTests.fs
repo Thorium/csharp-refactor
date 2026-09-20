@@ -21,7 +21,7 @@ let private checkFixes (source: string) =
         for fix in s.Fixes do
             let patched = applyFix source fix
             let compilation, _ = compile patched
-            let errors = errorsOf compilation
+            let errors = errorsAfterFix compilation
 
             if not errors.IsEmpty then
                 failwithf
@@ -56,14 +56,25 @@ let ``no rule throws on a damaged program, and fixes on a still-compiling one ke
             checkFixes damaged)
 
 /// The generators exist to reach the rules: if a shape stops firing its
-/// rule (a rule tightened, a shape drifted), this says which.
+/// rule (a rule tightened, a shape drifted), this says which. Every shape
+/// is tried on its own — deterministic, where a sample could miss a rare
+/// one — and once more with every other shape beside it, since a rule may
+/// hold in company it fires without.
 [<Fact>]
-let ``every targeted rule fires somewhere in a sample of programs`` () =
+let ``every targeted rule fires from the shapes written for it`` () =
     let fired = Collections.Generic.HashSet<string>()
 
-    for shapes in Gen.sampleWithSize 40 120 Programs.genProgram do
-        for s in suggest (Programs.program shapes) do
+    for shape in Programs.exemplars do
+        for s in suggest (Programs.program [ shape ]) do
             fired.Add s.Code |> ignore
 
     let missing = Programs.targetedCodes |> List.filter (fired.Contains >> not)
-    Assert.True(missing.IsEmpty, $"rules the generated programs never reached: %A{missing}")
+    Assert.True(missing.IsEmpty, $"rules no shape alone reaches: %A{missing}")
+
+    let together = Collections.Generic.HashSet<string>()
+
+    for s in suggest (Programs.program Programs.exemplars) do
+        together.Add s.Code |> ignore
+
+    let held = Programs.targetedCodes |> List.filter (together.Contains >> not)
+    Assert.True(held.IsEmpty, $"rules that fire alone but not beside every other shape: %A{held}")

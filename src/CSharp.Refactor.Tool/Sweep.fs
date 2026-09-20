@@ -900,6 +900,25 @@ let private loadProject (workspace: MSBuildWorkspace) (path: string) : Workspace
             ensureRestored path
             workspace.OpenProjectAsync(path).Wait()
 
+            // a file that is not UTF-8: Roslyn's loader falls back to the system
+            // page on Windows and replaces the bytes with U+FFFD elsewhere; the
+            // document takes the text read the one way, so the sweep writes the
+            // file back as it came in on every platform
+            let mutable solution = workspace.CurrentSolution
+
+            for project in workspace.CurrentSolution.Projects do
+                if not (isNull project.FilePath) && Workspace.samePath project.FilePath path then
+                    for document in project.Documents do
+                        if
+                            not (isNull document.FilePath)
+                            && File.Exists document.FilePath
+                            && Workspace.replacedInvalidBytes document.FilePath (document.GetTextAsync().Result)
+                        then
+                            solution <- solution.WithDocumentText(document.Id, Workspace.readSource document.FilePath)
+
+            if not (obj.ReferenceEquals(solution, workspace.CurrentSolution)) then
+                workspace.TryApplyChanges solution |> ignore
+
         workspace :> Workspace,
         workspace.CurrentSolution.Projects
         |> Seq.filter (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)

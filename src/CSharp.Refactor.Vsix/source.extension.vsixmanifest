@@ -9,6 +9,7 @@
     <Description xml:space="preserve">Functional refactoring hints and one-click quick fixes for C#: the CSharp.Refactor Roslyn analyzers, applied to every C# project opened in Visual Studio.</Description>
     <MoreInfo>https://github.com/Thorium/csharp-refactor</MoreInfo>
     <License>LICENSE</License>
+    <Icon>icon.png</Icon>
   </Metadata>
   <Installation>
     <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.0,19.0)">

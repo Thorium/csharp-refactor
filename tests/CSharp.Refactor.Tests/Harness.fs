@@ -78,10 +78,18 @@ let errorsOf (compilation: Compilation) =
     |> Seq.map (fun d -> d.ToString())
     |> List.ofSeq
 
+/// The errors a fixed program may carry: a source generator's pending body
+/// (CS8795 under `[GeneratedRegex]`) is the build's to supply, not the harness's.
+let errorsAfterFix (compilation: Compilation) =
+    compilation.GetDiagnostics()
+    |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error && d.Id <> "CS8795")
+    |> Seq.map (fun d -> d.ToString())
+    |> List.ofSeq
+
 /// The source must compile clean: a test over a broken fragment tests nothing.
 let compileClean (source: string) =
     let compilation, tree = compile source
-    let errors = errorsOf compilation
+    let errors = errorsAfterFix compilation
 
     if not errors.IsEmpty then
         failwithf "test input does not compile:\n%s" (String.Join("\n", errors))
@@ -169,3 +177,34 @@ let fixAll (code: string) (source: string) : string = fixAllWith None code sourc
 let firedText (source: string) (suggestions: Suggestion list) =
     let source = normalize source
     suggestions |> List.map (fun s -> source.Substring(s.Span.Start, s.Span.Length))
+
+/// Compile the source AS IS — its own line endings, at a chosen language
+/// version — for the properties that watch what a fix does to the file's
+/// conventions, which `compile`'s normalisation would hide.
+let compileRaw (version: LanguageVersion) (source: string) : CSharpCompilation * SyntaxTree =
+    let tree =
+        CSharpSyntaxTree.ParseText(source, CSharpParseOptions(version), path = "Sample.cs")
+
+    let compilation =
+        CSharpCompilation.Create(
+            "Test",
+            [ tree ],
+            references,
+            CSharpCompilationOptions(
+                OutputKind.DynamicallyLinkedLibrary,
+                nullableContextOptions = NullableContextOptions.Enable
+            )
+        )
+
+    compilation, tree
+
+/// Every rule over a raw compilation: the context reads the language
+/// version off the tree, as the analyzer does.
+let suggestRaw (compilation: CSharpCompilation) (tree: SyntaxTree) : Suggestion list =
+    let model = compilation.GetSemanticModel(tree, false)
+    Rules.all tree model (Context.forTree None compilation tree false)
+
+/// A fix's edits applied to the text as it is, nothing normalised.
+let applyFixRaw (source: string) (fix: Fix) : string =
+    let text = SourceText.From source
+    text.WithChanges(fix.Edits |> List.map (fun e -> TextChange(e.Span, e.Replacement))).ToString()

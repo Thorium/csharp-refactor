@@ -53,6 +53,9 @@ type CompilationIndex =
         /// Identifier uses of fields, properties, locals, parameters and
         /// methods, by symbol (the name part of a member access included).
         Uses: Dictionary<ISymbol, Use list>
+        /// Every string literal's value in the compilation: a member named by one
+        /// (`GetField("_count")`, `GetProperty("Id")`) is reached by reflection.
+        MentionedStrings: HashSet<string>
     }
 
 let private comparer = SymbolEqualityComparer.Default
@@ -64,6 +67,7 @@ let private build (compilation: Compilation) : CompilationIndex =
     let identity = HashSet<ISymbol>(comparer)
     let derived = HashSet<ISymbol>(comparer)
     let hostile = HashSet<ISymbol>(comparer)
+    let mentionedStrings = HashSet<string>()
     let formatted = HashSet<ISymbol>(comparer)
     let constructions = Dictionary<ISymbol, (bool * Set<string>) list>(comparer)
     let derivedTypes = Dictionary<ISymbol, INamedTypeSymbol list>(comparer)
@@ -158,6 +162,8 @@ let private build (compilation: Compilation) : CompilationIndex =
 
         for n in tree.GetRoot().DescendantNodes() do
             match n with
+            | :? LiteralExpressionSyntax as lit when lit.IsKind SyntaxKind.StringLiteralExpression ->
+                mentionedStrings.Add(string lit.Token.Value) |> ignore
             | :? IdentifierNameSyntax as id when candidateNames.Contains id.Identifier.ValueText ->
                 // only the symbols a shape rule asks about: tuple-typed slots, DateTime
                 // slots, public mutable statics
@@ -387,6 +393,7 @@ let private build (compilation: Compilation) : CompilationIndex =
         Constructions = constructions
         DerivedTypes = derivedTypes
         Uses = uses
+        MentionedStrings = mentionedStrings
     }
 
 let private table = ConditionalWeakTable<Compilation, Lazy<CompilationIndex>>()
@@ -426,3 +433,7 @@ let derivedTypesOf (index: CompilationIndex) (t: ITypeSymbol) =
     | _ -> []
 
 let namedByNameOf (index: CompilationIndex) (s: ISymbol) = index.NameOfTargets.Contains s
+
+/// Is the name spelled as a string anywhere in the compilation — the
+/// shape of `GetField("name")`, `GetProperty("name")`, a binder's key?
+let mentionedAsString (index: CompilationIndex) (name: string) = index.MentionedStrings.Contains name
