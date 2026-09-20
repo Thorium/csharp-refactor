@@ -2,6 +2,8 @@
 
 **[Get it from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=TuomasHietanen.csharp-refactor-vscode)**
 
+<img width="1227" height="215" alt="image" src="https://github.com/user-attachments/assets/1259c256-cad4-4f4c-8b41-1c6a0bdbd5e1" />
+
 Functional refactoring hints with one-click quick fixes for C#, delivered
 through the C# extension's Roslyn language server.
 
