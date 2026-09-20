@@ -1,6 +1,6 @@
 # CSharp.Refactor
 
-> The C# twin of [FSharp.Refactor](https://github.com/Thorium/fsharp-refactor)
+> The C# little-sister of [FSharp.Refactor](https://github.com/Thorium/fsharp-refactor)
 
 Functional refactoring suggestions for C#, implemented in F# on Roslyn.
 The rules care about correctness, measured performance and clear
@@ -13,8 +13,6 @@ conventions.
 
 Suggestions are `Info` severity: they mark an opportunity, not a defect, and
 never gate your build.
-
-<img width="1044" height="297" alt="image" src="https://github.com/user-attachments/assets/762ff17d-2c58-4c8a-ae27-569117b88d4e" />
 
 Status: pre-release. Every rule of the v1 catalog (124 rules across
 families A–J) is implemented and swept over real repositories; the
@@ -50,6 +48,14 @@ csharp-refactor Your.csproj
 It refuses a compilation that does not already build, recompiles in memory
 after every pass, and builds the project for real at the end, putting the
 fixes back if that fails.
+
+#### For light bulbs while you type, see [VS Code / Ionide](#vs-code) and [Visual Studio](#visual-studio-2022--2026) IDE-plugin instructions below.
+
+<img width="1044" height="297" alt="image" src="https://github.com/user-attachments/assets/762ff17d-2c58-4c8a-ae27-569117b88d4e" />
+
+#### For agentic scenarios the dotnet tool supports MCP.
+
+Using the tool:
 
 Point it at whatever you have — the kind is read off the path:
 
