@@ -14,6 +14,8 @@ conventions.
 Suggestions are `Info` severity: they mark an opportunity, not a defect, and
 never gate your build.
 
+<img width="1044" height="297" alt="image" src="https://github.com/user-attachments/assets/762ff17d-2c58-4c8a-ae27-569117b88d4e" />
+
 Status: pre-release. Every rule of the v1 catalog (124 rules across
 families A–J) is implemented and swept over real repositories; the
 cross-project edit sets, the editor extensions and the publishing scripts
@@ -22,6 +24,7 @@ are still open. The design and the rule catalog with its guards are in
 (kept complete by tests, and the target of every finding's help link, e.g.
 `Rules.md#cr0025--performance`); [CHANGELOG.md](CHANGELOG.md) has every
 version's notes.
+
 
 ---
 
