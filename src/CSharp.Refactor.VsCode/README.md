@@ -2,7 +2,14 @@
 
 **[Get it from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=TuomasHietanen.csharp-refactor-vscode)**
 
+View -> Command Palette -> CSharp.Refactor to drive the command line tool for the full project:
+
+<img width="493" height="185" alt="image" src="https://github.com/user-attachments/assets/1f14b4ed-5277-4d6a-be18-681fa8b14f32" />
+
+And IDE light bulbs while you type
+
 <img width="1227" height="215" alt="image" src="https://github.com/user-attachments/assets/1259c256-cad4-4f4c-8b41-1c6a0bdbd5e1" />
+
 
 Functional refactoring hints with one-click quick fixes for C#, delivered
 through the C# extension's Roslyn language server.
