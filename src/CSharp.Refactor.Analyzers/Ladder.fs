@@ -191,7 +191,7 @@ let private requiredMembers (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
     if not (RuleContext.languageAtLeast ctx 11) then
         []
     else
-        let index = Index.ofCompilation model.Compilation
+        let index = lazy (Index.ofCompilation model.Compilation)
 
         tree.GetRoot().DescendantNodes()
         |> Seq.choose (fun n ->
@@ -221,14 +221,14 @@ let private requiredMembers (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                      || property.ContainingType.TypeKind = TypeKind.Struct)
                     && not (serialized property)
                     && not (serialized property.ContainingType)
-                    && not (Index.isEntity index property.ContainingType)
+                    && not (Index.isEntity index.Value property.ContainingType)
                     && shapeOpen ctx property
                     && property.ExplicitInterfaceImplementations.IsEmpty
                     ->
-                    let writes = Index.writesOf index property
+                    let writes = Index.writesOf index.Value property
 
                     // every write an initialiser, and every construction of the type an initialiser setting it
-                    let constructions = Index.constructionsOf index property.ContainingType
+                    let constructions = Index.constructionsOf index.Value property.ContainingType
 
                     let everyConstructionSets =
                         not constructions.IsEmpty
@@ -244,22 +244,23 @@ let private requiredMembers (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                         // `required` goes after the accessibility
                         let edit = Suggestion.insert p.Type.SpanStart "required "
 
-                        if Guards.speculativeCheck model [ edit ] then
-                            Some
-                                {
-                                    Code = RequiredCode
-                                    Message =
-                                        "Every construction sets the property and nothing else does: 'required' makes the compiler keep it so"
-                                    Span = p.Identifier.Span
-                                    Fixes = [ Suggestion.fix "Make it required" RequiredCode [ edit ] ]
-                                }
-                        else
-                            None
+                        Some(
+                            {
+                                Code = RequiredCode
+                                Message =
+                                    "Every construction sets the property and nothing else does: 'required' makes the compiler keep it so"
+                                Span = p.Identifier.Span
+                                Fixes = [ Suggestion.fix "Make it required" RequiredCode [ edit ] ]
+                            },
+                            [ edit ]
+                        )
                     else
                         None
                 | _ -> None
             | _ -> None)
         |> List.ofSeq
+        // a model file of forty such properties is one re-bind, not forty
+        |> Guards.speculativeCheckEach model
 
 // ---- CR0150 ----
 

@@ -21,6 +21,8 @@
     <Compile Include="BooleanSemanticsTests.fs" />
     <Compile Include="FixTests.fs" />
     <Compile Include="ConventionTests.fs" />
+    <Compile Include="RegexClaimTests.fs" />
+    <Compile Include="StringClaimTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

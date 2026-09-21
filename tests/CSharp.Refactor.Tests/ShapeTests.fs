@@ -163,3 +163,50 @@ class Outer
     Assert.Contains("public DateTimeOffset LastSeen { get; set; }", fixedSource)
     Assert.Contains("LastSeen = DateTimeOffset.UtcNow;", fixedSource)
     Assert.Contains("DateTime day = DateTime.Now;", fixedSource)
+
+// ---- CR0172, the field half ----
+
+[<Fact>]
+let ``a static readonly field of a constant becomes const; a public one only under the API gate, a written or attributed one never``
+    ()
+    =
+    let source =
+        """
+using System;
+public class C
+{
+    static readonly string Prefix = "v";
+    private static readonly int Retries = 3, Timeout = 30;
+    internal static readonly double Ratio = 1.5;
+    public static readonly string PublicName = "pub";
+    protected static readonly string ProtectedName = "prot";
+    static readonly string Rewritten = "a";
+    [ThreadStatic] static readonly int Slotted = 1;
+    static readonly int[] Table = { 1, 2 };
+    static readonly string Empty = string.Empty;
+    static readonly DateTime When = DateTime.MinValue;
+    static C() { Rewritten = "b"; }
+    string M() => Prefix + Retries + Timeout + Ratio + PublicName + ProtectedName + Rewritten + Slotted + Table.Length + Empty + When;
+}
+"""
+
+    Assert.Equal<string list>(
+        [
+            "string Prefix = \"v\""
+            "int Retries = 3, Timeout = 30"
+            "double Ratio = 1.5"
+        ],
+        suggestCode "CR0172" source |> firedText source
+    )
+
+    let fixedSource = fixAll "CR0172" source
+    Assert.Contains("    const string Prefix = \"v\";", fixedSource)
+    Assert.Contains("    private const int Retries = 3, Timeout = 30;", fixedSource)
+    Assert.Contains("    internal const double Ratio = 1.5;", fixedSource)
+    Assert.Contains("    public static readonly string PublicName = \"pub\";", fixedSource)
+    Assert.Contains("    static readonly string Rewritten = \"a\";", fixedSource)
+
+    let opened = suggestCodeWith apiOpen "CR0172" source |> firedText source
+    Assert.Contains("string PublicName = \"pub\"", opened)
+    Assert.Contains("string ProtectedName = \"prot\"", opened)
+    Assert.Contains("    public const string PublicName = \"pub\";", fixAllWith apiOpen "CR0172" source)

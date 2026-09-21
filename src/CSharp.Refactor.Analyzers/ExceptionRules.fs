@@ -3,7 +3,11 @@
 /// CR0064 (correctness, note): a catch-all that swallows — `catch { }`,
 /// `catch (Exception) { return null; }`, `catch (Exception e) when
 /// (flag)` never reading `e` — hides every failure, the ones it did not
-/// mean too. Note; the editor offers are v2. Not a swallow: a handler
+/// mean too. Note; the editor offers FR0055's three repairs — a guard where
+/// the body is one integer division by a name, `catch (Exception ex) when
+/// (ex is IOException or UnauthorizedAccessException)` where the body does
+/// file IO, and a log line in the file's own logging idiom as the
+/// handler's first statement. Not a swallow: a handler
 /// that reads the exception (logs it, inspects it) or rethrows; a
 /// comment on the handler (the author's own acknowledgement); the `bool`
 /// probe idiom (`try { …; return true; } catch { return false; }`, the
@@ -182,6 +186,209 @@ let private probeNames =
             "Path.GetFullPath"
         ]
 
+/// The types a file operation throws for, spelled at a position.
+let private ioCatchTypes (model: SemanticModel) (position: int) =
+    [
+        Guards.typeText model position "System.IO" "IOException"
+        Guards.typeText model position "System" "UnauthorizedAccessException"
+    ]
+
+let private ioSmell =
+    System.Text.RegularExpressions.Regex(
+        @"\b(File|Directory|Path|FileInfo|DirectoryInfo|FileStream|StreamReader|StreamWriter|BinaryReader|BinaryWriter)\b",
+        System.Text.RegularExpressions.RegexOptions.Compiled
+    )
+
+/// The file's own logging idiom: the receiver of a `LogError`/`LogWarning`
+/// (Microsoft.Extensions.Logging) or `Log.Error` (Serilog) call anywhere
+/// in the file, and how it spells an error with an exception.
+let private loggingIdiom (tree: SyntaxTree) : (string -> string -> string) option =
+    tree.GetRoot().DescendantNodes()
+    |> Seq.tryPick (fun n ->
+        match n with
+        | :? InvocationExpressionSyntax as inv ->
+            match inv.Expression with
+            | :? MemberAccessExpressionSyntax as m ->
+                let name = m.Name.Identifier.ValueText
+                let receiver = m.Expression.ToString()
+
+                if name = "LogError" || name = "LogWarning" || name = "LogInformation" then
+                    Some(fun ex msg -> $"{receiver}.LogError({ex}, \"{msg}\");")
+                elif receiver = "Log" && (name = "Error" || name = "Warning" || name = "Information") then
+                    Some(fun ex msg -> $"Log.Error({ex}, \"{msg}\");")
+                else
+                    None
+            | _ -> None
+        | _ -> None)
+
+/// The editor's offers on a plain swallow, FR0055's: a guard where the
+/// body is one integer division by a name (the catch was a zero test), a
+/// narrower catch where the body does file IO, and a log line in the
+/// file's own logging idiom as the handler's first statement. Editor-only:
+/// whether the catch can go is the author's call, and a sweep notes.
+let private swallowOffers
+    (tree: SyntaxTree)
+    (model: SemanticModel)
+    (tryStmt: TryStatementSyntax)
+    (c: CatchClauseSyntax)
+    : Fix list =
+    let text = tree.GetText()
+    let newline = Text.newlineAt text tryStmt.SpanStart
+    let indent = Text.leadingWhitespace text tryStmt.SpanStart
+
+    let binder =
+        if isNull c.Declaration || c.Declaration.Identifier.IsKind SyntaxKind.None then
+            None
+        else
+            Some c.Declaration.Identifier.ValueText
+
+    // the value the handler answers with, for the guard
+    let fallback =
+        match lastStatement c.Block with
+        | Some(:? ReturnStatementSyntax as r) when not (isNull r.Expression) && c.Block.Statements.Count = 1 ->
+            Some r.Expression
+        | _ -> None
+
+    let integral (e: ExpressionSyntax) =
+        match model.GetTypeInfo(e).Type with
+        | null -> false
+        | t ->
+            match t.SpecialType with
+            | SpecialType.System_Int32
+            | SpecialType.System_Int64
+            | SpecialType.System_Int16
+            | SpecialType.System_Byte
+            | SpecialType.System_SByte
+            | SpecialType.System_UInt16
+            | SpecialType.System_UInt32
+            | SpecialType.System_UInt64
+            | SpecialType.System_Decimal -> true
+            | _ -> false
+
+    // 1. the guard: `try { return a / b; } catch { return d; }` is
+    //    `if (b == 0) return d; return a / b;` — nothing else in the body throws
+    let guard =
+        match tryStmt.Block.Statements |> List.ofSeq, fallback with
+        | [ :? ReturnStatementSyntax as r ], Some d when
+            tryStmt.Catches.Count = 1
+            && isNull tryStmt.Finally
+            && not (isNull r.Expression)
+            && (match r.Expression with
+                | :? BinaryExpressionSyntax as b ->
+                    b.IsKind SyntaxKind.DivideExpression
+                    && not (b.Right :? LiteralExpressionSyntax)
+                    && integral b.Right
+                    && Guards.isPureExpression model b.Left
+                    && Guards.isPureExpression model b.Right
+                | _ -> false)
+            ->
+            let b = r.Expression :?> BinaryExpressionSyntax
+
+            let replacement =
+                $"if ({b.Right} == 0) return {d};"
+                + newline
+                + indent
+                + $"return {b.Left} / {b.Right};"
+
+            let edits = [ Suggestion.replace tryStmt.Span replacement ]
+
+            if Guards.speculativeCheck model edits then
+                [
+                    Suggestion.fix "Guard the divisor instead of catching" SwallowCode edits
+                    |> Suggestion.editorOnly
+                ]
+            else
+                []
+        | _ -> []
+
+    // 2. the narrower catch, where the body is ONE statement whose every call
+    //    is System.IO's — a read followed by a parse would let the parser's
+    //    exception escape (the F# side's FR0055 undid exactly that on three
+    //    repositories before it drew this line)
+    let onlyIo =
+        tryStmt.Block.Statements.Count = 1
+        && ioSmell.IsMatch(tryStmt.Block.ToString())
+        && tryStmt.Block.DescendantNodes()
+           |> Seq.forall (fun n ->
+               match n with
+               | :? InvocationExpressionSyntax
+               | :? BaseObjectCreationExpressionSyntax ->
+                   match model.GetSymbolInfo(n).Symbol with
+                   | :? IMethodSymbol as ms -> ms.ContainingNamespace.ToDisplayString() = "System.IO"
+                   | _ -> false
+               | _ -> true)
+
+    let narrower =
+        if onlyIo then
+            let name = binder |> Option.defaultValue "ex"
+            let types = ioCatchTypes model c.SpanStart
+            let exception' = Guards.typeText model c.SpanStart "System" "Exception"
+
+            let declaration =
+                $"({exception'} {name}) when ({name} is {types.[0]} or {types.[1]})"
+
+            let edits =
+                if isNull c.Declaration then
+                    [ Suggestion.insert c.CatchKeyword.Span.End (" " + declaration) ]
+                else
+                    [ Suggestion.replace c.Declaration.Span declaration ]
+
+            if Guards.speculativeCheck model edits then
+                [
+                    Suggestion.fix "Catch the IO failures only" SwallowCode edits
+                    |> Suggestion.editorOnly
+                ]
+            else
+                []
+        else
+            []
+
+    // 3. a log line in the file's own idiom, as the handler's first statement
+    let logging =
+        match loggingIdiom tree with
+        | Some spell ->
+            let name = binder |> Option.defaultValue "ex"
+
+            let methodName =
+                match Text.enclosingMember c with
+                | :? MethodDeclarationSyntax as m -> m.Identifier.ValueText
+                | :? ConstructorDeclarationSyntax as m -> m.Identifier.ValueText
+                | _ -> "the operation"
+
+            let bodyIndent =
+                match c.Block.Statements |> Seq.tryHead with
+                | Some s -> Text.leadingWhitespace text s.SpanStart
+                | None -> Text.leadingWhitespace text c.SpanStart + "    "
+
+            let braceLine = text.Lines.GetLineFromPosition c.Block.OpenBraceToken.SpanStart
+
+            if braceLine.ToString().Trim() <> "{" then
+                []
+            else
+                let line = spell name $"{methodName} failed"
+
+                let edits =
+                    [
+                        if binder.IsNone then
+                            let exception' = Guards.typeText model c.SpanStart "System" "Exception"
+
+                            if isNull c.Declaration then
+                                Suggestion.insert c.CatchKeyword.Span.End $" ({exception'} {name})"
+                            else
+                                Suggestion.replace c.Declaration.Span $"({c.Declaration.Type} {name})"
+                        Suggestion.insert braceLine.EndIncludingLineBreak (bodyIndent + line + newline)
+                    ]
+
+                if Guards.speculativeCheck model edits then
+                    [
+                        Suggestion.fix "Log the exception" SwallowCode edits |> Suggestion.editorOnly
+                    ]
+                else
+                    []
+        | None -> []
+
+    guard @ narrower @ logging
+
 let private swallows (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     if Text.isTestFile tree then
         []
@@ -281,12 +488,13 @@ let private swallows (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
                             c.CatchKeyword.Span
                     )
                 else
-                    Some(
-                        Suggestion.note
-                            SwallowCode
-                            "A catch-all that never reads the exception swallows every failure, the ones it did not mean too: catch the type expected, log it, or rethrow"
-                            c.CatchKeyword.Span
-                    )
+                    Some
+                        { Suggestion.note
+                              SwallowCode
+                              "A catch-all that never reads the exception swallows every failure, the ones it did not mean too: catch the type expected, log it, or rethrow"
+                              c.CatchKeyword.Span with
+                            Fixes = swallowOffers tree model tryStmt c
+                        }
             | _ -> None)
         |> List.ofSeq
 
@@ -748,12 +956,59 @@ let private exceptionDetails (tree: SyntaxTree) (model: SemanticModel) : Suggest
                     if readsMessage && not (members |> List.exists reads) then
                         let all = String.concat "/" members
 
-                        Some(
-                            Suggestion.note
-                                ExceptionDetailCode
-                                $"'{t.Name}' carries the detail in '{members.Head}' and its Message says little: read {all}"
-                                c.Declaration.Span
-                        )
+                        // the editor's offer, FR0151's: for the loader failure,
+                        // every LoaderExceptions message joined in place of the
+                        // one `.Message` read that ends there (nulls filtered —
+                        // on .NET Framework the elements can be null); a
+                        // `.Message.Length` or a second read is left alone
+                        let fixes =
+                            if t.ToDisplayString() <> "System.Reflection.ReflectionTypeLoadException" then
+                                []
+                            else
+                                let messageReads =
+                                    c.Block.DescendantNodes()
+                                    |> Seq.choose (fun x ->
+                                        match x with
+                                        | :? MemberAccessExpressionSyntax as m when
+                                            m.Name.Identifier.ValueText = "Message"
+                                            && (match m.Expression with
+                                                | :? IdentifierNameSyntax as id -> id.Identifier.ValueText = binder
+                                                | _ -> false)
+                                            && not (m.Parent :? MemberAccessExpressionSyntax)
+                                            && not (m.Parent :? InvocationExpressionSyntax)
+                                            ->
+                                            Some m
+                                        | _ -> None)
+                                    |> List.ofSeq
+
+                                match
+                                    messageReads, Usings.importEdit model tree c.SpanStart "System.Linq" "Enumerable"
+                                with
+                                | [ read ], Some usingEdit ->
+                                    let replacement =
+                                        $"string.Join(\"; \", {binder}.LoaderExceptions.Where(x => x != null).Select(x => x.Message))"
+
+                                    let edits = Suggestion.replace read.Span replacement :: usingEdit
+
+                                    if Guards.speculativeCheck model edits then
+                                        [
+                                            Suggestion.fix
+                                                "Join the LoaderExceptions messages"
+                                                ExceptionDetailCode
+                                                edits
+                                            |> Suggestion.editorOnly
+                                        ]
+                                    else
+                                        []
+                                | _ -> []
+
+                        Some
+                            { Suggestion.note
+                                  ExceptionDetailCode
+                                  $"'{t.Name}' carries the detail in '{members.Head}' and its Message says little: read {all}"
+                                  c.Declaration.Span with
+                                Fixes = fixes
+                            }
                     else
                         None
         | _ -> None)

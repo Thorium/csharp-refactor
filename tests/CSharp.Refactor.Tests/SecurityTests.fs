@@ -43,6 +43,26 @@ class C
     Assert.Equal(3, (suggestCode "CR0120" source).Length)
     Assert.Equal(1, (suggestCode "CR0121" source).Length)
 
+[<Fact>]
+let ``a hole filled from a constant is not a value; a var local or a parameter is`` () =
+    let source =
+        """
+using System.Data.Common;
+class C
+{
+    const string Schema = "app";
+    void A(DbCommand cmd) { cmd.CommandText = $"SET search_path = \"{Schema}\", public"; }
+    void B(DbCommand cmd) { const string table = "users"; cmd.CommandText = $"SELECT 1 FROM {table} WHERE id = @id"; }
+    void D(DbCommand cmd) { cmd.CommandText = $"SELECT {1} FROM t WHERE id = @id"; }
+    void E(DbCommand cmd, string schema) { cmd.CommandText = $"SET search_path = {schema}"; }
+    void F(DbCommand cmd) { var schema = "app"; cmd.CommandText = $"SET search_path = {schema}"; }
+}
+"""
+        + dbShim
+
+    // E and F: a parameter, and a `var` the next line may reassign
+    Assert.Equal(2, (suggestCode "CR0120" source).Length)
+
 // ---- CR0122 ----
 
 [<Fact>]
@@ -71,10 +91,12 @@ let ``key-shaped literals and constant connection strings with credentials are n
         """
 class C
 {
-    const string Anthropic = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij";
-    const string Github = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd";
+    const string Anthropic = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0246813579abcdefghij";
+    const string Github = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0246813579abcd";
     const string Aws = "AKIAIOSFODNN7EXAMPLE";
-    const string TestKey = "sk-test-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const string TestKey = "sk-test-ABCDEFGHIJKLMNOPQRSTUVWXYZ0246813579";
+    const string MadeUp = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789abcde";
+    const string Pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIE123456vQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ";
     const string Prod = "Server=db.internal;Database=app;User Id=sa;Password=Hunter2!;";
     const string Local = "Server=localhost;Database=app;User Id=sa;Password=Hunter2!;";
     const string Placeholder = "Server=db.internal;Database=app;User Id=sa;Password=<password>;";
@@ -82,7 +104,8 @@ class C
 }
 """
 
-    // Anthropic, Github (AKIA…EXAMPLE and sk-test are placeholders)
+    // Anthropic, Github (AKIA…EXAMPLE and sk-test are placeholders, and so is
+    // anything carrying `123456`, the standard made-up key)
     Assert.Equal(2, (suggestCode "CR0123" source).Length)
     Assert.Equal(1, (suggestCode "CR0124" source).Length)
 

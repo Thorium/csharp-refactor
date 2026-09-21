@@ -30,8 +30,9 @@
 /// `gho_`/`github_pat_`, `AKIA`, `xoxb-`/`xoxp-`, `whsec_`, a PEM
 /// header, a three-segment JWT, `Bearer eyJ…`, an Azure `AccountKey=`.
 /// Format anchoring, not entropy; a literal containing `test`, `example`,
-/// `sample`, `dummy`, `fake` or `placeholder` is a test credential and
-/// stays quiet; the literal parts of an interpolated string are scanned.
+/// `sample`, `dummy`, `fake`, `placeholder` or `123456` is a test
+/// credential and stays quiet; the literal parts of an interpolated string
+/// are scanned.
 ///
 /// CR0124 (correctness, note): a credential in a `const` (or `static
 /// readonly`) connection string on a non-loopback server — `Password=`/
@@ -98,8 +99,15 @@ let ObsoleteCryptoCode = "CR0126"
 /// `+` chain with a non-literal operand, `string.Format`/`Concat`, or a
 /// local bound one hop to such a thing. A parameter resolves to nothing.
 let rec private builtFromValues (model: SemanticModel) (e: ExpressionSyntax) : bool =
+    // a hole filled from a constant (`$"SET search_path = {Schema}"` over a
+    // `const string Schema`) is text the author wrote, not a value
+    let holeOfValue (c: InterpolatedStringContentSyntax) =
+        match c with
+        | :? InterpolationSyntax as h -> not (model.GetConstantValue(h.Expression).HasValue)
+        | _ -> false
+
     match e with
-    | :? InterpolatedStringExpressionSyntax as i -> i.Contents |> Seq.exists (fun c -> c :? InterpolationSyntax)
+    | :? InterpolatedStringExpressionSyntax as i -> i.Contents |> Seq.exists holeOfValue
     | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.AddExpression ->
         let operands =
             let rec flat (x: ExpressionSyntax) =
@@ -114,8 +122,7 @@ let rec private builtFromValues (model: SemanticModel) (e: ExpressionSyntax) : b
         |> List.exists (fun o ->
             match o with
             | :? LiteralExpressionSyntax -> false
-            | :? InterpolatedStringExpressionSyntax as i ->
-                i.Contents |> Seq.exists (fun c -> c :? InterpolationSyntax)
+            | :? InterpolatedStringExpressionSyntax as i -> i.Contents |> Seq.exists holeOfValue
             | o ->
                 // a constant is not a value
                 not (model.GetConstantValue(o).HasValue))
@@ -360,8 +367,20 @@ let private keyPatterns =
         "an Azure storage key", Regex(@"AccountKey=[A-Za-z0-9+/]{40,}={0,2}", RegexOptions.Compiled)
     ]
 
+/// `123456` is the standard made-up key; six specific digits do not occur
+/// by chance in real key material (one in 64^6 per position of base64).
 let private placeholderWords =
-    [ "test"; "example"; "sample"; "dummy"; "fake"; "placeholder"; "xxxx"; "your" ]
+    [
+        "test"
+        "example"
+        "sample"
+        "dummy"
+        "fake"
+        "placeholder"
+        "xxxx"
+        "your"
+        "123456"
+    ]
 
 let private isPlaceholder (s: string) =
     let l = s.ToLowerInvariant()

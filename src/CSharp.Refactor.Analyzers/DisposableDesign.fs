@@ -184,6 +184,155 @@ let private disposeBodies (t: TypeDeclarationSyntax) =
         | _ -> None)
     |> List.ofSeq
 
+/// `field.Dispose();` — `?.` on a reference type, which may not be assigned
+/// yet when the owner is disposed.
+let private releaseStatement (f: ISymbol) =
+    let t =
+        match f with
+        | :? IFieldSymbol as fs -> fs.Type
+        | :? IPropertySymbol as ps -> ps.Type
+        | _ -> null
+
+    if not (isNull t) && t.IsReferenceType then
+        $"{f.Name}?.Dispose();"
+    else
+        $"{f.Name}.Dispose();"
+
+/// The editor's offer for CR0061 (the F# side's FR0032 offer): `IDisposable`
+/// joins the base list and a `Dispose` releasing every owned field lands
+/// before the closing brace. Editor-only — a type gaining an interface is
+/// a design decision; the sweep notes.
+let private implementDisposable
+    (tree: SyntaxTree)
+    (model: SemanticModel)
+    (t: TypeDeclarationSyntax)
+    (managed: ISymbol list)
+    : Fix option =
+    if
+        t.OpenBraceToken.IsKind SyntaxKind.None
+        || t.CloseBraceToken.IsKind SyntaxKind.None
+    then
+        None
+    else
+        let text = tree.GetText()
+        let closeLine = text.Lines.GetLineFromPosition t.CloseBraceToken.SpanStart
+
+        // the brace on its own line, so the method lands above it
+        if closeLine.ToString().Trim() <> "}" then
+            None
+        else
+            let disposable = Guards.typeText model t.SpanStart "System" "IDisposable"
+
+            let baseEdit =
+                if isNull t.BaseList then
+                    let after =
+                        [
+                            t.Identifier.Span.End
+                            (if isNull t.TypeParameterList then
+                                 0
+                             else
+                                 t.TypeParameterList.Span.End)
+                            (if isNull t.ParameterList then
+                                 0
+                             else
+                                 t.ParameterList.Span.End)
+                        ]
+                        |> List.max
+
+                    Suggestion.insert after $" : {disposable}"
+                else
+                    Suggestion.insert t.BaseList.Span.End $", {disposable}"
+
+            let typeIndent = Text.leadingWhitespace text closeLine.Start
+            let newline = Text.newlineAt text t.OpenBraceToken.SpanStart
+
+            let memberIndent =
+                t.Members
+                |> Seq.tryHead
+                |> Option.map (fun m -> Text.leadingWhitespace text m.SpanStart)
+                |> Option.defaultValue (typeIndent + "    ")
+
+            let body =
+                managed
+                |> List.map (fun f -> memberIndent + "    " + releaseStatement f)
+                |> String.concat newline
+
+            let method' =
+                newline
+                + memberIndent
+                + "public void Dispose()"
+                + newline
+                + memberIndent
+                + "{"
+                + newline
+                + body
+                + newline
+                + memberIndent
+                + "}"
+                + newline
+
+            let methodEdit = Suggestion.insert closeLine.Start method'
+            let edits = [ baseEdit; methodEdit ]
+
+            if Guards.speculativeCheck model edits then
+                Some(
+                    Suggestion.fix "Implement IDisposable and dispose the fields" OwnerlessCode edits
+                    |> Suggestion.editorOnly
+                )
+            else
+                None
+
+/// The editor's offer for CR0062 (FR0047's): the release as the first
+/// statement of the block-bodied `Dispose()`.
+let private releaseInDispose
+    (tree: SyntaxTree)
+    (model: SemanticModel)
+    (t: TypeDeclarationSyntax)
+    (f: ISymbol)
+    : Fix option =
+    let dispose =
+        t.Members
+        |> Seq.tryPick (fun m ->
+            match m with
+            | :? MethodDeclarationSyntax as md when
+                md.Identifier.ValueText = "Dispose"
+                && md.ParameterList.Parameters.Count = 0
+                && not (isNull md.Body)
+                ->
+                Some md
+            | _ -> None)
+
+    match dispose with
+    | Some md ->
+        let text = tree.GetText()
+        let newline = Text.newlineAt text md.Body.OpenBraceToken.SpanStart
+
+        let indent =
+            match md.Body.Statements |> Seq.tryHead with
+            | Some s -> Text.leadingWhitespace text s.SpanStart
+            | None -> Text.leadingWhitespace text md.SpanStart + "    "
+
+        // right after the opening brace's line: the statement then heads
+        // the body at the body's own indentation
+        let braceLine = text.Lines.GetLineFromPosition md.Body.OpenBraceToken.SpanStart
+
+        if braceLine.ToString().Trim() <> "{" then
+            None
+        else
+            let edits =
+                [
+                    Suggestion.insert braceLine.EndIncludingLineBreak (indent + releaseStatement f + newline)
+                ]
+
+            if Guards.speculativeCheck model edits then
+                Some(
+                    Suggestion.fix $"Dispose '{f.Name}'" UnreleasedCode edits
+                    |> Suggestion.editorOnly
+                )
+            else
+                None
+    | None -> None
+
 let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Suggestion list =
     let isRx =
         match tree.GetRoot() with
@@ -248,14 +397,25 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                 |> Option.map (fun r -> r.Span)
                                 |> Option.defaultValue t.Identifier.Span
 
+                            // the editor offers the interface and the Dispose; a
+                            // disposable base wants its Dispose(bool) overridden
+                            // instead, which is the author's
+                            let fixes =
+                                if baseDisposable then
+                                    []
+                                else
+                                    implementDisposable tree model t managed |> Option.toList
+
                             yield
-                                Suggestion.note
-                                    OwnerlessCode
-                                    (if baseDisposable then
-                                         $"'{t.Identifier.ValueText}' constructs {names} and its disposable base never releases them: override Dispose(bool) and dispose them"
-                                     else
-                                         $"'{t.Identifier.ValueText}' constructs {names} and does not implement IDisposable: nothing can release them — implement IDisposable and dispose them there, or take them from the caller")
-                                    where
+                                { Suggestion.note
+                                      OwnerlessCode
+                                      (if baseDisposable then
+                                           $"'{t.Identifier.ValueText}' constructs {names} and its disposable base never releases them: override Dispose(bool) and dispose them"
+                                       else
+                                           $"'{t.Identifier.ValueText}' constructs {names} and does not implement IDisposable: nothing can release them — implement IDisposable and dispose them there, or take them from the caller")
+                                      where with
+                                    Fixes = fixes
+                                }
                         | [] -> ()
 
                     // CR0062: a Dispose that never releases an owned field
@@ -291,13 +451,15 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                         |> Option.defaultValue t.Identifier.Span
 
                                     yield
-                                        Suggestion.note
-                                            UnreleasedCode
-                                            (if cancelled then
-                                                 $"Dispose cancels '{f.Name}' but never disposes it: Cancel frees nothing"
-                                             else
-                                                 $"Dispose never releases '{f.Name}', which this type constructs: dispose it")
-                                            where
+                                        { Suggestion.note
+                                              UnreleasedCode
+                                              (if cancelled then
+                                                   $"Dispose cancels '{f.Name}' but never disposes it: Cancel frees nothing"
+                                               else
+                                                   $"Dispose never releases '{f.Name}', which this type constructs: dispose it")
+                                              where with
+                                            Fixes = releaseInDispose tree model t f |> Option.toList
+                                        }
                 ]
         | _ -> [])
     |> List.ofSeq

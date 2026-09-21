@@ -55,6 +55,18 @@ type Shape =
     | Verbatim
     /// CR0144: `else { if (c) { .. } }`
     | ElseIf of BoolExpr
+    /// CR0172: a local and a private static readonly field holding a constant
+    | ConstCandidate of string
+    /// CR0173: `if (c) return 1; else return 2;`, the else-less twin, the assignment
+    | HoistedReturn of BoolExpr * form: int
+    /// CR0174: a Substring or a range handed to Parse, Append or Write
+    | SubstringToConsumer of form: int
+    /// CR0175: a guarded prefix or suffix compared with a literal word
+    | PrefixCompare of form: int * word: string
+    /// CR0176: `foreach (var c in s.ToCharArray())`
+    | CharArrayLoop
+    /// CR0177: an invariant local inside a loop, a concatenation or an arithmetic
+    | LoopInvariant of word: string * form: int
     /// CR0145: `System.Text.Json.JsonSerializer` spelled six times
     | Qualified
     /// CR0009: switch-expression arms sharing a body, the last beside the discard
@@ -172,8 +184,10 @@ type Shape =
     | LocalNow
     /// CR0107: a pattern the engine rejects
     | InvalidPattern
-    /// CR0108: a plain-text regex
-    | PlainTextRegex
+    /// CR0108: a plain-text regex, in one of its eight shapes (IsMatch bare and
+    /// anchored, Match.Success, Matches.Count bare, against zero and against one,
+    /// Replace, Split), over a random word
+    | PlainTextRegex of form: int * word: string
     /// CR0110: an HttpClient per call
     | ClientPerCall
     /// CR0111: a hand-joined path
@@ -288,6 +302,70 @@ let print (i: int) (shape: Shape) : string =
     | Verbatim -> $"static int M{i}(int @plain) => @plain;"
     | ElseIf e ->
         $"static int M{i}({parameters})\n{{\n    if (x0 > 0)\n    {{\n        return 1;\n    }}\n    else\n    {{\n        if ({printBool e})\n        {{\n            return 2;\n        }}\n    }}\n    return 3;\n}}"
+    | ConstCandidate w ->
+        $"static readonly string Name{i} = \"{w}\";
+static string M{i}() {{ var local = \"{w}\"; int n = 3; return local + n + Name{i}; }}"
+    | SubstringToConsumer form ->
+        match form with
+        | 0 -> $"static int M{i}(string s) => int.Parse(s.Substring(6, 5));"
+        | 1 ->
+            $"static int M{i}(string s) {{ var sb = new System.Text.StringBuilder(); sb.Append(s.Substring(6)); return sb.Length; }}"
+        | 2 -> $"static void M{i}(string s, System.IO.TextWriter w) => w.Write(s[6..]);"
+        | _ -> $"static long M{i}(string s) => long.Parse(s[6..11]);"
+    | PrefixCompare(form, w) ->
+        let n = w.Length
+
+        match form with
+        | 0 -> $"static bool M{i}(string s) => s.Length >= {n} && s.Substring(0, {n}) == \"{w}\";"
+        | 1 -> $"static bool M{i}(string s) => s.Length < {n} || s[..{n}] != \"{w}\";"
+        | 2 ->
+            $"static bool M{i}(string s) {{ if (s.Length >= {n}) return s.Substring(s.Length - {n}) == \"{w}\"; return false; }}"
+        | _ -> $"static bool M{i}(string s) => s.Length > {n - 1} && s[^{n}..] == \"{w}\";"
+    | CharArrayLoop ->
+        $"static int M{i}(string s) {{ int n = 0; foreach (var c in s.ToCharArray()) if (c == 'a') n++; return n; }}"
+    | LoopInvariant(w, form) ->
+        match form with
+        | 0 ->
+            $"static int M{i}(int[] xs, string tag)
+{{
+    int n = 0;
+    foreach (var x in xs)
+    {{
+        var label = tag + \"{w}\";
+        n += label.Length + x;
+    }}
+    return n;
+}}"
+        | _ ->
+            $"static int M{i}(int[] xs, int a)
+{{
+    int n = 0;
+    for (int j = 0; j < xs.Length; j++)
+    {{
+        var c = a * {w.Length} + 1;
+        n += xs[j] * c;
+    }}
+    return n;
+}}"
+    | HoistedReturn(e, form) ->
+        match form with
+        | 0 ->
+            $"static int M{i}({parameters})
+{{
+    if ({printBool e}) return 1; else return 2;
+}}"
+        | 1 ->
+            $"static int M{i}({parameters})
+{{
+    if ({printBool e}) return x0; return x1 + 1;
+}}"
+        | _ ->
+            $"static int M{i}({parameters})
+{{
+    int r;
+    if ({printBool e}) r = x0; else r = x1;
+    return r;
+}}"
     | Qualified ->
         let call = "System.Text.Json.JsonSerializer.Serialize(o)"
         $"static string M{i}(object o) => {call} + {call} + {call} + {call} + {call} + {call};"
@@ -663,7 +741,16 @@ let print (i: int) (shape: Shape) : string =
     | CultureFreeParse -> $"static double M{i}(string s) => double.Parse(s);"
     | LocalNow -> $"static long M{i}() => DateTime.Now.Ticks;"
     | InvalidPattern -> $"static bool M{i}(string s) => Regex.IsMatch(s, \"(unclosed\");"
-    | PlainTextRegex -> $"static bool M{i}(string s) => Regex.IsMatch(s, \"^abc\");"
+    | PlainTextRegex(form, w) ->
+        match form with
+        | 0 -> $"static bool M{i}(string s) => Regex.IsMatch(s, \"^{w}\");"
+        | 1 -> $"static bool M{i}(string s) => Regex.IsMatch(s, \"{w}\");"
+        | 2 -> $"static bool M{i}(string s) => Regex.Match(s, \"{w}\").Success;"
+        | 3 -> $"static int M{i}(string s) => Regex.Matches(s, \"{w}\").Count;"
+        | 4 -> $"static bool M{i}(string s) => Regex.Matches(s, \"{w}\").Count > 0;"
+        | 5 -> $"static bool M{i}(string s) => Regex.Matches(s, \"{w}\").Count == 0;"
+        | 6 -> $"static string M{i}(string s) => Regex.Replace(s, \"{w}\", \"x\");"
+        | _ -> $"static int M{i}(string s) => Regex.Split(s, \"{w}\").Length;"
     | ClientPerCall -> $"static int M{i}() {{ var c = new System.Net.Http.HttpClient(); return c.GetHashCode(); }}"
     | HandJoinedPath -> $"static string M{i}(string dir, string file) => dir + \"\\\\\" + file;"
     | HiddenUnicode -> $"static string M{i}() => \"ab​c\";"
@@ -689,7 +776,7 @@ let print (i: int) (shape: Shape) : string =
     | Secrets ->
         lines
             [
-                $"const string Github{i} = \"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd\";"
+                $"const string Github{i} = \"ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0246813579abcd\";"
                 $"const string Prod{i} = \"Server=db.internal;Database=app;User Id=sa;Password=Hunter2!;\";"
             ]
     | Crypto ->
@@ -931,6 +1018,12 @@ let genShape (size: int) : Gen<Shape> =
             2, Gen.map AttributeSyntax (Gen.elements [ true; false ])
             1, Gen.constant Verbatim
             2, Gen.map ElseIf term
+            2, Gen.map ConstCandidate genWord
+            2, Gen.map HoistedReturn (Gen.zip term (Gen.choose (0, 2)))
+            2, Gen.map SubstringToConsumer (Gen.choose (0, 3))
+            2, Gen.map PrefixCompare (Gen.zip (Gen.choose (0, 3)) genWord)
+            1, Gen.constant CharArrayLoop
+            2, Gen.map LoopInvariant (Gen.zip genWord (Gen.choose (0, 1)))
             1, Gen.constant Qualified
             1, Gen.map SwitchExpressionDuplicate genWord
             1, Gen.constant ReferenceTuple
@@ -985,7 +1078,7 @@ let genShape (size: int) : Gen<Shape> =
             1, Gen.constant CultureFreeParse
             1, Gen.constant LocalNow
             1, Gen.constant InvalidPattern
-            1, Gen.constant PlainTextRegex
+            2, Gen.map PlainTextRegex (Gen.zip (Gen.choose (0, 7)) genWord)
             1, Gen.constant ClientPerCall
             1, Gen.constant HandJoinedPath
             1, Gen.constant HiddenUnicode
@@ -1037,6 +1130,7 @@ let shrinkShape (shape: Shape) : seq<Shape> =
             for b' in shrinkBool b -> NestedIf(a, b')
         | BoolFn e -> for e' in shrinkBool e -> BoolFn e'
         | ElseIf e -> for e' in shrinkBool e -> ElseIf e'
+        | HoistedReturn(e, form) -> for e' in shrinkBool e -> HoistedReturn(e', form)
         | _ -> ()
     }
 
@@ -1080,6 +1174,12 @@ let targetedCodes =
         "CR0143"
         "CR0144"
         "CR0145"
+        "CR0172"
+        "CR0173"
+        "CR0174"
+        "CR0175"
+        "CR0176"
+        "CR0177"
         "CR0080"
         "CR0082"
         "CR0100"
@@ -1199,6 +1299,9 @@ let exemplars: Shape list =
             [ box true; box false ]
         elif t = typeof<string> then
             [ box "abc" ]
+        elif t = typeof<int> then
+            // a form selector: every form the printer knows
+            [ for i in 0..7 -> box i ]
         else
             failwithf "no exemplar for a shape field of type %s" t.Name
 

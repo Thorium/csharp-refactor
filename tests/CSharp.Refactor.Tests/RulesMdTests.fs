@@ -97,3 +97,34 @@ let ``the help link of every rule lands on its Rules.md section`` () =
         "https://github.com/Thorium/csharp-refactor/blob/main/Rules.md#cr0103--cosmetic",
         RuleCatalog.helpUri "CR0103"
     )
+
+/// Every performance claim is measured: a rule of the category has a
+/// benchmark class in benchmarks/PerfClaims (`CRnnnn_…`) or a stated
+/// reason in LaterClaims.cs why no runtime pair exists (`//   CRnnnn —`).
+/// A new performance rule missing from both is visible here, not in a
+/// review two milestones on.
+[<Fact>]
+let ``every performance rule has a PerfClaims pair or a stated reason`` () =
+    let benchmarks =
+        Directory.GetFiles(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "benchmarks", "PerfClaims"), "*.cs")
+        |> Seq.map File.ReadAllText
+        |> String.concat "\n"
+
+    let measured =
+        Regex.Matches(benchmarks, @"public (?:partial )?class (CR\d{4})_")
+        |> Seq.map (fun m -> m.Groups.[1].Value)
+        |> set
+
+    let excused =
+        Regex.Matches(benchmarks, @"^//   (CR\d{4}) — ", RegexOptions.Multiline)
+        |> Seq.map (fun m -> m.Groups.[1].Value)
+        |> set
+
+    let unmeasured =
+        RuleCatalog.rules
+        |> List.filter (fun r -> r.Category = RuleCatalog.Category.Performance)
+        |> List.map (fun r -> r.Code)
+        |> List.filter (fun c -> not (measured.Contains c || excused.Contains c))
+
+    Assert.True(unmeasured.IsEmpty, $"performance rules without a PerfClaims pair or a stated reason: %A{unmeasured}")
+    Assert.True(Set.isEmpty (Set.intersect measured excused), "a rule is both measured and excused")

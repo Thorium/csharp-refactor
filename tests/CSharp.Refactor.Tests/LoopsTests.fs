@@ -174,3 +174,174 @@ class C
 """
 
     Assert.Equal<string list>([], firedText source (suggestCode "CR0017" source))
+
+// ---- CR0177 ----
+
+[<Fact>]
+let ``an invariant local moves above the loop, string concatenation and field arithmetic included`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+class C
+{
+    readonly int factor = 3;
+    const string Prefix = "item";
+    void A(int[] xs, string tag, int a)
+    {
+        foreach (var x in xs)
+        {
+            var label = tag + ":";
+            var c = a * 3 + 1;
+            Console.WriteLine(label + x + c);
+        }
+    }
+    int B(List<int> xs)
+    {
+        int total = 0;
+        for (int i = 0; i < xs.Count; i++)
+        {
+            if (xs[i] > 0)
+            {
+                var scale = factor * 2 + 1;
+                total += xs[i] * scale;
+            }
+        }
+        return total;
+    }
+    string D(string[] names, int width)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var n in names)
+        {
+            var header = $"{width}:{Prefix}";
+            sb.Append(header).Append(n);
+        }
+        return sb.ToString();
+    }
+}
+"""
+
+    Assert.Equal<string list>(
+        [
+            "var label = tag + \":\";"
+            "var c = a * 3 + 1;"
+            "var scale = factor * 2 + 1;"
+            "var header = $\"{width}:{Prefix}\";"
+        ],
+        suggestCode "CR0177" source |> firedText source
+    )
+
+    let fixedSource = fixAll "CR0177" source
+
+    Assert.Contains(
+        "        var label = tag + \":\";\n        var c = a * 3 + 1;\n        foreach (var x in xs)\n        {\n            Console.WriteLine(label + x + c);",
+        fixedSource
+    )
+
+    Assert.Contains("        var scale = factor * 2 + 1;\n        for (int i = 0; i < xs.Count; i++)", fixedSource)
+    Assert.Contains("        var header = $\"{width}:{Prefix}\";\n        foreach (var n in names)", fixedSource)
+
+[<Fact>]
+let ``a local that reads the loop variable, a reassigned input, a call, a namesake or a lambda stays where it is`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+class C
+{
+    int field = 3;
+    void A(int[] xs, int a, int b, Func<int> read, List<Action> later)
+    {
+        foreach (var x in xs)
+        {
+            var fromLoop = x * 2;
+            var fromMutableField = field + 1;
+            var fromCall = read() + 1;
+            var fromReassigned = b + 1;
+            var divided = a / b;
+            var inLambda = 0;
+            later.Add(() => { var hoistable = a + 1; inLambda = hoistable; });
+            Console.WriteLine(fromLoop + fromMutableField + fromCall + fromReassigned + divided + inLambda);
+        }
+        b = 0;
+    }
+    void B(int[] xs, int a)
+    {
+        foreach (var x in xs)
+        {
+            var c = a + 1;
+            c += x;
+            Console.WriteLine(c);
+        }
+        for (int i = 0; i < 3; i++)
+        {
+            var d = a + 1;
+            Console.WriteLine(d);
+        }
+        if (a > 0) { int d = 0; Console.WriteLine(d); }
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0177" source)
+
+[<Fact>]
+let ``a deconstructed input, a ref alias, a checked context and an unbraced loop body keep the local in place`` () =
+    let source =
+        """
+using System;
+class C
+{
+    (int, int) Next() => (1, 2);
+    void A(int[] xs, int a, int b, bool flag)
+    {
+        foreach (var x in xs)
+        {
+            var fromDeconstructed = a + 1;
+            var fromAliased = b + 1;
+            Console.WriteLine(fromDeconstructed + fromAliased + x);
+            (a, _) = Next();
+        }
+        ref int r = ref b;
+        r = 5;
+        checked
+        {
+            foreach (var x in xs)
+            {
+                var overflowing = a * 3;
+                Console.WriteLine(overflowing + x);
+            }
+        }
+        if (flag)
+            foreach (var x in xs)
+            {
+                var unbraced = a + 1;
+                Console.WriteLine(unbraced + x);
+            }
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0177" source)
+
+    // the string concatenation still moves under checked: no overflow there
+    let concat =
+        """
+class C
+{
+    void A(int[] xs, string tag)
+    {
+        checked
+        {
+            foreach (var x in xs)
+            {
+                var label = tag + ":";
+                System.Console.WriteLine(label + x);
+            }
+        }
+    }
+}
+"""
+
+    Assert.Equal<string list>([ "var label = tag + \":\";" ], suggestCode "CR0177" concat |> firedText concat)

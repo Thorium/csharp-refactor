@@ -369,6 +369,7 @@ at the SDK's default analysis level. These get no CR rule; the tool defers.
 | F# rule | C# shape | Microsoft rule (with fix) | Decision |
 |---|---|---|---|
 | FR0010 (part) | `c ? true : false` | IDE0075 | defer; CR0001 keeps the statement shape |
+| — | `if (a) return x; else return y;` → `return a ? x : y;` | IDE0046, IDE0045 | CR0173: the one-line cases, in the fix pipeline; yields to the IDE rules where they are on |
 | FR0012 (part) | `x == true`, `.Where(p).Any()`, `.Count() == 0` | IDE0100, IDE0120, CA1827 | yields per hint |
 | FR0014 | `ContainsKey` + indexer | CA1854 | defer |
 | FR0015 (hoist) | regex construction hoisted | SYSLIB1045 (`[GeneratedRegex]`) | yields; CR0109 covers targets below .NET 7 |
@@ -393,10 +394,13 @@ at the SDK's default analysis level. These get no CR rule; the tool defers.
 | FR0095 | lambda restating a method | IDE0200 (method group) | defer |
 | FR0097 | redundant parentheses | IDE0047 | defer |
 | FR0098 | `System.Int32` → `int` | IDE0049 | defer |
-| FR0106 | `Substring` → `AsSpan` | CA1846 | defer |
+| FR0106 | `Substring` → `AsSpan` | CA1846 | CR0174: the consumers whose span overload is the same operation (Parse/TryParse, StringBuilder.Append, TextWriter.Write, string.Concat); yields to CA1846 |
+| FR0166 | `s.Substring(0, 6) = "ORDER-"` → `StartsWith(…, Ordinal)` | — | CR0175, under a length guard (a short string threw where StartsWith answers false) |
+| FR0167 | `for c in s.ToCharArray()` → `for c in s` | — | CR0176, the `foreach` only (LINQ over a string is slower than over the array) |
+| FR0071 | hoist a loop-invariant `let` above the loop | — | CR0177: the initializer pure and reading nothing the loop changes; measured, a concatenation 4×, local and readonly-field arithmetic parity (the JIT hoists it; a mutable field is never read) |
 | FR0118 (omitted token) | forward the `CancellationToken` | CA2016 | defer; CR0055 keeps the explicit `None` |
 | FR0124 (count, interpolated template) | template/argument mismatch | CA2017, CA2254 | defer; CR0114 keeps the remainder |
-| FR0130 | `static readonly` constant → `const` | CA1802 | defer |
+| FR0130 | `static readonly` constant → `const`, and a constant local | CA1802 | CR0172: the field under the API gate (a `const` is a different member to a compiled consumer), the local always |
 | FR0139 | LINQ where a property exists | CA1826, CA1829, CA1860 | defer |
 | FR0140 | construct-then-assign → object initializer | IDE0017 | defer |
 | FR0145 | unassigned `required` members | CS9035 | n/a |
@@ -1243,17 +1247,17 @@ reports.
 | Code | Cat | On | API | Pri | Fires on | Fix | F# | Yields to |
 |---|---|---|---|---|---|---|---|---|
 | CR0160 | correctness | v | | v | a lambda or local function created inside a loop reads a local the loop writes (the `for` variable, or a local assigned in the body), and the closure outlives the iteration — stored in a collection, a field, an outer local; returned or yielded; handed to `Task.Run`, `Task.Factory.StartNew`, `ThreadPool.QueueUserWorkItem`, a `Thread`, a `Timer`, an event `+=`, or kept alive through a lazy LINQ chain that escapes | `var i1 = i;` before the statement, the closure reading `i1` (the per-iteration copy the author meant) | — (immutable bindings) | — |
-| CR0161 | correctness | v | | v | a call to a mutating method of a non-`readonly` struct on a receiver the compiler copies first: a `readonly` field, a property, a `List<T>`/`IList<T>` indexer, a `foreach` variable, an `in` parameter | note: the call mutates a copy | — (immutable records) | — |
-| CR0162 | correctness | v | | v | `new System.Threading.Timer(…)` whose result is dropped or bound to a local that never leaves the method | note: the timer is collected with its last reference and stops firing | — | — |
-| CR0163 | correctness | v | | v | `sem.Wait()` / `await sem.WaitAsync()` (`Semaphore.WaitOne`, `Mutex.WaitOne`, `ReaderWriterLockSlim.Enter*Lock`) followed by statements and a matching `Release()`/`ReleaseMutex()`/`Exit*Lock()` in the same block with no `try` between them | `try { … } finally { sem.Release(); }` | — | — |
-| CR0164 | correctness | v | | | `if (_cache == null) _cache = expr;` / `_cache ??= expr` on a `static` reference-typed field outside any `lock` | `LazyInitializer.EnsureInitialized(ref _cache, () => expr)` | — (`lazy`) | — |
-| CR0165 | correctness | v | | v | `catch (Exception ex) { throw new MyException("…"); }` — a wrapping throw that drops the caught exception, where the wrapper has a `(string, Exception)` constructor | `throw new MyException("…", ex);` (naming an unnamed catch `ex`) | — | CA2200 |
-| CR0166 | performance | v | | | `try { v = int.Parse(s); } catch (FormatException) { … }` and `try { return int.Parse(s); } catch (…) { return d; }` — a parse driven by its exception, for a type with the matching `TryParse` | `if (!int.TryParse(s, out v)) { … }` / `return int.TryParse(s, out var v) ? v : d;` | FR candidate | — |
-| CR0167 | correctness | v | | | `a == b` / `a != b` where both sides are `float`/`double`/`Half` and neither is a literal | note: floating-point equality; compare a difference against a tolerance | FR candidate | — |
-| CR0168 | correctness | v | | | `a / b` with two integral operands whose result lands in a `double`/`float`/`decimal` — a declaration, an assignment, a return, an argument | note; editor offers `(double)a / b` | — | — |
-| CR0169 | correctness | v | | v | `DateTime.Now`/`Today` compared with, subtracted from or assigned beside `DateTime.UtcNow` (directly, or through a local, field or property set from one of them once) | note: the two kinds differ by the machine's offset | FR candidate | — |
-| CR0170 | correctness | v | | | a method with a `CancellationToken` parameter holding a loop that awaits, sleeps or blocks on a task and never reads the token — no `ThrowIfCancellationRequested`, no `IsCancellationRequested`, no call taking it | `ct.ThrowIfCancellationRequested();` as the loop's first statement | — | — |
-| CR0171 | correctness | v | | v | `foreach (var x in xs) { … xs.Remove(x) … }` — the enumerated collection mutated under its own enumeration (`Add`/`Insert`/`Remove`/`RemoveAt`/`Clear`) | `xs.RemoveAll(x => cond)` when the body is exactly `if (cond) xs.Remove(x);` on a `List<T>`; otherwise a note | — | — |
+| CR0161 | correctness | v | | v | a call to a mutating method of a non-`readonly` struct on a receiver the compiler copies first: a `readonly` field, a property, a `List<T>`/`IList<T>` indexer, a `foreach` variable, an `in` parameter | note: the call mutates a copy | FR0161 (the property-getter copy, the rest FS0256) | — |
+| CR0162 | correctness | v | | v | `new System.Threading.Timer(…)` whose result is dropped or bound to a local that never leaves the method | note: the timer is collected with its last reference and stops firing | FR0163 | — |
+| CR0163 | correctness | v | | v | `sem.Wait()` / `await sem.WaitAsync()` (`Semaphore.WaitOne`, `Mutex.WaitOne`, `ReaderWriterLockSlim.Enter*Lock`) followed by statements and a matching `Release()`/`ReleaseMutex()`/`Exit*Lock()` in the same block with no `try` between them | `try { … } finally { sem.Release(); }` | FR0123 (the leak half) | — |
+| CR0164 | correctness | v | | | `if (_cache == null) _cache = expr;` / `_cache ??= expr` on a `static` reference-typed field outside any `lock` | `LazyInitializer.EnsureInitialized(ref _cache, () => expr)` | FR0162 (note only: `lazy` is the answer) | — |
+| CR0165 | correctness | v | | v | `catch (Exception ex) { throw new MyException("…"); }` — a wrapping throw that drops the caught exception, where the wrapper has a `(string, Exception)` constructor | `throw new MyException("…", ex);` (naming an unnamed catch `ex`) | FR0160 | CA2200 |
+| CR0166 | performance | v | | | `try { v = int.Parse(s); } catch (FormatException) { … }` and `try { return int.Parse(s); } catch (…) { return d; }` — a parse driven by its exception, for a type with the matching `TryParse` | `if (!int.TryParse(s, out v)) { … }` / `return int.TryParse(s, out var v) ? v : d;` | FR0168 | — |
+| CR0167 | correctness | v | | | `a == b` / `a != b` where both sides are `float`/`double`/`Half` and neither is a literal | note: floating-point equality; compare a difference against a tolerance | — (skipped on purpose in F#) | — |
+| CR0168 | correctness | v | | | `a / b` with two integral operands whose result lands in a `double`/`float`/`decimal` — a declaration, an assignment, a return, an argument | note; editor offers `(double)a / b` | FR0159 (a sweep fix there: the F# shape is an explicit conversion) | — |
+| CR0169 | correctness | v | | v | `DateTime.Now`/`Today` compared with, subtracted from or assigned beside `DateTime.UtcNow` (directly, or through a local, field or property set from one of them once) | note: the two kinds differ by the machine's offset | FR0165 | — |
+| CR0170 | correctness | v | | | a method with a `CancellationToken` parameter holding a loop that awaits, sleeps or blocks on a task and never reads the token — no `ThrowIfCancellationRequested`, no `IsCancellationRequested`, no call taking it | `ct.ThrowIfCancellationRequested();` as the loop's first statement | FR0118 (the loop half) | — |
+| CR0171 | correctness | v | | v | `foreach (var x in xs) { … xs.Remove(x) … }` — the enumerated collection mutated under its own enumeration (`Add`/`Insert`/`Remove`/`RemoveAt`/`Clear`) | `xs.RemoveAll(x => cond)` when the body is exactly `if (cond) xs.Remove(x);` on a `List<T>`; otherwise a note | FR0164 | — |
 
 Guards:
 
@@ -1426,7 +1430,7 @@ Guards:
 | FR0003, FR0008, FR0023, FR0090, FR0091, FR0095 | No currying, composition operator, or data-last convention. Extension methods are data-first by construction. |
 | FR0005, FR0073, FR0078, FR0029, FR0149's CE half | No computation expressions; C# async state machines have no resumable-code dynamic fallback (FS3511). CR0046 is the one C# state-machine shape worth a rule. |
 | FR0006, FR0011, FR0087, FR0088, FR0096, FR0115, FR0129 (`function`) | No active patterns; C# patterns are covered by CR0003/CR0009/CR0010. |
-| FR0007 | C# has no keyword for an immutable local. Fields are IDE0044's business (`readonly`). |
+| FR0007 | C# has no keyword for an immutable local; a constant one is CR0172's `const`. Fields are IDE0044's business (`readonly`). |
 | FR0016, FR0022, FR0072 (DU half), FR0110 (DU half) | No discriminated unions below C# 15; CR0013/CR0014 cover enums, and the C# 15 `union` unlocks CR0156/CR0158 (§8.I). |
 | FR0013, FR0094, FR0097 | Parentheses are load-bearing in C# (IDE0047 handles the redundant ones). |
 | FR0024, FR0092 (the `failwith` half) | No `failwith`; CR0069 covers the message. |

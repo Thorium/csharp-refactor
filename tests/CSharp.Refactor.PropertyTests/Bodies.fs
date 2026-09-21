@@ -22,6 +22,10 @@ type Body =
     | AssignReturn of BoolExpr * bool
     /// `return e ? true : false;`
     | Ternary of BoolExpr
+    /// `if (a) return b; else return c;` — every branch returns a term (CR0173)
+    | IfElseReturnTerms of a: BoolExpr * b: BoolExpr * c: BoolExpr
+    /// `bool r; if (a) r = b; else r = c; return r;` (CR0173)
+    | AssignTerms of a: BoolExpr * b: BoolExpr * c: BoolExpr
 
 let eval (body: Body) (env: int[]) : bool =
     match body with
@@ -31,6 +35,12 @@ let eval (body: Body) (env: int[]) : bool =
     | IfElseReturn(e, lit)
     | AssignReturn(e, lit) -> if BoolExpr.eval env e then lit else not lit
     | NestedIfReturn(a, b) -> BoolExpr.eval env a && BoolExpr.eval env b
+    | IfElseReturnTerms(a, b, c)
+    | AssignTerms(a, b, c) ->
+        if BoolExpr.eval env a then
+            BoolExpr.eval env b
+        else
+            BoolExpr.eval env c
 
 let private litText (b: bool) = if b then "true" else "false"
 
@@ -45,6 +55,11 @@ let print (body: Body) : string =
         $"if ({printBool a})\n{{\n    if ({printBool b})\n    {{\n        return true;\n    }}\n}}\n\nreturn false;"
     | AssignReturn(e, lit) -> $"bool r;\nif ({printBool e}) r = {litText lit}; else r = {litText (not lit)};\nreturn r;"
     | Ternary e -> $"return {printBool e} ? true : false;"
+    | IfElseReturnTerms(a, b, c) -> $"if ({printBool a}) return {printBool b}; else return {printBool c};"
+    | AssignTerms(a, b, c) ->
+        $"bool r;
+if ({printBool a}) r = {printBool b}; else r = {printBool c};
+return r;"
 
 /// The whole program: one class, one method of the three variables.
 let program (body: Body) : string =
@@ -81,6 +96,20 @@ let genBody (size: int) : Gen<Body> =
                 let! b = genBool (size / 2)
                 return NestedIfReturn(a, b)
             }
+            2,
+            gen {
+                let! a = genBool (size / 3)
+                let! b = genBool (size / 3)
+                let! c = genBool (size / 3)
+                return IfElseReturnTerms(a, b, c)
+            }
+            1,
+            gen {
+                let! a = genBool (size / 3)
+                let! b = genBool (size / 3)
+                let! c = genBool (size / 3)
+                return AssignTerms(a, b, c)
+            }
         ]
 
 let shrinkBody (body: Body) : seq<Body> =
@@ -104,6 +133,17 @@ let shrinkBody (body: Body) : seq<Body> =
             yield Return b
             for a' in shrinkBool a -> NestedIfReturn(a', b)
             for b' in shrinkBool b -> NestedIfReturn(a, b')
+        | IfElseReturnTerms(a, b, c) ->
+            yield Return b
+            yield Return c
+            for a' in shrinkBool a -> IfElseReturnTerms(a', b, c)
+            for b' in shrinkBool b -> IfElseReturnTerms(a, b', c)
+            for c' in shrinkBool c -> IfElseReturnTerms(a, b, c')
+        | AssignTerms(a, b, c) ->
+            yield IfElseReturnTerms(a, b, c)
+            for a' in shrinkBool a -> AssignTerms(a', b, c)
+            for b' in shrinkBool b -> AssignTerms(a, b', c)
+            for c' in shrinkBool c -> AssignTerms(a, b, c')
     }
 
 let arbitrary: Arbitrary<Body> = Arb.fromGenShrink (Gen.sized genBody, shrinkBody)
@@ -116,3 +156,5 @@ let sizeOf (body: Body) : int =
     | IfElseReturn(e, _)
     | AssignReturn(e, _) -> 2 + BoolExpr.sizeOf e
     | NestedIfReturn(a, b) -> 2 + BoolExpr.sizeOf a + BoolExpr.sizeOf b
+    | IfElseReturnTerms(a, b, c)
+    | AssignTerms(a, b, c) -> 2 + BoolExpr.sizeOf a + BoolExpr.sizeOf b + BoolExpr.sizeOf c

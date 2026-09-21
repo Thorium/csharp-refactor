@@ -154,19 +154,21 @@ let private initOnly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext
                     else
                         let edit = Suggestion.replace setter.Keyword.Span "init"
 
-                        if Guards.speculativeCheck model [ edit ] then
-                            Some
-                                {
-                                    Code = InitCode
-                                    Message = "The setter is only used while constructing: 'init' says so and seals it"
-                                    Span = setter.Keyword.Span
-                                    Fixes = [ Suggestion.fix "Make it init-only" InitCode [ edit ] ]
-                                }
-                        else
-                            None
+                        Some(
+                            {
+                                Code = InitCode
+                                Message = "The setter is only used while constructing: 'init' says so and seals it"
+                                Span = setter.Keyword.Span
+                                Fixes = [ Suggestion.fix "Make it init-only" InitCode [ edit ] ]
+                            },
+                            [ edit ]
+                        )
                 | _ -> None
             | _ -> None)
         |> List.ofSeq
+        // a DTO file of forty setters is one re-bind, not forty (a project of
+        // three hundred took half a minute of them)
+        |> Guards.speculativeCheckEach model
 
 // ---- CR0080 ----
 

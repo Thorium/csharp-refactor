@@ -41,6 +41,10 @@ let private printedNotes = HashSet<string>()
 let mutable runTotalApplied = 0
 let mutable private runBuildFailures = 0
 let mutable private runCrossFileHeld = 0
+/// Wall-clock milliseconds of the run, by phase: what a slow sweep spent
+/// its time on, next to the per-module record in Rules.timings.
+let mutable private runCompileMs = 0L
+let mutable private runAnalysisMs = 0L
 let private exitReasons = ResizeArray<string>()
 
 let reportedSoFar () =
@@ -61,6 +65,9 @@ let resetRun () =
     runTotalApplied <- 0
     runBuildFailures <- 0
     runCrossFileHeld <- 0
+    runCompileMs <- 0L
+    runAnalysisMs <- 0L
+    Rules.resetTimings ()
 
 let private recordForReport (finding: ReportedFinding) =
     lock reportedFindings (fun () ->
@@ -548,7 +555,9 @@ let private runPass
     : PassOutcome =
     let project = solution.GetProject projectId
     let compilation = project.GetCompilationAsync(ct).Result
+    let sw = Diagnostics.Stopwatch.StartNew()
     let findings = analyzeProject opts project compilation ct
+    runAnalysisMs <- runAnalysisMs + sw.ElapsedMilliseconds
 
     let suppressionPolicy =
         if honorAllSuppressions then
@@ -981,11 +990,27 @@ let executeRun (opts: Options) : int =
         use workspace = MSBuildWorkspace.Create properties
         workspace.SkipUnrecognizedProjects <- true
 
-        workspace.WorkspaceFailed.Add(fun e ->
-            if e.Diagnostic.Kind = WorkspaceDiagnosticKind.Failure then
-                Out.bad $"  (workspace: {e.Diagnostic.Message})"
-            else
-                Out.dim $"  (workspace: {e.Diagnostic.Message})")
+        // Roslyn's loader hands every MSBuild message over as a Failure: a
+        // NuGet warning (NU1510, a package that will not be pruned) reads the
+        // same as a missing SDK. What tells them apart is whether the project
+        // came back, so the messages wait for the load and take its colour.
+        // The handler runs on the loader's thread, but before OpenProjectAsync
+        // returns, so a flush after the load sees every message of that load.
+        let pendingWorkspace = ResizeArray<string>()
+
+        use _failed =
+            workspace.RegisterWorkspaceFailedHandler(fun e ->
+                lock pendingWorkspace (fun () -> pendingWorkspace.Add $"  (workspace: {e.Diagnostic.Message})"))
+
+        let flushWorkspace (loaded: bool) =
+            let messages =
+                lock pendingWorkspace (fun () ->
+                    let xs = List.ofSeq pendingWorkspace
+                    pendingWorkspace.Clear()
+                    xs)
+
+            for message in messages do
+                if loaded then Out.dim message else Out.bad message
 
         let ct = CancellationToken.None
 
@@ -1000,11 +1025,19 @@ let executeRun (opts: Options) : int =
         // every target loads first, so the project graph (who references whom)
         // is complete before any project is analysed: a referenced executable
         // is not a leaf, and a dependent is verified after
+        let loadSw = Diagnostics.Stopwatch.StartNew()
+
         for target in targets do
-            try
-                loadProject workspace (Path.GetFullPath(projectOf target)) |> ignore
-            with _ ->
-                ()
+            let loaded =
+                try
+                    let _, flavors = loadProject workspace (Path.GetFullPath(projectOf target))
+                    not flavors.IsEmpty
+                with _ ->
+                    false
+
+            flushWorkspace loaded
+
+        loadSw.Stop()
 
         for target in targets do
             let projectPath = Path.GetFullPath(projectOf target)
@@ -1022,6 +1055,8 @@ let executeRun (opts: Options) : int =
                     Out.bad $"  could not load {Path.GetFileName projectPath}: {ex.GetBaseException().Message}"
                     exitCode <- 1
                     (workspace :> Workspace), []
+
+            flushWorkspace (not flavors.IsEmpty)
 
             let script = Scripts.isScript projectPath
             // a script has no build either: the in-memory check holds its error count
@@ -1063,6 +1098,7 @@ let executeRun (opts: Options) : int =
                 if framework <> "" then
                     Out.dim $"  ({framework})"
 
+                let compileSw = Diagnostics.Stopwatch.StartNew()
                 let compilation = project.GetCompilationAsync(ct).Result
 
                 // the #r directives resolve while the compilation is built
@@ -1080,6 +1116,10 @@ let executeRun (opts: Options) : int =
                         parseErrorsOf compilation
                     else
                         errorsOf compilation
+
+                // the diagnostics bind every tree: this is the compile, and the
+                // analyzers after it find the models bound
+                runCompileMs <- runCompileMs + compileSw.ElapsedMilliseconds
 
                 // a legacy project read without its build tree carries unresolved-reference
                 // errors by construction: the run proceeds on the relative in-memory check,
@@ -1301,6 +1341,24 @@ let executeRun (opts: Options) : int =
         if suppressionOverridden > 0 then
             printfn
                 $"  ({suppressionOverridden} suppression(s) not honored by the csharp_refactor.suppressions policy — reported above, never auto-fixed)"
+
+        // the per-module figures are summed across the analyzer's threads, so
+        // they add up to more than the analysis wall clock — that gap IS the
+        // parallelism
+        let ruleTimings = Rules.timingsMs ()
+        let rulesMs = ruleTimings |> List.sumBy snd
+
+        Out.dim
+            $"  timing: load {loadSw.ElapsedMilliseconds} ms, compile {runCompileMs} ms, analysis {runAnalysisMs} ms wall (rules {rulesMs} ms summed across threads)"
+
+        let slowest =
+            ruleTimings
+            |> List.truncate 5
+            |> List.map (fun (name, ms) -> $"{name} {ms}ms")
+            |> String.concat ", "
+
+        if slowest <> "" then
+            Out.dim $"  slowest rules: {slowest}"
 
         if opts.DryRun then
             let n = (reportedSoFar ()) |> List.filter (fun f -> f.Fixable) |> List.length

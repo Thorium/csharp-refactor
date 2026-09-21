@@ -186,6 +186,25 @@ class C
         firedText source (suggestCode "CR0070" source)
     )
 
+    // the loader failure's editor offer (FR0151's): the messages joined in
+    // place of the one `.Message` read, `using System.Linq` added; the
+    // aggregate has no fix, and a sweep applies nothing
+    match suggestCode "CR0070" source with
+    | [ loader; aggregate ] ->
+        let join = loader.Fixes |> List.exactlyOne
+        Assert.True join.EditorOnly
+        let joined = applyFix source join
+
+        Assert.Contains(
+            "Console.WriteLine(string.Join(\"; \", e.LoaderExceptions.Where(x => x != null).Select(x => x.Message)));",
+            joined
+        )
+
+        Assert.Contains("using System.Linq;", joined)
+        Assert.Empty aggregate.Fixes
+        Assert.Equal(normalize source, fixAll "CR0070" source)
+    | other -> failwithf "Expected two notes, got %A" other
+
 // ---- CR0061 / CR0062 / CR0063 ----
 
 [<Fact>]
@@ -218,3 +237,158 @@ class Buffer { readonly MemoryStream ms = new MemoryStream(); }
     Assert.Equal(2, unreleased.Length)
     Assert.True(unreleased |> List.exists (fun s -> s.Message.Contains "Cancel frees nothing"))
     Assert.Equal<string list>([ "Dispose" ], firedText source (suggestCode "CR0063" source))
+
+[<Fact>]
+let ``CR0061 and CR0062 offer the interface and the release in the editor, never in a sweep`` () =
+    let source =
+        """
+using System;
+using System.IO;
+using System.Threading;
+class Owner
+{
+    readonly FileStream stream = new FileStream("x", FileMode.Open);
+    readonly SemaphoreSlim gate = new SemaphoreSlim(1);
+    int Read() => stream.ReadByte();
+}
+class Forgetful : IDisposable
+{
+    readonly FileStream stream = new FileStream("x", FileMode.Open);
+    readonly CancellationTokenSource cts = new CancellationTokenSource();
+    public void Dispose()
+    {
+        cts.Cancel();
+    }
+}
+"""
+
+    let ownerless = suggestCode "CR0061" source |> List.exactlyOne
+    let implement = ownerless.Fixes |> List.exactlyOne
+    Assert.True(implement.EditorOnly, "implementing an interface is the editor's offer")
+    let implemented = applyFix source implement
+    Assert.Contains("class Owner : IDisposable", implemented)
+    Assert.Contains("    public void Dispose()\n    {\n        stream?.Dispose();\n    }\n}", implemented)
+    Assert.DoesNotContain("gate?.Dispose()", implemented)
+    Assert.Equal(normalize source, fixAll "CR0061" source)
+
+    let unreleased = suggestCode "CR0062" source
+    Assert.Equal(2, unreleased.Length)
+
+    for s in unreleased do
+        let release = s.Fixes |> List.exactlyOne
+        Assert.True release.EditorOnly
+        let released = applyFix source release
+
+        Assert.Contains(
+            "    public void Dispose()\n    {\n        "
+            + (if s.Message.Contains "'cts'" then
+                   "cts?.Dispose();"
+               else
+                   "stream?.Dispose();")
+            + "\n        cts.Cancel();",
+            released
+        )
+
+[<Fact>]
+let ``CR0064 offers the guard, the narrower IO catch and a log line in the editor`` () =
+    let source =
+        """
+using System;
+using System.IO;
+using Microsoft.Extensions.Logging;
+namespace Microsoft.Extensions.Logging
+{
+    public interface ILogger { }
+    public static class LoggerExtensions
+    {
+        public static void LogError(this ILogger l, System.Exception exception, string message, params object[] args) { }
+        public static void LogInformation(this ILogger l, string message, params object[] args) { }
+    }
+}
+class C
+{
+    readonly ILogger _log;
+    public C(ILogger log) { _log = log; _log.LogInformation("ready"); }
+    int Ratio(int a, int b)
+    {
+        try { return a / b; } catch { return 0; }
+    }
+    string Read(string path)
+    {
+        try
+        {
+            return File.ReadAllText(path);
+        }
+        catch (Exception)
+        {
+            return "";
+        }
+    }
+}
+"""
+
+    match suggestCode "CR0064" source with
+    | [ ratio; read ] ->
+        Assert.True(ratio.Fixes |> List.forall (fun f -> f.EditorOnly))
+        let guard = ratio.Fixes |> List.find (fun f -> f.Title.StartsWith "Guard")
+        Assert.Contains("if (b == 0) return 0;\n        return a / b;", applyFix source guard)
+
+        let narrower = read.Fixes |> List.find (fun f -> f.Title.StartsWith "Catch the IO")
+
+        Assert.Contains(
+            "catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)",
+            applyFix source narrower
+        )
+
+        let logged = read.Fixes |> List.find (fun f -> f.Title.StartsWith "Log")
+        let loggedSource = applyFix source logged
+
+        Assert.Contains(
+            "catch (Exception ex)\n        {\n            _log.LogError(ex, \"Read failed\");\n            return \"\";",
+            loggedSource
+        )
+
+        // the division body does no IO; the IO body is no division
+        Assert.DoesNotContain(ratio.Fixes, fun f -> f.Title.StartsWith "Catch the IO")
+        Assert.DoesNotContain(read.Fixes, fun f -> f.Title.StartsWith "Guard")
+        Assert.Equal(normalize source, fixAll "CR0064" source)
+    | other -> failwithf "Expected two swallow notes, got %A" other
+
+[<Fact>]
+let ``CR0064 keeps the IO narrowing off a body that reads and then parses`` () =
+    // the parser's exception would escape a catch narrowed to IO
+    let source =
+        """
+using System;
+using System.IO;
+using System.Text.Json;
+class C
+{
+    int Read(string path)
+    {
+        try
+        {
+            var text = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<int>(text);
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+    int Read2(string path)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<int>(File.ReadAllText(path));
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+}
+"""
+
+    for s in suggestCode "CR0064" source do
+        Assert.DoesNotContain(s.Fixes, fun f -> f.Title.StartsWith "Catch the IO")

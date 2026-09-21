@@ -61,45 +61,6 @@ type CompilationIndex =
 let private comparer = SymbolEqualityComparer.Default
 
 let private build (compilation: Compilation) : CompilationIndex =
-    let writes = Dictionary<ISymbol, WriteKind list>(comparer)
-    let nameOf = HashSet<ISymbol>(comparer)
-    let entities = HashSet<ISymbol>(comparer)
-    let identity = HashSet<ISymbol>(comparer)
-    let derived = HashSet<ISymbol>(comparer)
-    let hostile = HashSet<ISymbol>(comparer)
-    let mentionedStrings = HashSet<string>()
-    let formatted = HashSet<ISymbol>(comparer)
-    let constructions = Dictionary<ISymbol, (bool * Set<string>) list>(comparer)
-    let derivedTypes = Dictionary<ISymbol, INamedTypeSymbol list>(comparer)
-
-    let addTo (d: Dictionary<ISymbol, 'a list>) (k: ISymbol) (v: 'a) =
-        if not (isNull k) then
-            let k = k.OriginalDefinition
-
-            match d.TryGetValue k with
-            | true, vs -> d.[k] <- v :: vs
-            | _ -> d.[k] <- [ v ]
-
-    let uses = Dictionary<ISymbol, Use list>(comparer)
-
-    let addWrite (s: ISymbol) (k: WriteKind) =
-        if not (isNull s) then
-            match writes.TryGetValue s with
-            | true, ks -> writes.[s] <- k :: ks
-            | _ -> writes.[s] <- [ k ]
-
-    let addUse (s: ISymbol) (u: Use) =
-        match uses.TryGetValue s with
-        | true, us -> uses.[s] <- u :: us
-        | _ -> uses.[s] <- [ u ]
-
-    let typeOf (m: SemanticModel) (e: SyntaxNode) = m.GetTypeInfo(e).Type
-
-    // types are keyed by their definition: `Base<int>` in a base list derives from `Base<T>`
-    let addType (set: HashSet<ISymbol>) (t: ITypeSymbol) =
-        if not (isNull t) then
-            set.Add(t.OriginalDefinition.WithNullableAnnotation NullableAnnotation.NotAnnotated)
-            |> ignore
 
     // the names a shape rule may ask uses of, read off the declarations by
     // syntax first: a tuple-typed or DateTime-typed slot, a public mutable
@@ -157,7 +118,51 @@ let private build (compilation: Compilation) : CompilationIndex =
                 "GetHashCode"
             ]
 
-    for tree in compilation.SyntaxTrees do
+    /// One tree's findings, in its own collectors: the trees are scanned in
+    /// parallel (each with its own semantic model, which is where the time
+    /// goes) and merged in compilation order, so the lists come out exactly
+    /// as one sequential pass over the trees would have left them.
+    let scanTree (tree: SyntaxTree) =
+        let writes = Dictionary<ISymbol, WriteKind list>(comparer)
+        let nameOf = HashSet<ISymbol>(comparer)
+        let entities = HashSet<ISymbol>(comparer)
+        let identity = HashSet<ISymbol>(comparer)
+        let derived = HashSet<ISymbol>(comparer)
+        let hostile = HashSet<ISymbol>(comparer)
+        let mentionedStrings = HashSet<string>()
+        let formatted = HashSet<ISymbol>(comparer)
+        let constructions = Dictionary<ISymbol, (bool * Set<string>) list>(comparer)
+        let derivedTypes = Dictionary<ISymbol, INamedTypeSymbol list>(comparer)
+
+        let addTo (d: Dictionary<ISymbol, 'a list>) (k: ISymbol) (v: 'a) =
+            if not (isNull k) then
+                let k = k.OriginalDefinition
+
+                match d.TryGetValue k with
+                | true, vs -> d.[k] <- v :: vs
+                | _ -> d.[k] <- [ v ]
+
+        let uses = Dictionary<ISymbol, Use list>(comparer)
+
+        let addWrite (s: ISymbol) (k: WriteKind) =
+            if not (isNull s) then
+                match writes.TryGetValue s with
+                | true, ks -> writes.[s] <- k :: ks
+                | _ -> writes.[s] <- [ k ]
+
+        let addUse (s: ISymbol) (u: Use) =
+            match uses.TryGetValue s with
+            | true, us -> uses.[s] <- u :: us
+            | _ -> uses.[s] <- [ u ]
+
+        let typeOf (m: SemanticModel) (e: SyntaxNode) = m.GetTypeInfo(e).Type
+
+        // types are keyed by their definition: `Base<int>` in a base list derives from `Base<T>`
+        let addType (set: HashSet<ISymbol>) (t: ITypeSymbol) =
+            if not (isNull t) then
+                set.Add(t.OriginalDefinition.WithNullableAnnotation NullableAnnotation.NotAnnotated)
+                |> ignore
+
         let m = compilation.GetSemanticModel tree
 
         for n in tree.GetRoot().DescendantNodes() do
@@ -382,6 +387,56 @@ let private build (compilation: Compilation) : CompilationIndex =
                             addType formatted info.Type
             | _ -> ()
 
+        writes,
+        nameOf,
+        entities,
+        identity,
+        derived,
+        hostile,
+        mentionedStrings,
+        formatted,
+        constructions,
+        derivedTypes,
+        uses
+
+    let scanned = compilation.SyntaxTrees |> Array.ofSeq |> Array.Parallel.map scanTree
+
+    let writes = Dictionary<ISymbol, WriteKind list>(comparer)
+    let nameOf = HashSet<ISymbol>(comparer)
+    let entities = HashSet<ISymbol>(comparer)
+    let identity = HashSet<ISymbol>(comparer)
+    let derived = HashSet<ISymbol>(comparer)
+    let hostile = HashSet<ISymbol>(comparer)
+    let mentionedStrings = HashSet<string>()
+    let formatted = HashSet<ISymbol>(comparer)
+    let constructions = Dictionary<ISymbol, (bool * Set<string>) list>(comparer)
+    let derivedTypes = Dictionary<ISymbol, INamedTypeSymbol list>(comparer)
+    let uses = Dictionary<ISymbol, Use list>(comparer)
+
+    // a tree's list holds its entries newest first, as the whole does: the
+    // tree's entries go in front of the earlier trees', as one pass would
+    let mergeLists (into: Dictionary<ISymbol, 'a list>) (from: Dictionary<ISymbol, 'a list>) =
+        for kv in from do
+            let existing =
+                match into.TryGetValue kv.Key with
+                | true, xs -> xs
+                | _ -> []
+
+            into.[kv.Key] <- kv.Value @ existing
+
+    for w, n, e, i, d, h, s, f, c, dt, u in scanned do
+        mergeLists writes w
+        nameOf.UnionWith n
+        entities.UnionWith e
+        identity.UnionWith i
+        derived.UnionWith d
+        hostile.UnionWith h
+        mentionedStrings.UnionWith s
+        formatted.UnionWith f
+        mergeLists constructions c
+        mergeLists derivedTypes dt
+        mergeLists uses u
+
     {
         Writes = writes
         NameOfTargets = nameOf
@@ -398,10 +453,51 @@ let private build (compilation: Compilation) : CompilationIndex =
 
 let private table = ConditionalWeakTable<Compilation, Lazy<CompilationIndex>>()
 
+/// The time a thread has spent in `ofCompilation` — building an index, or
+/// waiting for the thread that is — so a rule's timer can leave it out: the
+/// build is one cost per compilation, not the bill of whichever rule asked
+/// first, nor of every rule that stood behind it.
+type private Clock private () =
+    [<System.ThreadStatic; DefaultValue>]
+    static val mutable private inside: int64
+
+    static member Inside
+        with get () = Clock.inside
+        and set (v: int64) = Clock.inside <- v
+
+let private buildTicks = ref 0L
+
+/// Stopwatch ticks this thread has spent in `ofCompilation` so far.
+let threadInsideTicks () = Clock.Inside
+
+/// Stopwatch ticks spent building indexes since the last reset, all threads.
+let buildTicksSoFar () =
+    System.Threading.Interlocked.Read &buildTicks.contents
+
+let resetBuildTicks () =
+    System.Threading.Interlocked.Exchange(&buildTicks.contents, 0L) |> ignore
+
 /// The index of a compilation, built on first use.
 let ofCompilation (compilation: Compilation) : CompilationIndex =
-    let lazyIndex = table.GetValue(compilation, fun c -> lazy (build c))
-    lazyIndex.Value
+    let sw = System.Diagnostics.Stopwatch.StartNew()
+
+    let lazyIndex =
+        table.GetValue(
+            compilation,
+            fun c ->
+                lazy
+                    (let building = System.Diagnostics.Stopwatch.StartNew()
+                     let index = build c
+
+                     System.Threading.Interlocked.Add(&buildTicks.contents, building.ElapsedTicks)
+                     |> ignore
+
+                     index)
+        )
+
+    let index = lazyIndex.Value
+    Clock.Inside <- Clock.Inside + sw.ElapsedTicks
+    index
 
 let private key (t: ITypeSymbol) =
     t.WithNullableAnnotation NullableAnnotation.NotAnnotated

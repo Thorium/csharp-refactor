@@ -39,24 +39,108 @@ type private Spelling =
         TypeName: string
     }
 
-let private spellingOf (model: SemanticModel) (node: SyntaxNode) : Spelling option =
-    let ofParts (left: SyntaxNode) (dot: SyntaxToken) (right: SimpleNameSyntax) =
-        match model.GetSymbolInfo(left).Symbol, model.GetSymbolInfo(right).Symbol with
-        | (:? INamespaceSymbol as ns), (:? INamedTypeSymbol) when not ns.IsGlobalNamespace ->
-            Some
-                {
-                    Prefix = left
-                    Dot = dot
-                    Namespace = ns
-                    TypeName = right.Identifier.ValueText
-                }
-        | _ -> None
-
+/// The leftmost identifier of a dotted chain of plain names (`System` in
+/// `System.Text.Json.JsonSerializer`); None where the chain holds anything
+/// else (`this.x`, `f().y`, `a[0].z`), which no namespace spelling does.
+[<TailCall>]
+let rec private chainRoot (node: SyntaxNode) : IdentifierNameSyntax option =
     match node with
-    | :? QualifiedNameSyntax as q -> ofParts q.Left q.DotToken q.Right
+    | :? IdentifierNameSyntax as id -> Some id
+    | :? QualifiedNameSyntax as q -> chainRoot q.Left
     | :? MemberAccessExpressionSyntax as m when m.IsKind SyntaxKind.SimpleMemberAccessExpression ->
-        ofParts m.Expression m.OperatorToken m.Name
+        chainRoot m.Expression
     | _ -> None
+
+/// The simple name of every namespace a compilation can see, its own and
+/// its references' (`System`, `Text`, `Json`, `Microsoft`…): the only
+/// names a chain's root identifier can bind to a namespace by. Once per
+/// compilation.
+let private namespaceNames =
+    System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, Lazy<Collections.Generic.HashSet<string>>>()
+
+let private namespaceNamesOf (compilation: Compilation) =
+    namespaceNames
+        .GetValue(
+            compilation,
+            fun c ->
+                lazy
+                    (let names = Collections.Generic.HashSet<string>()
+
+                     let rec walk (ns: INamespaceSymbol) =
+                         for child in ns.GetNamespaceMembers() do
+                             names.Add child.Name |> ignore
+                             walk child
+
+                     walk c.GlobalNamespace
+                     names)
+        )
+        .Value
+
+/// The spellings of a file. Binding every `a.b` of a file twice was the
+/// rule's whole cost (a startup file of service-registration chains took
+/// a quarter of a second for nothing; a symbol lookup is a third of a
+/// millisecond), so a chain is bound only when its root identifier can be
+/// a namespace — spelled like one the compilation knows, or like an alias
+/// the file declares — and is one: a namespace holds nothing but
+/// namespaces and types, so a chain rooted in a local, a member or a type
+/// spells no namespace at any prefix. The root is bound once per file,
+/// not once per prefix of every chain it heads.
+let private spellingsOf (model: SemanticModel) (root: SyntaxNode) (nodes: SyntaxNode seq) : Spelling list =
+    let namespaceRoots = System.Collections.Generic.Dictionary<SyntaxNode, bool>()
+    let knownNames = namespaceNamesOf model.Compilation
+
+    let aliases =
+        root.DescendantNodes()
+        |> Seq.choose (fun n ->
+            match n with
+            | :? UsingDirectiveSyntax as u when not (isNull u.Alias) -> Some u.Alias.Name.Identifier.ValueText
+            | _ -> None)
+        |> Collections.Generic.HashSet
+
+    let rootIsNamespace (left: SyntaxNode) =
+        match chainRoot left with
+        | None -> false
+        | Some root ->
+            match namespaceRoots.TryGetValue root with
+            | true, answer -> answer
+            | _ ->
+                let name = root.Identifier.ValueText
+
+                let answer =
+                    (knownNames.Contains name || aliases.Contains name)
+                    && (match model.GetSymbolInfo(root).Symbol with
+                        | :? INamespaceSymbol -> true
+                        | _ -> false)
+
+                namespaceRoots.[root] <- answer
+                answer
+
+    let ofParts (left: SyntaxNode) (dot: SyntaxToken) (right: SimpleNameSyntax) =
+        if not (rootIsNamespace left) then
+            None
+        else
+            match model.GetSymbolInfo(left).Symbol with
+            | :? INamespaceSymbol as ns when not ns.IsGlobalNamespace ->
+                match model.GetSymbolInfo(right).Symbol with
+                | :? INamedTypeSymbol ->
+                    Some
+                        {
+                            Prefix = left
+                            Dot = dot
+                            Namespace = ns
+                            TypeName = right.Identifier.ValueText
+                        }
+                | _ -> None
+            | _ -> None
+
+    nodes
+    |> Seq.choose (fun node ->
+        match node with
+        | :? QualifiedNameSyntax as q -> ofParts q.Left q.DotToken q.Right
+        | :? MemberAccessExpressionSyntax as m when m.IsKind SyntaxKind.SimpleMemberAccessExpression ->
+            ofParts m.Expression m.OperatorToken m.Name
+        | _ -> None)
+    |> List.ofSeq
 
 let private insideUsingOrAlias (node: SyntaxNode) =
     node.Ancestors()
@@ -71,8 +155,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
     let spellings =
         root.DescendantNodes()
         |> Seq.filter (insideUsingOrAlias >> not)
-        |> Seq.choose (spellingOf model)
-        |> List.ofSeq
+        |> spellingsOf model root
 
     spellings
     |> List.groupBy (fun s -> s.Namespace.ToDisplayString())
@@ -138,22 +221,42 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
 
                 let span = TextSpan.FromBounds(group.Head.Prefix.SpanStart, group.Head.Dot.Span.End)
 
+                // a note stands as it is; a fix waits for the re-bind, all of a
+                // file's together (Choice2Of2: the candidate with its edits)
                 if clash then
                     Some(
-                        Suggestion.note
-                            Code
-                            (message + " (held: the file already uses a name it would shorten to)")
-                            span
+                        Choice1Of2(
+                            Suggestion.note
+                                Code
+                                (message + " (held: the file already uses a name it would shorten to)")
+                                span
+                        )
                     )
                 elif placed.IsNone then
-                    Some(Suggestion.note Code (message + " (held: the usings sit under a directive)") span)
-                elif Guards.speculativeCheck model edits then
-                    Some
-                        {
-                            Code = Code
-                            Message = message
-                            Span = span
-                            Fixes = [ Suggestion.fix $"Add 'using {nsName};' and shorten every use" Code edits ]
-                        }
+                    Some(Choice1Of2(Suggestion.note Code (message + " (held: the usings sit under a directive)") span))
                 else
-                    None)
+                    Some(
+                        Choice2Of2(
+                            {
+                                Code = Code
+                                Message = message
+                                Span = span
+                                Fixes = [ Suggestion.fix $"Add 'using {nsName};' and shorten every use" Code edits ]
+                            },
+                            edits
+                        )
+                    ))
+    |> fun found ->
+        let notes =
+            found
+            |> List.choose (function
+                | Choice1Of2 note -> Some note
+                | Choice2Of2 _ -> None)
+
+        let candidates =
+            found
+            |> List.choose (function
+                | Choice2Of2 candidate -> Some candidate
+                | Choice1Of2 _ -> None)
+        // a startup file spelling thirty namespaces is one re-bind, not thirty
+        notes @ Guards.speculativeCheckEach model candidates

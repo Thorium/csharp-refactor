@@ -256,6 +256,17 @@ let rules: Rule list =
         rule "CR0170" Category.Correctness "a loop in a method taking a CancellationToken observes it"
         rule "CR0171" Category.Correctness "a collection mutated under its own foreach"
         |> priority
+        rule "CR0172" Category.Idiom "a local initialised with a constant and never written is const"
+        rule "CR0173" Category.Idiom "a return or assignment every branch performs is one of a conditional"
+        |> yields [ "IDE0046"; "IDE0045" ]
+        rule "CR0174" Category.Performance "a Substring handed to a span-reading consumer is AsSpan"
+        |> yields [ "CA1846" ]
+        rule "CR0175" Category.Performance "a prefix or suffix cut out to be compared is StartsWith or EndsWith"
+        rule "CR0176" Category.Performance "a ToCharArray a foreach reads once is the string itself"
+        rule
+            "CR0177"
+            Category.Performance
+            "a local computed inside a loop from nothing the loop changes is computed once, above it"
     ]
 
 let private byCode = rules |> List.map (fun r -> r.Code, r) |> Map.ofList

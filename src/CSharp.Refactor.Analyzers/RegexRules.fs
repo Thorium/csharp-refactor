@@ -8,9 +8,12 @@
 ///
 /// CR0108 (performance, fix): `Regex.IsMatch(s, "^abc")` is
 /// `s.StartsWith("abc", StringComparison.Ordinal)`, `Regex.IsMatch(s,
-/// "abc")` is `Contains`, and
-/// `Regex.Replace(s, "abcd", "x")` is `s.Replace("abcd", "x")` — for a
-/// pattern that is plain text. Guards: the pattern (any literal spelling)
+/// "abc")` is `Contains`, `Regex.Replace(s, "abcd", "x")` is
+/// `s.Replace("abcd", "x")`, `Regex.Matches(s, "ab").Count` is
+/// `s.AsSpan().Count("ab")` (.NET 8) and `Regex.Split(s, ", ")` is
+/// `s.Split(", ")` (.NET Core 2.0) — for a pattern that is plain text; the
+/// span count and the split see every non-overlapping occurrence, empties
+/// kept, as the regex does. Guards: the pattern (any literal spelling)
 /// holds no metacharacter and no backslash, quote or control character
 /// (it is re-emitted verbatim, and the decoded text would need
 /// re-escaping); a `Replace` with a `$` anywhere in the replacement, an
@@ -23,8 +26,12 @@
 /// and `Replace(string, string)` are ordinal already.
 ///
 /// CR0109 (performance, fix): a `Regex` built from a literal inside a
-/// method, accessor, local function or lambda body is compiled on every
-/// call (a field initializer or a constructor builds once per object). With `[GeneratedRegex]` resolvable and the containing
+/// method, accessor, local function or lambda body: a construction is
+/// parsed on every call (12x and 2.6 KB), a static call is served from the
+/// runtime's cache of fifteen patterns until it turns over, and either
+/// runs the interpreter where the generated regex runs its own code, near
+/// three times faster (a field initializer or a constructor builds once
+/// per object). With `[GeneratedRegex]` resolvable and the containing
 /// type chain declared in this file, the pattern becomes a
 /// `[GeneratedRegex("lit")] private static partial Regex LitRegex();`
 /// (every type in the chain gains `partial`); otherwise a `private static
@@ -35,7 +42,9 @@
 /// bound to, else the pattern's words, else the enclosing member's name,
 /// numbered where taken; a bare `Regex` resolves only under a `using`
 /// that precedes the insertion point. The string-operation rewrite
-/// (CR0108) subsumes the hoist on the same site.
+/// (CR0108) subsumes the hoist on the same site, and a plain-text pattern
+/// under no options is never hoisted, rewritten or not: the regex over
+/// plain text is the thing to lose, not to cement into a generated one.
 ///
 /// CR0110 (performance, note): `new HttpClient()` per call or in a loop
 /// exhausts sockets — the note names the lifetime question
@@ -149,7 +158,43 @@ let private plainText (text: string) =
     && text
        |> Seq.forall (fun c -> not (metacharacters.Contains c) && c <> '"' && not (Char.IsControl c))
 
+/// Plain text behind a `^` anchor, or bare.
+let private plainCore (text: string) =
+    plainText (if text.StartsWith "^" then text.Substring 1 else text)
+
+/// A plain-text pattern under no options: the string operation says it, and
+/// the hoist stands down for it, rewritten or not — a regex over plain text
+/// is not one to cement into a generated one.
+let private plainSite (text: string) (options: RegexOptions option) = plainCore text && options.IsNone
+
+let private hasMethod (t: INamedTypeSymbol) (name: string) (arity: int) (parameterType: string) =
+    not (isNull t)
+    && t.GetMembers name
+       |> Seq.exists (fun m ->
+           match m with
+           | :? IMethodSymbol as method ->
+               method.Parameters.Length = arity
+               && method.Parameters.[arity - 1].Type.ToDisplayString() = parameterType
+           | _ -> false)
+
 let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+    let compilation = model.Compilation
+
+    // `MemoryExtensions.Count(ReadOnlySpan<T>, ReadOnlySpan<T>)` arrived with .NET 8
+    let countOnSpan =
+        hasMethod (compilation.GetTypeByMetadataName "System.MemoryExtensions") "Count" 2 "System.ReadOnlySpan<T>"
+
+    // `string.Split(string)` with .NET Core 2.0; .NET Framework has only the array form
+    let splitOnString =
+        (compilation.GetSpecialType SpecialType.System_String).GetMembers "Split"
+        |> Seq.exists (fun m ->
+            match m with
+            | :? IMethodSymbol as method ->
+                method.Parameters.Length = 2
+                && method.Parameters.[0].Type.SpecialType = SpecialType.System_String
+                && method.Parameters.[1].IsOptional
+            | _ -> false)
+
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
         match n with
@@ -165,53 +210,147 @@ let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                     args
                     |> Seq.forall (fun a -> isNull a.NameColon && a.RefKindKeyword.IsKind SyntaxKind.None)
 
+                // `IsMatch`, `Match(…).Success` and `Matches(…).Count` against zero are
+                // one question: is the plain text there? `Contains`, or `StartsWith`
+                // behind a `^` anchor; `negated` spells the `Count == 0` side
+                let presence (text: string, token: SyntaxToken) (site: TextSpan) (negated: bool) =
+                    let subject = args.[0].Expression.ToString()
+                    let spelled = token.Text
+
+                    // a `$` anchor also matches before a final newline, which EndsWith
+                    // cannot say: only the `^` anchor rewrites
+                    let anchoredStart = text.StartsWith "^"
+                    let core = if anchoredStart then text.Substring 1 else text
+
+                    if not (plainText core) then
+                        None
+                    else
+                        // the literal's spelling without its anchor; a verbatim literal keeps its `@`
+                        let inner =
+                            let quoteStart = spelled.IndexOf '"'
+                            let body = spelled.Substring(quoteStart + 1, spelled.Length - quoteStart - 2)
+                            let body = if anchoredStart then body.Substring 1 else body
+                            spelled.Substring(0, quoteStart) + "\"" + body + "\""
+
+                        let call =
+                            if anchoredStart then
+                                $"{subject}.StartsWith({inner}, StringComparison.Ordinal)"
+                            else
+                                $"{subject}.Contains({inner})"
+
+                        let replacement = if negated then "!" + call else call
+
+                        let edits =
+                            if anchoredStart then
+                                Usings.importEdit model tree inv.SpanStart "System" "StringComparison"
+                                |> Option.map (fun usingEdits -> usingEdits @ [ Suggestion.replace site replacement ])
+                            else
+                                Some [ Suggestion.replace site replacement ]
+
+                        match edits with
+                        | Some edits when Guards.speculativeCheck model edits ->
+                            Some
+                                {
+                                    Code = PlainTextCode
+                                    Message = "A regex over plain text is a string operation"
+                                    Span = site
+                                    Fixes = [ Suggestion.fix "Use the string operation" PlainTextCode edits ]
+                                }
+                        | _ -> None
+
+                // `.Count` of a match collection compared with zero, or with one from
+                // below: the comparison is the presence test, `negated` its empty side
+                let countAgainstZero (counted: MemberAccessExpressionSyntax) =
+                    match counted.Parent with
+                    | :? BinaryExpressionSyntax as b ->
+                        let other =
+                            if obj.ReferenceEquals(b.Left, counted) then
+                                b.Right
+                            else
+                                b.Left
+
+                        let countOnLeft = obj.ReferenceEquals(b.Left, counted)
+
+                        match other with
+                        | :? LiteralExpressionSyntax as l when l.IsKind SyntaxKind.NumericLiteralExpression ->
+                            match l.Token.Value, b.Kind(), countOnLeft with
+                            | (:? int as 0), SyntaxKind.GreaterThanExpression, true
+                            | (:? int as 0), SyntaxKind.LessThanExpression, false
+                            | (:? int as 0), SyntaxKind.NotEqualsExpression, _
+                            | (:? int as 1), SyntaxKind.GreaterThanOrEqualExpression, true
+                            | (:? int as 1), SyntaxKind.LessThanOrEqualExpression, false -> Some(b, false)
+                            | (:? int as 0), SyntaxKind.EqualsExpression, _
+                            | (:? int as 0), SyntaxKind.LessThanOrEqualExpression, true
+                            | (:? int as 0), SyntaxKind.GreaterThanOrEqualExpression, false
+                            | (:? int as 1), SyntaxKind.LessThanExpression, true
+                            | (:? int as 1), SyntaxKind.GreaterThanExpression, false -> Some(b, true)
+                            | _ -> None
+                        | _ -> None
+                    | _ -> None
+
                 match m.Name, args.Count with
                 | "IsMatch", 2 when argsOk ->
                     match literalOf args.[1].Expression with
-                    | Some(text, token) ->
-                        let subject = args.[0].Expression.ToString()
-                        let spelled = token.Text
-
-                        // a `$` anchor also matches before a final newline, which EndsWith
-                        // cannot say: only the `^` anchor rewrites
-                        let anchoredStart = text.StartsWith "^"
-                        let core = if anchoredStart then text.Substring 1 else text
-
-                        if not (plainText core) then
-                            None
-                        else
-                            // the literal's spelling without its anchor; a verbatim literal keeps its `@`
-                            let inner =
-                                let quoteStart = spelled.IndexOf '"'
-                                let body = spelled.Substring(quoteStart + 1, spelled.Length - quoteStart - 2)
-                                let body = if anchoredStart then body.Substring 1 else body
-                                spelled.Substring(0, quoteStart) + "\"" + body + "\""
-
-                            let replacement =
-                                if anchoredStart then
-                                    $"{subject}.StartsWith({inner}, StringComparison.Ordinal)"
-                                else
-                                    $"{subject}.Contains({inner})"
-
-                            let edits =
-                                if anchoredStart then
-                                    Usings.importEdit model tree inv.SpanStart "System" "StringComparison"
-                                    |> Option.map (fun usingEdits ->
-                                        usingEdits @ [ Suggestion.replace inv.Span replacement ])
-                                else
-                                    Some [ Suggestion.replace inv.Span replacement ]
-
-                            match edits with
-                            | Some edits when Guards.speculativeCheck model edits ->
-                                Some
-                                    {
-                                        Code = PlainTextCode
-                                        Message = "A regex over plain text is a string operation"
-                                        Span = inv.Span
-                                        Fixes = [ Suggestion.fix "Use the string operation" PlainTextCode edits ]
-                                    }
-                            | _ -> None
+                    | Some literal -> presence literal inv.Span false
                     | None -> None
+                // `Regex.Match(s, "lit").Success` asks the same
+                | "Match", 2 when argsOk ->
+                    match literalOf args.[1].Expression, inv.Parent with
+                    | Some literal, (:? MemberAccessExpressionSyntax as success) when
+                        success.Name.Identifier.ValueText = "Success"
+                        ->
+                        presence literal success.Span false
+                    | _ -> None
+                // `Regex.Matches(s, "lit").Count` against zero is the presence test; on its
+                // own it counts the non-overlapping occurrences of plain text, as
+                // `s.AsSpan().Count("lit")` does (.NET 8)
+                | "Matches", 2 when argsOk ->
+                    match literalOf args.[1].Expression, inv.Parent with
+                    | Some(text, token), (:? MemberAccessExpressionSyntax as counted) when
+                        counted.Name.Identifier.ValueText = "Count"
+                        ->
+                        match countAgainstZero counted with
+                        | Some(comparison, negated) -> presence (text, token) comparison.Span negated
+                        // `Regex.Matches(null, …)` throws where `null.AsSpan().Count(…)` is 0: only a
+                        // subject the flow analysis knows not null (a nullable-enabled file)
+                        | None when
+                            countOnSpan
+                            && plainText text
+                            && model.GetTypeInfo(args.[0].Expression).Nullability.FlowState = NullableFlowState.NotNull
+                            ->
+                            let replacement = $"{args.[0].Expression}.AsSpan().Count({token.Text})"
+
+                            Usings.importEdit model tree inv.SpanStart "System" "MemoryExtensions"
+                            |> Option.map (fun usingEdits ->
+                                usingEdits @ [ Suggestion.replace counted.Span replacement ])
+                            |> Option.filter (Guards.speculativeCheck model)
+                            |> Option.map (fun edits ->
+                                {
+                                    Code = PlainTextCode
+                                    Message = "A regex count of plain text is a span count"
+                                    Span = counted.Span
+                                    Fixes = [ Suggestion.fix "Count the occurrences on the span" PlainTextCode edits ]
+                                })
+                        | None -> None
+                    | _ -> None
+                // `Regex.Split(s, "lit")` splits on every occurrence, empties kept, as
+                // `s.Split("lit")` does (.NET Core 2.0)
+                | "Split", 2 when argsOk && splitOnString ->
+                    match literalOf args.[1].Expression with
+                    | Some(text, token) when plainText text ->
+                        let edit = Suggestion.replace inv.Span $"{args.[0].Expression}.Split({token.Text})"
+
+                        if Guards.speculativeCheck model [ edit ] then
+                            Some
+                                {
+                                    Code = PlainTextCode
+                                    Message = "A regex split on plain text is string.Split"
+                                    Span = inv.Span
+                                    Fixes = [ Suggestion.fix "Use string.Split" PlainTextCode [ edit ] ]
+                                }
+                        else
+                            None
+                    | _ -> None
                 | "Replace", 3 when argsOk ->
                     match literalOf args.[1].Expression, literalOf args.[2].Expression with
                     | Some(pattern, patternToken), Some(replacementText, replacementToken) when
@@ -377,13 +516,16 @@ let private hoists (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
             ->
             match literalOf pattern, optionsOf model args.Arguments with
             // a pattern the engine rejects is CR0107's: hoisted into a generated regex
-            // it would fail the build, where the call only threw when reached
+            // it would fail the build, where the call only threw when reached; a
+            // plain-text pattern is CR0108's — a string operation, never a regex
+            // to cement into a generated one
             | Some(patternText, patternToken), Some options when
-                (try
-                    Regex(patternText, defaultArg options RegexOptions.None) |> ignore
-                    true
-                 with :? ArgumentException ->
-                     false)
+                not (plainSite patternText options)
+                && (try
+                        Regex(patternText, defaultArg options RegexOptions.None) |> ignore
+                        true
+                    with :? ArgumentException ->
+                        false)
                 ->
                 let staticCall =
                     match n with

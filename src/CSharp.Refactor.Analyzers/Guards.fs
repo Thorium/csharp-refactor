@@ -384,7 +384,13 @@ let speculativeCheckAllowing (allowed: string list) (model: SemanticModel) (edit
                 | None -> true
                 | Some f -> String.Equals(f, tree.FilePath, StringComparison.OrdinalIgnoreCase))
 
-        let changes = own |> List.map (fun e -> TextChange(e.Span, e.Replacement))
+        // in text order: the patch takes its changes sorted, and a batch of
+        // candidates comes candidate by candidate
+        let changes =
+            own
+            |> List.sortBy (fun e -> e.Span.Start)
+            |> List.map (fun e -> TextChange(e.Span, e.Replacement))
+
         let patched = tree.WithChangedText(text.WithChanges changes)
         let compilation = model.Compilation.ReplaceSyntaxTree(tree, patched)
         let newModel = compilation.GetSemanticModel(patched, false)
@@ -401,6 +407,26 @@ let speculativeCheckAllowing (allowed: string list) (model: SemanticModel) (edit
         false
 
 let speculativeCheck (model: SemanticModel) (edits: TextEdit list) : bool = speculativeCheckAllowing [] model edits
+
+/// The speculative check over many candidates of one file at once: the
+/// candidates whose edits pass. All are patched into one fork first — a
+/// fork is a re-bind of the file, and a file of forty properties checked
+/// one by one is forty re-binds — and only when that fork carries a new
+/// error is each candidate tried alone. Sound for independent edits: an
+/// edit that errors alone errors with the rest in place too, so a clean
+/// batch clears every member; a batch that fails may hold one bad edit
+/// among good ones, and the retry finds which.
+let speculativeCheckEach (model: SemanticModel) (candidates: ('a * TextEdit list) list) : 'a list =
+    match candidates with
+    | [] -> []
+    | [ (candidate, edits) ] -> if speculativeCheck model edits then [ candidate ] else []
+    | _ ->
+        if speculativeCheck model (candidates |> List.collect snd) then
+            candidates |> List.map fst
+        else
+            candidates
+            |> List.filter (fun (_, edits) -> speculativeCheck model edits)
+            |> List.map fst
 
 /// The speculative check for a cross-file edit set: every touched tree of
 /// the SAME compilation is patched into one fork, so a renamed method and

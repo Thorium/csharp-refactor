@@ -21,18 +21,35 @@ class C
     string H(string s) => Regex.Replace(s, "abcd", "$1");
     bool I(string s) => Regex.IsMatch(s, "a b", RegexOptions.IgnorePatternWhitespace);
     bool J(string s) => Regex.IsMatch(s, "[");
+    int K(string s) => Regex.Matches(s, "ON CONFLICT").Count;
+    string[] L(string s) => Regex.Split(s, ", ");
+    int M(string s) => Regex.Matches(s, @"\d+").Count;
+    bool N(string s) => Regex.Matches(s, "b").Count > 0;
+    bool O(string s) => Regex.Matches(s, "b").Count == 0;
+    bool P(string s) => 1 <= Regex.Matches(s, "^b").Count;
+    bool Q(string s) => Regex.Match(s, "b").Success;
+    bool R(string s) => !Regex.Match(s, "b").Success;
 }
 """
 
     Assert.Equal<string list>([ "\"(unclosed\""; "\"[\"" ], firedText source (suggestCode "CR0107" source))
     let fired = suggestCode "CR0108" source
-    Assert.Equal(3, fired.Length)
+    // B, D, G, K, L, N..R: H carries a substitution, I an option, M a real pattern
+    Assert.Equal(10, fired.Length)
     let fixedSource = fixAll "CR0108" source
     Assert.Contains("s.StartsWith(\"abc\", StringComparison.Ordinal)", fixedSource)
     Assert.Contains("s.Contains(\"abc\")", fixedSource)
     Assert.Contains("s.Replace(\"abcd\", \"x\")", fixedSource)
     Assert.Contains("Regex.IsMatch(s, \"abc$\")", fixedSource)
     Assert.Contains("Regex.Replace(s, \"abcd\", \"$1\")", fixedSource)
+    Assert.Contains("s.AsSpan().Count(\"ON CONFLICT\")", fixedSource)
+    Assert.Contains("bool N(string s) => s.Contains(\"b\");", fixedSource)
+    Assert.Contains("bool O(string s) => !s.Contains(\"b\");", fixedSource)
+    Assert.Contains("bool P(string s) => s.StartsWith(\"b\", StringComparison.Ordinal);", fixedSource)
+    Assert.Contains("bool Q(string s) => s.Contains(\"b\");", fixedSource)
+    Assert.Contains("bool R(string s) => !s.Contains(\"b\");", fixedSource)
+    Assert.Contains("s.Split(\", \")", fixedSource)
+    Assert.Contains("Regex.Matches(s, @\"\\d+\").Count", fixedSource)
     Assert.Contains("using System;", fixedSource)
 
 // ---- CR0109 ----
@@ -49,7 +66,7 @@ class C
     /// <summary>Digits.</summary>
     bool A(string s) => Regex.IsMatch(s, @"\d+") && Regex.IsMatch(s, @"\w+");
     string B(string s) => Regex.Replace(s, @"\s+", " ");
-    bool D(string s) => new Regex("^x", RegexOptions.IgnoreCase).IsMatch(s);
+    bool D(string s) => new Regex("^x+", RegexOptions.IgnoreCase).IsMatch(s);
     bool E(string s) { var codes = Regex.Matches(s, @"Error Code (\d+)"); return codes.Count > 0; }
     string F(string s) => Regex.Replace(s, "Error Code", "");
     static readonly Regex Once = new Regex("on.e");
@@ -59,7 +76,7 @@ class C
 """
 
     let fired = suggestCode "CR0109" source
-    // A twice, B, D, E, G, H twice; F is CR0108's (plain text)
+    // A twice, B, D, E, G, H twice; F is CR0108's (plain text: no hoist, a string operation)
     Assert.Equal(8, fired.Length)
     Assert.True(fired |> List.forall (fun s -> not s.Fixes.IsEmpty))
     let fixedSource = fixAllAllowing [ "CS8795" ] None "CR0109" source
@@ -74,7 +91,7 @@ class C
     Assert.Contains("string B(string s) => BRegex().Replace(s, \" \");", fixedSource)
 
     Assert.Contains(
-        "[GeneratedRegex(\"^x\", RegexOptions.IgnoreCase)]\n    private static partial Regex DRegex();",
+        "[GeneratedRegex(\"^x+\", RegexOptions.IgnoreCase)]\n    private static partial Regex DRegex();",
         normalize fixedSource
     )
 

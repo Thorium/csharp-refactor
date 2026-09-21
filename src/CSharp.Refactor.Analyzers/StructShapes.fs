@@ -350,7 +350,9 @@ let private valueTuples (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
         []
     else
         let declarations = tupleDeclarations tree model
-        let index = Index.ofCompilation model.Compilation
+        // built on the first declaration only: a file without a reference tuple
+        // never asks the compilation for its index
+        let index = lazy (Index.ofCompilation model.Compilation)
 
         // is one declaration safe to retype: its shape open, every use simple
         // (an ItemN read, a deconstruction, handed along) — in this compilation
@@ -366,7 +368,7 @@ let private valueTuples (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
             let gateOpen = (symbol :? ILocalSymbol) || shapeOpen ctx owner
 
             let hereSimple =
-                Index.usesOf index symbol
+                Index.usesOf index.Value symbol
                 |> List.forall (fun u -> simpleUse (model.Compilation.GetSemanticModel u.Id.SyntaxTree) symbol u.Id)
 
             let exported =

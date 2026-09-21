@@ -60,16 +60,16 @@ a section, and its category and default state match the code.
 | CR0054 | Performance | v | | | CA1842, CA1843 | `Task.WhenAll(new[] { t })`, `Task.WaitAll(new[] { t })` | note; editor: the task itself / `t.Wait()` |
 | CR0055 | Correctness | v | | | CA2016 | `Foo(x, CancellationToken.None)` / `Foo(x, default)` while `ct` is in scope | `Foo(x, ct)` |
 | CR0060 | Correctness | v | | | CA2000 | `var s = new FileStream(…); … s.ReadByte();` never disposed, staying in scope | `using var s = …`; a note naming the destination when it escapes to an unknown owner |
-| CR0061 | Correctness | v | | v | CA1001 | a type constructing a disposable field without `IDisposable` | note |
-| CR0062 | Correctness | v | | v | CA2213 | a `Dispose` that never releases an owned disposable field | note (`Cancel` without `Dispose` named separately) |
+| CR0061 | Correctness | v | | v | CA1001 | a type constructing a disposable field without `IDisposable` | note; editor: `: IDisposable` and a `Dispose` releasing the fields |
+| CR0062 | Correctness | v | | v | CA2213 | a `Dispose` that never releases an owned disposable field | note (`Cancel` without `Dispose` named separately); editor: `field?.Dispose();` first in `Dispose` |
 | CR0063 | Correctness | v | | | | `public void Dispose()` on a type not implementing `IDisposable` | note |
-| CR0064 | Correctness | v | | | CA1031 | `catch { }`, `catch (Exception) { return null; }`, a filter never reading the exception | note |
+| CR0064 | Correctness | v | | | CA1031 | `catch { }`, `catch (Exception) { return null; }`, a filter never reading the exception | note; editor: a divisor guard, `catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)`, a log line in the file's idiom |
 | CR0065 | Idiom | v | | | | `catch (E ex) { if (!Cond(ex)) throw; … }` | `catch (E ex) when (Cond(ex)) { … }` |
 | CR0066 | Correctness | v | | v | CA2219 | `throw` inside `finally` | note |
 | CR0067 | Correctness | v | | | CA1065 | `throw` inside `Equals`/`GetHashCode`/`ToString`/`Dispose`/a static constructor | note |
 | CR0068 | Correctness | v | | | CA2201 | `new NullReferenceException()`, `new IndexOutOfRangeException()`, `new OutOfMemoryException()`… | note |
 | CR0069 | Idiom | v | v | | | `throw new InvalidOperationException("Rejected");` with a constant message | `$"Rejected, calling {nameof(M)} with x: {x}"` |
-| CR0070 | Correctness | v | | | | `catch (ReflectionTypeLoadException e) { Log(e.Message); }`, `AggregateException`, `WebException`, `SqlException` | note |
+| CR0070 | Correctness | v | | | | `catch (ReflectionTypeLoadException e) { Log(e.Message); }`, `AggregateException`, `WebException`, `SqlException` | note; editor: the `LoaderExceptions` messages joined in place of `e.Message` |
 | CR0080 | Idiom | v | v | | | a `class` whose every instance member is a get-only/`init` property, a `readonly` field or a constructor | `record` |
 | CR0081 | Performance | v | v | | | a `record` of at most four small unmanaged fields | `readonly record struct` |
 | CR0082 | Performance | v | v | | | `Tuple<int, string>` in a private/internal signature, field or local; `Tuple.Create(a, b)` | `(int, string)`, `(a, b)` |
@@ -88,8 +88,8 @@ a section, and its category and default state match the code.
 | CR0105 | Correctness | v | | | CA1305 | `double.Parse(s)`, `DateTime.Parse(s)` without a provider | editor: `CultureInfo.InvariantCulture` (primary) / `CurrentCulture`; CLI under `invariant` |
 | CR0106 | Correctness | v | | | | `DateTime.Now` as an instant; `DateTime.Today`, `DateTime.Now.Date` (notes) | `DateTime.UtcNow` under `utc_now`; editor always |
 | CR0107 | Correctness | v | | v | | `new Regex("(unclosed")`, `Regex.IsMatch(s, "[")` | note: a guaranteed `ArgumentException` |
-| CR0108 | Performance | v | | | | `Regex.IsMatch(s, "^abc")`, `Regex.Replace(s, "abcd", "x")` with a plain literal | `s.StartsWith("abc", StringComparison.Ordinal)`, `s.Contains("abc")`, `s.Replace("abcd", "x")` |
-| CR0109 | Performance | v | | | SYSLIB1045 | `new Regex("lit")` or `Regex.Match(s, "lit")` inside a method body | `[GeneratedRegex("lit")] private static partial Regex LitRegex();` (.NET 7+, the type made `partial`) or a `static readonly Regex` field |
+| CR0108 | Performance | v | | | | `Regex.IsMatch(s, "^abc")`, `Regex.Replace(s, "abcd", "x")`, `Regex.Matches(s, "ab").Count`, `Regex.Split(s, ", ")` with a plain literal | `s.StartsWith("abc", StringComparison.Ordinal)`, `s.Contains("abc")`, `s.Replace("abcd", "x")`, `s.AsSpan().Count("ab")` (.NET 8), `s.Split(", ")` |
+| CR0109 | Performance | v | | | SYSLIB1045 | `new Regex(@"\d+")` or `Regex.Match(s, @"\d+")` inside a method body (a plain-text pattern is never hoisted: it is a string operation, CR0108's) | `[GeneratedRegex(@"\d+")] private static partial Regex DigitsRegex();` (.NET 7+, the type made `partial`) or a `static readonly Regex` field |
 | CR0110 | Performance | v | | | CA1869, CA1870 | `new HttpClient()` per call or in a loop; `MD5.Create()`/`SHA256.Create()` in a loop | note |
 | CR0111 | Idiom | v | | | | `dir + "\\" + file`, `dir + "/" + file` with path evidence | note: `Path.Combine`/`Path.Join` |
 | CR0112 | Correctness | v | | | | bidi controls, the Unicode tag block, zero-width spaces, a mid-file BOM | `200B` escape inside a regular string; note elsewhere |
@@ -134,6 +134,12 @@ a section, and its category and default state match the code.
 | CR0169 | Correctness | v | | v | | `DateTime.Now > _startedUtc`, `DateTime.UtcNow - DateTime.Today`, through locals and fields written once from `Now`/`Today`/`UtcNow` | note: the two kinds differ by the machine's offset |
 | CR0170 | Correctness | v | | | | `Task A(…, CancellationToken ct) { foreach (var x in xs) { await Process(x); } }` — a loop that awaits, sleeps or blocks on a task and never reads the token | `ct.ThrowIfCancellationRequested();` at the top of the loop body |
 | CR0171 | Correctness | v | | v | | `foreach (var x in xs) { if (x < 0) xs.Remove(x); }`, `foreach (var n in names) { … names.Add("fresh"); }` — the enumerated collection changed under its own `foreach` | `xs.RemoveAll(x => x < 0);` for the filter shape; `foreach (var n in names.ToList())` — a snapshot — otherwise |
+| CR0172 | Idiom | v | v | | | `var schema = "app";`, `int retries = 3;`, `static readonly string Prefix = "v";` — initialised with a constant, never written | `const string schema = "app";`, `const int retries = 3;`, `const string Prefix = "v";` (a public or protected field under `--api-changes`) |
+| CR0173 | Idiom | v | | | IDE0046, IDE0045 | `if (a) return "1"; else return "2";`, `if (a) return x; return y;`, `if (a) v = f(); else v = g();` | `return a ? "1" : "2";`, `v = a ? f() : g();` |
+| CR0174 | Performance | v | | | CA1846 | `int.Parse(s.Substring(6, 5))`, `sb.Append(s.Substring(6))`, `writer.Write(s[6..])` | `int.Parse(s.AsSpan(6, 5))`, `sb.Append(s.AsSpan(6))`, `writer.Write(s.AsSpan(6))` |
+| CR0175 | Performance | v | | | | `s.Length >= 6 && s.Substring(0, 6) == "ORDER-"`, `s[..6] == "ORDER-"`, `s[^3..] != "MED"` under a length guard | `s.StartsWith("ORDER-", StringComparison.Ordinal)`, `!s.EndsWith("MED", StringComparison.Ordinal)` |
+| CR0176 | Performance | v | | | | `foreach (var c in s.ToCharArray())` | `foreach (var c in s)` |
+| CR0177 | Performance | v | | | | `foreach (var x in xs) { var label = tag + ":"; Use(x, label); }` | `var label = tag + ":"; foreach (var x in xs) { Use(x, label); }` |
 
 \*) Enabled by default. A blank cell means the rule is off until
 `.editorconfig` turns it on (`dotnet_diagnostic.CRxxxx.severity = suggestion`)
@@ -811,8 +817,11 @@ object itself (`new X(this)`) registers with it; the no-ownership types
 (`HttpClient`, a shared lifetime; `MemoryStream`, `StringReader`,
 `StringWriter` over a caller's buffer; `SemaphoreSlim` and
 `ManualResetEventSlim`, whose wait handle is created lazily and whose
-disposal the BCL calls optional) are not noted. F# twin: FR0032. Yields to
-CA1001.
+disposal the BCL calls optional) are not noted. The editor offers the
+interface and a `Dispose` releasing every owned field (`field?.Dispose();`)
+above the closing brace, FR0032's offer; a disposable base wants its
+`Dispose(bool)` overridden instead, which is the author's. F# twin:
+FR0032. Yields to CA1001.
 
 ### CR0062 — correctness
 
@@ -823,7 +832,9 @@ field passed as an argument (whatever received it may release it);
 `Cancel()` touches and frees nothing and gets its own wording; the
 `Dispose` and `DisposeAsync` bodies are both read; a `base.Dispose()`
 hand-off and a `System.Reactive` file (unsubscribe, not release) stay
-quiet. F# twin: FR0047. Yields to CA2213.
+quiet. The editor offers the release as the first statement of the
+block-bodied `Dispose()`, FR0047's offer. F# twin: FR0047. Yields to
+CA2213.
 
 ### CR0063 — correctness
 
@@ -834,9 +845,14 @@ a base type either, typed — nothing can `using` it. Note. F# twin: FR0148.
 
 A catch-all that swallows — `catch { }`, `catch (Exception) { return
 null; }`, `catch (Exception e) when (flag)` never reading `e` — hides
-every failure, the ones it did not mean too. Note (the editor offers of
-the design — `TryParse`, a zero guard, an IO-only narrowing, a log line —
-are v2). Not a swallow: a handler that reads the exception (logs it,
+every failure, the ones it did not mean too. Note; the editor offers
+FR0055's three repairs, never a sweep: a divisor guard where the body is
+one integer division by a name (`if (b == 0) return d; return a / b;`),
+`catch (Exception ex) when (ex is IOException or
+UnauthorizedAccessException)` where the body does file IO, and a log line
+in the file's own logging idiom (`_log.LogError(ex, "M failed");`,
+Serilog's `Log.Error`) as the handler's first statement; `TryParse` is
+CR0166's. Not a swallow: a handler that reads the exception (logs it,
 inspects it, filters on it) or rethrows; a comment on the handler, the
 author's own acknowledgement; the `bool` probe idiom, the try body
 answering `true` and the handler `false`; a `Try…` method returning
@@ -918,9 +934,13 @@ informative member goes unread: `LoaderExceptions`/`Types`;
 `AggregateException` → `InnerExceptions`/`Flatten()`/`InnerException`;
 `WebException` → `Response`/`Status`; `SqlException` → `Errors`/`Number`
 (unverified in C#); `FileNotFoundException` → `FusionLog`/`FileName`.
-Note. Reading the member anywhere in the handler or its filter counts as
-informed; the tested type is resolved by symbol, so a user type of the
-same short name never matches. F# twin: FR0151.
+Note; for the loader failure the editor offers every `LoaderExceptions`
+message joined (`string.Join("; ", e.LoaderExceptions.Where(x => x !=
+null).Select(x => x.Message))`, `using System.Linq` added) in place of
+the one `e.Message` read, FR0151's offer. Reading the member anywhere in
+the handler or its filter counts as informed; the tested type is resolved
+by symbol, so a user type of the same short name never matches. F# twin:
+FR0151.
 
 ### CR0080 — idiom
 
@@ -1217,7 +1237,14 @@ FR0122.
 `Regex.IsMatch(s, "^abc")` is `s.StartsWith("abc",
 StringComparison.Ordinal)`, `Regex.IsMatch(s, "abc")` is
 `s.Contains("abc")`, and `Regex.Replace(s, "abcd", "x")` is
-`s.Replace("abcd", "x")` — for a pattern that is plain text. Guards: the
+`s.Replace("abcd", "x")`, `Regex.Matches(s, "ab").Count` is
+`s.AsSpan().Count("ab")` (where `MemoryExtensions.Count` resolves: .NET 8, and
+the subject is known not null — `Regex.Matches(null, …)` throws where the
+span of a null is empty)
+and `Regex.Split(s, ", ")` is `s.Split(", ")` (where the single-string
+`Split` resolves: .NET Core 2.0) — for a pattern that is plain text; the
+span count and the split count and split on every non-overlapping
+occurrence, empties kept, as the regex does. Guards: the
 pattern (any literal spelling, `@"…"` included) holds no metacharacter and
 no backslash, quote or control character (it is re-emitted verbatim, and
 the decoded text would need re-escaping); an empty pattern is refused; a
@@ -1228,13 +1255,20 @@ argument, no named or `ref` arguments; the `StartsWith` overload is the
 ordinal one (the single-argument form is current-culture and differs on
 ligatures, ignorable characters and Turkish i), `using System;` added
 when needed; `Contains(string)` and `Replace(string, string)` are ordinal
-already. The rewrite subsumes CR0109's hoist on the same site. F# twin:
-FR0015.
+already. The rewrite subsumes CR0109's hoist on the same site, and a
+plain-text pattern under no options is never hoisted, rewritten or not
+(`Regex.Replace(s, "ab", "$1")`, `Matches` enumerated): the regex over
+plain text is the thing to lose, not to cement into a generated one. F#
+twin: FR0015.
 
 ### CR0109 — performance
 
 A `Regex` built from a literal inside a method, accessor, local function
-or lambda body is compiled on every call (a field initializer or a
+or lambda body: a construction is parsed on every call (twelve times the
+cost of the match and 2.6 KB, measured in PerfClaims), a static call is
+served from the runtime's cache of fifteen patterns until the cache turns
+over, and either runs the interpreter where the generated regex runs its
+own code, nearly three times faster (a field initializer or a
 constructor builds once per object and stays). With `[GeneratedRegex]`
 resolvable and every type of the containing chain declared in this file,
 the pattern becomes `[GeneratedRegex("lit")] private static partial Regex
@@ -1249,7 +1283,8 @@ call an instance call with the pattern dropped (`Regex.Replace(s, "p",
 construction carrying one hoists whole as a field. Guards: a literal
 pattern the engine accepts (one it rejects is CR0107's: hoisted into a
 generated regex it would fail the build, where the call only threw when
-reached) and constant options, on one line, not inside an expression tree;
+reached) that is not plain text under no options (CR0108's, rewritten or
+not) and constant options, on one line, not inside an expression tree;
 the name comes from the local the result is bound to (`var emitted =
 Regex.Matches(…)` → `EmittedRegex`; a local named for the type itself —
 `regex`, `rx`, `pattern` — names nothing), else the pattern's words of
@@ -1603,10 +1638,11 @@ holes). Sinks: `CommandText` setters, `*Command` constructors,
 `Query*`/`Execute*`, and helpers named for SQL (`ExecuteSql`, `RunQuery`,
 `QueryDb`); a `FormattableString`-typed parameter (`FromSqlInterpolated`,
 `FromSql`) never fires (typed). "Built from values" is an interpolation
-with a hole, a `+` chain with a non-constant operand, `string.Format`/
-`Concat`, or a local or static field bound one hop to one; a parameter
-resolves to nothing — the caller is where the string was built. F# twin:
-FR0066. Yields to CA2100, CA3001.
+with a non-constant hole (`$"SET search_path = {Schema}"` over a `const`
+is text the author wrote), a `+` chain with a non-constant operand,
+`string.Format`/`Concat`, or a local or static field bound one hop to one;
+a parameter resolves to nothing — the caller is where the string was
+built. F# twin: FR0066. Yields to CA2100, CA3001.
 
 ### CR0121 — correctness
 
@@ -1635,9 +1671,10 @@ Anthropic key), `sk-`/`sk_live_`/`rk_live_` (OpenAI, Stripe), `whsec_`, `AIza`
 `Bearer eyJ…`, an Azure `AccountKey=`. Priority; note: a secret in source
 is in every clone and every log of it — move it to configuration and
 rotate it. Format anchoring, not entropy; a literal containing `test`,
-`example`, `sample`, `dummy`, `fake`, `placeholder`, `xxxx` or `your`, or
-an elision (`...`), is a sample and stays quiet; the literal parts of an interpolated string are
-scanned. F# twin: FR0127.
+`example`, `sample`, `dummy`, `fake`, `placeholder`, `xxxx` or `your`, an
+elision (`...`), or `123456` (the standard made-up key; six specific digits
+do not occur by chance in real key material) is a sample and stays quiet;
+the literal parts of an interpolated string are scanned. F# twin: FR0127.
 
 ### CR0124 — correctness
 
@@ -2148,3 +2185,147 @@ accepted mutate-and-leave idiom; `Dictionary.Remove`/`HashSet.Remove` and
 a `Dictionary` indexer set on CoreLib (.NET Core 3.0+) tolerate
 enumeration and are not reported;
 `System.Linq` importable for the snapshot.
+
+### CR0172 — idiom
+
+A local — or a `static readonly` field — initialised with a constant and
+never written is a `const`: `var schema = "app";` becomes `const string
+schema = "app";`, `int retries = 3;` gains the keyword, `static readonly
+string Prefix = "v";` becomes `const string Prefix = "v";` — the value
+the compiler folds, the declaration that says the name names a value,
+not a slot. The F# twin is FR0130's `[<Literal>]` (and, for the local,
+the nearest C# has to FR0007's `let mutable` strip). A field is API: a
+consumer compiled against the field loads a slot the `const` no longer
+is (a literal is read at the consumer's own compile time), so a public
+or protected field waits for `--api-changes` (or a leaf project), an
+internal one for the absence of `InternalsVisibleTo` friends, and a
+private one is the file's own; the field must carry no attribute
+(`[ThreadStatic]` means the slot) and no write anywhere in the
+compilation (a static constructor could). What follows from the local: a hole filled from the constant
+(`$"SET search_path = {schema}"`) reads as text to CR0120, where the
+`var` read as a value a later line might have reassigned. Guards: every
+declarator of the statement has an initialiser the compiler folds to a
+constant (`GetConstantValue`: a literal, a `const`, arithmetic or
+concatenation of those, an enum member, a C# 10 constant interpolation)
+of a type a `const` may have (a primitive, `decimal`, `string`, an enum;
+never `null`); no write to the local anywhere in the member — an
+assignment, a compound assignment, `++`/`--`, a `ref`/`out`/`in`
+argument, `&`, a `ref` local or return, a deconstruction target; a `var`
+is replaced by the constant's type; `using`, `ref`, `scoped` and
+already-`const` declarations, and one holding a comment or directive,
+are left alone; the speculative re-bind settles the rest.
+
+### CR0173 — idiom
+
+A `return` — or an assignment to one target — that every branch of an
+`if` performs, on a different value, is one `return` of a conditional:
+`if (a) return "1"; else return "2";` and the else-less `if (a) return
+"1"; return "2";` become `return a ? "1" : "2";`; `if (a) v = f(); else
+v = g();` becomes `v = a ? f() : g();`. The bool-literal spellings
+(`return true` / `return false`) are CR0001's, which returns the
+condition itself; this rule stands down for them. Guards: each branch is
+exactly one statement, a `return` with an expression or a simple
+assignment to the same local, parameter or field (a property setter may
+act, and the branches ran it once each); the else-less form takes the
+`return` that immediately follows the `if` in its block; the two values
+differ in text; no comment or directive inside is swallowed; an `if`
+that is another `if`'s `else` is left to the chain; the result is one
+line within the wrap column (`wrap_column`, else `max_line_length`, else
+120: a conditional over two multi-line arms — an `Ok(new …)` against a
+`NotFound(…)` of five lines — is no clearer than the `if`); an arm that is
+itself a conditional, an assignment, a lambda, a switch expression or a
+`throw` is parenthesised, and a `throw` statement is not an arm; the
+speculative re-bind settles the conditional's typing (a natural common
+type, or the target type from C# 9). No F# twin: F# has no `return`, and
+its `if` is the expression already. Yields to IDE0046 and IDE0045.
+
+### CR0174 — performance
+
+`Substring` — or a C# 8 range, `s[6..]`, `s[6..11]` — handed to a
+consumer whose `ReadOnlySpan<char>` overload means the same is `AsSpan`,
+the same characters without the copy: `int.Parse(s.Substring(6, 5))` →
+`int.Parse(s.AsSpan(6, 5))`, `sb.Append(s.Substring(6))` →
+`sb.Append(s.AsSpan(6))`, `writer.Write(s[6..])` →
+`writer.Write(s.AsSpan(6))`, `int.Parse(s[6..11])` →
+`int.Parse(s.AsSpan()[6..11])`. The consumers: the BCL's `Parse`/`TryParse` (a type in
+`System` or `System.Numerics`: the span overload takes the same culture and style; a user
+type's two overloads are its author's to keep alike), `StringBuilder.Append`,
+`TextWriter.Write` and `WriteLine` (and any writer derived from it),
+`string.Concat` — a one-identifier swap with no culture question.
+`StartsWith`, `Equals`, `IndexOf` and their kind stay out: the string
+overloads are culture-sensitive and the span twins ordinal, so the swap
+would change the comparison — safer not to fire. Measured in
+benchmarks/PerfClaims. Guards: the receiver is a `string`; the copy is
+directly the argument (one bound to a name may be read twice); the
+consumer's own type declares the overload with `ReadOnlySpan<char>` at
+that position, the other parameters unchanged (or spans a string converts
+to, `string.Concat`), any extra ones optional (`int.Parse(ReadOnlySpan<char>,
+NumberStyles = …, IFormatProvider = null)`); `MemoryExtensions` resolves
+(`using System;` added); the speculative re-bind settles the overload. F#
+twin: FR0106. Yields to CA1846.
+
+### CR0175 — performance
+
+A prefix or suffix cut out only to be compared with a literal is a
+`StartsWith`/`EndsWith` that cuts nothing: `s.Substring(0, 6) == "ORDER-"`
+and `s[..6] == "ORDER-"` → `s.StartsWith("ORDER-", StringComparison.Ordinal)`;
+`s.Substring(s.Length - 3) != "MED"` and `s[^3..] != "MED"` →
+`!s.EndsWith("MED", StringComparison.Ordinal)`. C#'s `==` on strings is
+ordinal, so `StringComparison.Ordinal` is the same comparison spelled
+out — the culture-sensitive `StartsWith(string)` is exactly what the
+rewrite must not emit. Measured in benchmarks/PerfClaims. Guards: the
+literal's length equals the cut's (`s.Substring(0, 3) == "ab"` can never
+hold: a bug, not this rule's); a `Substring` or a range on a string
+shorter than the cut throws where `StartsWith` answers false, so the site
+must sit under a length guard on the same string — a conjunct evaluated
+before it (`s.Length >= 6 && …`, `6 <= s.Length && …`, `s.Length > 5 &&
+…`), a disjunct before a `!=` (`s.Length < 6 || …`), or the condition of
+the enclosing `if` or `?:` whose true branch holds it, neither the string
+nor any prefix of its chain (`p` under a guard on `p.S`) written, stepped
+or passed by `ref`/`out` inside that `if` (a lambda, `foreach` or pattern
+cannot rebind the name in C#, CS0136); the receiver a name or a chain of names (a call
+or an indexer may answer a different string to the guard and the cut);
+the built-in `==`, outside an expression tree. An unguarded site is
+offered in the editor only — the author sees whether the string can be
+short — and a sweep leaves it, as the F# twin does with its `Substring`
+form (an F# slice clamps; a C# range is a `Substring` and throws).
+`StringClaimTests` in the property suite checks the equivalence on random
+strings. F# twin: FR0166.
+
+### CR0176 — performance
+
+`ToCharArray()` copies the whole string into an array a `foreach` then
+reads once — a string already enumerates its characters: `foreach (var c
+in s.ToCharArray())` → `foreach (var c in s)`. The `foreach` over a string
+compiles to an indexed loop, faster than the array's copy and walk
+(measured in benchmarks/PerfClaims). A LINQ consumer
+(`s.ToCharArray().Any(…)`) stays: over a string, LINQ walks a boxed
+`CharEnumerator`, measured slower than the array it would save (the F#
+side found the same of `Seq.*`). Guards: the argument-free
+`ToCharArray()` (the two-argument form slices), on a `string`, directly
+the loop's source — one bound to a name may be indexed or written. F#
+twin: FR0167.
+
+### CR0177 — performance
+
+A local computed inside a loop from nothing the loop changes is computed
+once, above it: `foreach (var x in xs) { var label = tag + ":"; … }` →
+`var label = tag + ":"; foreach (var x in xs) { … }`. Measured in
+benchmarks/PerfClaims: a string concatenation hoisted is 4× faster and 48
+KB → 48 B over a thousand iterations — the win; arithmetic over locals,
+parameters and readonly fields is parity (the JIT hoists that itself) and
+moves for the reading. A mutable field under a call would gain 8%, but a
+call in the body can change it, so the rule never reads one. Guards: one `var`/typed local with an initializer, on one
+line, a statement of the loop body reached through blocks, `if`/`else`,
+`switch` sections, `try`, `lock`, `using`, `checked` — never through a
+lambda, a local function or a nested loop (the innermost loop is the
+target); the initializer is literals, `nameof`, reads of locals,
+parameters, `const` and `readonly` fields (outside a constructor),
+built-in operators over those (`/` and `%` by a non-zero literal only: an
+empty loop never divided), `?:`, and an interpolated string whose holes
+are such reads of primitives or strings; every local or parameter it reads
+is assigned nowhere in the member but its own declaration, and declared
+outside the loop; the hoisted name is spelled nowhere in the member
+outside the loop and written nowhere in the loop; the loop statement
+heads its line; no comment or directive rides on the declaration; the
+speculative check re-binds. F# twin: FR0071.

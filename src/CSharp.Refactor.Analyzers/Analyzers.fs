@@ -112,12 +112,16 @@ module Rules =
             "RedundantSyntax", RedundantSyntax.analyzeTyped
             "BooleanSimplify", BooleanSimplify.analyze
             "BoolReturn", BoolReturn.analyze
+            "ConstLocal", ConstLocal.analyze
+            "ReturnHoist", ReturnHoist.analyze
+            "SpanShapes", SpanShapes.analyze
             "NestedIfMerge", NestedIfMerge.analyze
             "SwitchShapes", SwitchShapes.analyze
             "NullableMatch", NullableMatch.analyze
             "TypeTestChain", TypeTestChain.analyze
             "IfChainSwitch", IfChainSwitch.analyze
             "Loops", Loops.analyze
+            "LoopInvariant", LoopInvariant.analyze
             "EnumCoverage", EnumCoverage.analyze
             "PyramidFlip", PyramidFlip.analyze
             "FlagLoop", FlagLoop.analyze
@@ -162,6 +166,28 @@ module Rules =
 
     let private typed = typedNamed |> List.map snd
 
+    /// Time spent in each rule module, summed over every file and thread
+    /// since the last reset, in Stopwatch ticks: a module takes microseconds
+    /// on a small file, and milliseconds would round most of them to zero.
+    /// The tool prints the slowest after a run; an editor never reads it,
+    /// and pays one Stopwatch per module per file for the record.
+    let timings = System.Collections.Concurrent.ConcurrentDictionary<string, int64>()
+
+    let resetTimings () =
+        timings.Clear()
+        Index.resetBuildTicks ()
+
+    /// The record in milliseconds, slowest first; the cross-file index's
+    /// build under its own name, kept out of the rules' figures.
+    let timingsMs () : (string * int64) list =
+        let toMs (ticks: int64) =
+            ticks * 1000L / System.Diagnostics.Stopwatch.Frequency
+
+        ("Index", toMs (Index.buildTicksSoFar ()))
+        :: (timings |> Seq.map (fun kv -> kv.Key, toMs kv.Value) |> List.ofSeq)
+        |> List.filter (fun (_, ms) -> ms > 0L)
+        |> List.sortByDescending snd
+
     /// The yields-to gate, applied centrally: a suggestion of a rule whose
     /// Microsoft twin is enabled in the file's config is dropped here, so
     /// no rule needs to ask.
@@ -192,11 +218,19 @@ module Rules =
             else
                 typedNamed
                 |> List.collect (fun (name, rule) ->
+                    let sw = System.Diagnostics.Stopwatch.StartNew()
+                    let insideIndexBefore = Index.threadInsideTicks ()
+
                     try
-                        rule tree model ctx
-                    with ex ->
-                        failures.Add(name, ex)
-                        [])
+                        try
+                            rule tree model ctx
+                        with ex ->
+                            failures.Add(name, ex)
+                            []
+                    finally
+                        // the index's build, or the wait for it, is not this rule's time
+                        let own = sw.ElapsedTicks - (Index.threadInsideTicks () - insideIndexBefore)
+                        timings.AddOrUpdate(name, own, (fun _ total -> total + own)) |> ignore)
                 |> List.filter (notShadowed ctx)
 
         let kept =

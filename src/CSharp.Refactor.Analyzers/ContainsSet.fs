@@ -134,9 +134,22 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                     // a null element: the set may refuse it
                     && not (elements |> List.exists (fun e -> e.IsKind SyntaxKind.NullLiteralExpression))
                     ->
-                    // every use, in every tree of the compilation
+                    // every use, in every tree of the compilation that can see the
+                    // field: a private one's are the trees declaring its type (this
+                    // one, or the parts of a partial type); the rest only where the
+                    // text spells the name at all — walking every tree's nodes per
+                    // candidate was a fifth of a second per file of literal tables
+                    let candidateTrees =
+                        if field.DeclaredAccessibility = Accessibility.Private then
+                            field.ContainingType.DeclaringSyntaxReferences
+                            |> Seq.map (fun r -> r.SyntaxTree)
+                            |> Seq.distinct
+                        else
+                            compilation.SyntaxTrees
+                            |> Seq.filter (fun t -> t = tree || t.GetText().ToString().Contains field.Name)
+
                     let uses =
-                        compilation.SyntaxTrees
+                        candidateTrees
                         |> Seq.collect (fun t ->
                             let m = if t = tree then model else compilation.GetSemanticModel t
 

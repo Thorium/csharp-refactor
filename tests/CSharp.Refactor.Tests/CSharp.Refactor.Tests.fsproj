@@ -30,6 +30,7 @@
     <Compile Include="M2ReviewTests.fs" />
     <Compile Include="StringTests.fs" />
     <Compile Include="RegexTests.fs" />
+    <Compile Include="SpanShapesTests.fs" />
     <Compile Include="HygieneTests.fs" />
     <Compile Include="TypeTests.fs" />
     <Compile Include="ShapeTests.fs" />

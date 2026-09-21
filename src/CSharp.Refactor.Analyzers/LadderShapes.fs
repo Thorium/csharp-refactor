@@ -511,7 +511,7 @@ let private unions (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) 
         []
     else
         let text = tree.GetText()
-        let index = Index.ofCompilation model.Compilation
+        let index = lazy (Index.ofCompilation model.Compilation)
 
         tree.GetRoot().DescendantNodes()
         |> Seq.choose (fun n ->
@@ -527,7 +527,7 @@ let private unions (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) 
                 match model.GetDeclaredSymbol r with
                 | null -> None
                 | self when shapeOpen ctx self ->
-                    let cases = Index.derivedTypesOf index self |> List.distinct
+                    let cases = Index.derivedTypesOf index.Value self |> List.distinct
 
                     let allSealedRecordsHere =
                         not cases.IsEmpty

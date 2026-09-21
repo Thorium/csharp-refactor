@@ -454,3 +454,126 @@ class C
 """
 
     Assert.Empty(suggestCode "CR0012" source)
+
+// ---- CR0172 ----
+
+[<Fact>]
+let ``a local initialised with a constant and never written becomes const; a written, captured-by-ref or non-constant one does not``
+    ()
+    =
+    let source =
+        """
+using System;
+enum Status { Active, Inactive }
+class C
+{
+    const string Prefix = "v";
+    static void Take(ref int r) { }
+    static void TakeIn(in int r) { }
+    string M(int seed)
+    {
+        var schema = "app";
+        int retries = 3;
+        var status = Status.Active;
+        var version = Prefix + "1";
+        double ratio = 1.5, half = 0.5;
+        var interpolated = $"{schema}-{retries}";
+        var counter = 0;
+        counter++;
+        var reassigned = "x";
+        reassigned = "y";
+        int byRef = 1;
+        Take(ref byRef);
+        int byIn = 2;
+        TakeIn(in byIn);
+        var fromParameter = seed;
+        var empty = string.Empty;
+        string nothing = null;
+        var (a, b) = (1, 2);
+        Func<string> f = () => schema;
+        return schema + retries + status + version + ratio + half + interpolated + counter + reassigned + byRef + byIn + fromParameter + empty + nothing + a + b + f();
+    }
+}
+"""
+
+    let fired = suggestCode "CR0172" source |> firedText source
+
+    Assert.Equal<string list>(
+        [
+            "var schema = \"app\""
+            "int retries = 3"
+            "var status = Status.Active"
+            "var version = Prefix + \"1\""
+            "double ratio = 1.5, half = 0.5"
+        ],
+        fired
+    )
+
+    let fixedSource = fixAll "CR0172" source
+    Assert.Contains("const string schema = \"app\";", fixedSource)
+    Assert.Contains("const int retries = 3;", fixedSource)
+    Assert.Contains("const Status status = Status.Active;", fixedSource)
+    Assert.Contains("const double ratio = 1.5, half = 0.5;", fixedSource)
+    // the interpolation folds only once its holes are const: the sweep's next pass
+    Assert.Contains("var interpolated = $\"{schema}-{retries}\";", fixedSource)
+    Assert.Contains("int byIn = 2;", fixedSource)
+    Assert.Contains("var counter = 0;", fixedSource)
+    Assert.Contains("int byRef = 1;", fixedSource)
+    Assert.Contains("var fromParameter = seed;", fixedSource)
+    Assert.Contains("var empty = string.Empty;", fixedSource)
+
+// ---- CR0173 ----
+
+[<Fact>]
+let ``returns and assignments every branch performs become one conditional; the bool-literal, throw, commented and chained shapes stand down``
+    ()
+    =
+    let source =
+        """
+using System;
+class C
+{
+    int field;
+    string A(bool a) { if (a) return "1"; else return "2"; }
+    string B(bool a) { if (a) return "1"; return "2"; }
+    string D(bool a) { if (a) { return "1"; } else { return "2"; } }
+    int E(bool a, int x, int y) { if (a) return x > y ? x : y; else return y; }
+    void F(bool a, Func<int> f, Func<int> g) { int v; if (a) v = f(); else v = g(); field = v; }
+    bool G(bool a) { if (a) return true; return false; }
+    string H(bool a) { if (a) return "1"; else throw new InvalidOperationException(); }
+    string I(bool a) { if (a) return "1"; // the first
+        else return "2"; }
+    string J(bool a, bool b) { if (a) return "1"; else if (b) return "2"; else return "3"; }
+    string K(bool a) { if (a) return "same"; else return "same"; }
+    int L(bool a, int x, int y) { if (a) return x; if (x > y) return y; return x + y; }
+    string P { get; set; }
+    void Q(bool a) { if (a) P = "1"; else P = "2"; }
+    int? R(bool a) { if (a) return 1; else return null; }
+}
+"""
+
+    let fired = suggestCode "CR0173" source |> firedText source
+
+    Assert.Equal<string list>(
+        [
+            "if (a) return \"1\"; else return \"2\";"
+            "if (a) return \"1\"; return \"2\";"
+            "if (a) { return \"1\"; } else { return \"2\"; }"
+            "if (a) return x > y ? x : y; else return y;"
+            "if (a) v = f(); else v = g();"
+            "if (x > y) return y; return x + y;"
+            "if (a) return 1; else return null;"
+        ],
+        fired
+    )
+
+    let fixedSource = fixAll "CR0173" source
+    Assert.Contains("string A(bool a) { return a ? \"1\" : \"2\"; }", fixedSource)
+    Assert.Contains("string B(bool a) { return a ? \"1\" : \"2\"; }", fixedSource)
+    Assert.Contains("string D(bool a) { return a ? \"1\" : \"2\"; }", fixedSource)
+    Assert.Contains("return a ? (x > y ? x : y) : y;", fixedSource)
+    Assert.Contains("v = a ? f() : g();", fixedSource)
+    Assert.Contains("if (a) return true; return false;", fixedSource)
+    Assert.Contains("else throw new InvalidOperationException();", fixedSource)
+    Assert.Contains("if (a) P = \"1\"; else P = \"2\";", fixedSource)
+    Assert.Contains("int? R(bool a) { return a ? 1 : null; }", fixedSource)

@@ -48,6 +48,9 @@
     <Compile Include="RedundantSyntax.fs" />
     <Compile Include="BooleanSimplify.fs" />
     <Compile Include="BoolReturn.fs" />
+    <Compile Include="ConstLocal.fs" />
+    <Compile Include="ReturnHoist.fs" />
+    <Compile Include="SpanShapes.fs" />
     <Compile Include="NestedIfMerge.fs" />
     <Compile Include="SwitchShapes.fs" />
     <Compile Include="NullableMatch.fs" />
@@ -55,6 +58,7 @@
     <Compile Include="TypeTestChain.fs" />
     <Compile Include="IfChainSwitch.fs" />
     <Compile Include="Loops.fs" />
+    <Compile Include="LoopInvariant.fs" />
     <Compile Include="EnumCoverage.fs" />
     <Compile Include="PyramidFlip.fs" />
     <Compile Include="FlagLoop.fs" />
