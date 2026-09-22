@@ -330,7 +330,7 @@ let private dictionaryPairs (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                     | _ -> None
                 | _ -> None)
             |> List.ofSeq
-            |> List.map (Guards.checked model)
+            |> List.map (Guards.verified model)
 
 // ---- CR0033 ----
 

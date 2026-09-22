@@ -34,6 +34,8 @@ let private instruction =
         RegexOptions.Compiled ||| RegexOptions.IgnoreCase
     )
 
+let private wRegex = Regex @"^\w+\(.*\)$"
+
 let private looksLikeCode (s: string) =
     s.Contains "=>"
     || s.Contains "();"
@@ -42,7 +44,7 @@ let private looksLikeCode (s: string) =
     || s.Contains "return "
     || s.Contains "if ("
     || s.Contains "var "
-    || Regex.IsMatch(s, @"^\w+\(.*\)$")
+    || wRegex.IsMatch s
 
 /// Does the note read as a summary?
 let readsAsSummary (comment: string) =
@@ -99,10 +101,27 @@ let analyze (tree: SyntaxTree) (_ctx: RuleContext) : Suggestion list =
                 | ValueNone -> None
                 | ValueSome id ->
                     let headerLine = text.Lines.GetLineFromPosition id.SpanStart
+
+                    // an enum member's span stops before the `,` that separates
+                    // it from the next one — the separator belongs to the enum's
+                    // list, not to the member — so the note trailing `Value,`
+                    // lives outside the member and only the last member, which
+                    // has no comma, would ever be seen
+                    let separatorTrivia =
+                        match m with
+                        | :? EnumMemberDeclarationSyntax ->
+                            let next = m.GetLastToken().GetNextToken()
+
+                            if next.IsKind SyntaxKind.CommaToken then
+                                next.TrailingTrivia :> seq<SyntaxTrivia>
+                            else
+                                Seq.empty
+                        | _ -> Seq.empty
+
                     // the trailing comment on the header line: trivia after the
                     // last token of that line, inside this declaration's span
                     let trailing =
-                        m.DescendantTrivia(descendIntoTrivia = false)
+                        Seq.append (m.DescendantTrivia(descendIntoTrivia = false)) separatorTrivia
                         |> Seq.tryFind (fun t ->
                             t.IsKind SyntaxKind.SingleLineCommentTrivia
                             && text.Lines.GetLineFromPosition(t.SpanStart).LineNumber = headerLine.LineNumber

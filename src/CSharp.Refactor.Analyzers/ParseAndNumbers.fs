@@ -301,7 +301,7 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                         Span = t.TryKeyword.Span
                                         Fixes = [ Suggestion.fix "Use TryParse" TryParseCode [ tryText replacement ] ]
                                     }
-                                    |> Guards.checked model
+                                    |> Guards.verified model
                                 )
                     | _ -> note ()
                 | :? ReturnStatementSyntax as r when not (isNull r.Expression) ->
@@ -332,7 +332,7 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                     Span = t.TryKeyword.Span
                                     Fixes = [ Suggestion.fix "Use TryParse" TryParseCode [ tryText replacement ] ]
                                 }
-                                |> Guards.checked model
+                                |> Guards.verified model
                             )
                         | _ -> note ()
                 | _ -> note ()

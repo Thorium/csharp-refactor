@@ -124,8 +124,9 @@ let private initOnly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext
                     |> Seq.tryFind (fun a -> a.IsKind SyntaxKind.SetAccessorDeclaration)
 
                 match setter, model.GetDeclaredSymbol p with
-                | Some setter, (:? IPropertySymbol as property) when
-                    isNull setter.Body
+                | Some setter, property when
+                    not (isNull property)
+                    && isNull setter.Body
                     && isNull setter.ExpressionBody
                     && setter.Modifiers.Count = 0 // a private/protected setter is a different contract
                     && not property.IsStatic

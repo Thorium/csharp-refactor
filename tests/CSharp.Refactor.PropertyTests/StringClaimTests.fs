@@ -97,7 +97,7 @@ let ``a span of the cut parses and appends as the cut did`` () =
         let a = prefix.Length
         let b = number.Length
 
-        Int32.Parse(s.AsSpan(a, b)) = Int32.Parse(s.AsSpan(a, b))
+        Int32.Parse(s.Substring(a, b)) = Int32.Parse(s.AsSpan(a, b))
         && StringBuilder().Append(s.Substring a).ToString() = StringBuilder().Append(s.AsSpan a).ToString()
         && String.Concat(s.Substring(a, b), suffix) = String.Concat(s.AsSpan(a, b), suffix))
 

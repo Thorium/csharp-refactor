@@ -99,8 +99,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                |> Seq.forall (fun a -> isNull a.Body && isNull a.ExpressionBody)
                             ->
                             match model.GetDeclaredSymbol p with
-                            | :? IPropertySymbol as ps -> Seq.singleton (ps :> ISymbol, p.Type :> SyntaxNode)
-                            | _ -> Seq.empty
+                            | null -> Seq.empty
+                            | ps -> Seq.singleton (ps :> ISymbol, p.Type :> SyntaxNode)
                         | _ -> Seq.empty)
                     |> List.ofSeq
 

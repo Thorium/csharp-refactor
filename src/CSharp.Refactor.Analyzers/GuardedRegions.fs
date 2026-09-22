@@ -264,7 +264,7 @@ let private releases (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
                                             Span = s.Span
                                             Fixes = [ Suggestion.fix "Release in a finally" ReleaseCode edits ]
                                         }
-                                        |> Guards.checked model
+                                        |> Guards.verified model
                                     )
                             | _ -> None
                         else
@@ -428,7 +428,7 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                                     edits
                                             ]
                                     }
-                                    |> Guards.checked model
+                                    |> Guards.verified model
                                 )
                             | _ -> None
                         | _ -> None
@@ -460,7 +460,7 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                         ((defaultArg (imports a.SpanStart) []) @ [ Suggestion.replace a.Span callText ])
                                 ]
                         }
-                        |> Guards.checked model
+                        |> Guards.verified model
                     )
                 | _ -> None
             | _ -> None)
@@ -570,7 +570,7 @@ let private innerExceptions (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                                                 edits
                                         ]
                                 }
-                                |> Guards.checked model
+                                |> Guards.verified model
                             )
                 | _ -> None
             | _ -> None
@@ -666,7 +666,7 @@ let private tokenLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                                     Fixes =
                                         [ Suggestion.fix "Observe the token each iteration" TokenLoopCode [ edit ] ]
                                 }
-                                |> Guards.checked model
+                                |> Guards.verified model
                             )
                         | _ -> Some(Suggestion.note TokenLoopCode message (loop.GetFirstToken().Span)))
     |> List.ofSeq

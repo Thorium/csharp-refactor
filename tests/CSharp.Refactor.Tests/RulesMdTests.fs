@@ -72,10 +72,12 @@ let ``Rules.md categories, defaults and priorities match the catalog`` () =
         Assert.True((enabled = RuleCatalog.isDefaultOn code), $"{code}: Rules.md says enabled={enabled}")
         Assert.True((priority = RuleCatalog.isPriority code), $"{code}: Rules.md says priority={priority}")
 
+let private pLpNRegex = Regex @"[^\p{L}\p{N} -]"
+
 /// GitHub's heading slug: lowercase, every character that is neither a
 /// letter, a digit, a space nor a hyphen dropped, every space a hyphen.
 let private githubSlug (heading: string) =
-    Regex.Replace(heading.ToLowerInvariant(), @"[^\p{L}\p{N} -]", "").Replace(' ', '-')
+    pLpNRegex.Replace(heading.ToLowerInvariant(), "").Replace(' ', '-')
 
 [<Fact>]
 let ``the help link of every rule lands on its Rules.md section`` () =
@@ -98,6 +100,8 @@ let ``the help link of every rule lands on its Rules.md section`` () =
         RuleCatalog.helpUri "CR0103"
     )
 
+let private publicpartiaRegex = Regex @"public (?:partial )?class (CR\d{4})_"
+
 /// Every performance claim is measured: a rule of the category has a
 /// benchmark class in benchmarks/PerfClaims (`CRnnnn_…`) or a stated
 /// reason in LaterClaims.cs why no runtime pair exists (`//   CRnnnn —`).
@@ -111,7 +115,7 @@ let ``every performance rule has a PerfClaims pair or a stated reason`` () =
         |> String.concat "\n"
 
     let measured =
-        Regex.Matches(benchmarks, @"public (?:partial )?class (CR\d{4})_")
+        publicpartiaRegex.Matches benchmarks
         |> Seq.map (fun m -> m.Groups.[1].Value)
         |> set
 

@@ -336,14 +336,17 @@ let private stubPhrases =
         "unhandled yet"
     ]
 
+let private wRegex = Regex @"\{\w+\}"
+let private aZazwsRegex = Regex @"^[A-Za-z_][\w.]*\s*(\(|""|\$"")"
+
 /// Commented-OUT code is not a note about the branch.
 let private looksLikeCode (comment: string) =
     let body = comment.TrimStart('/', '*', ' ').TrimEnd('*', '/', ' ')
 
-    Regex.IsMatch(body, @"^[A-Za-z_][\w.]*\s*(\(|""|\$"")")
+    aZazwsRegex.IsMatch body
     || body.Contains "Console.Write"
     || body.Contains ";"
-    || Regex.IsMatch(body, @"\{\w+\}")
+    || wRegex.IsMatch body
 
 let private saysUnfinished (comment: string) =
     let lower = comment.ToLowerInvariant()

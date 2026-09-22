@@ -286,8 +286,9 @@ let private paramsSpans (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                     | _ -> None
 
                 match method', model.GetDeclaredSymbol p with
-                | Some m, (:? IParameterSymbol as ps) when
-                    not (
+                | Some m, ps when
+                    not (isNull ps)
+                    && not (
                         m.Modifiers
                         |> Seq.exists (fun k ->
                             k.IsKind SyntaxKind.AsyncKeyword

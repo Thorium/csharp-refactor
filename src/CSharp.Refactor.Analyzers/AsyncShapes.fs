@@ -653,8 +653,9 @@ let private elideAsync (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                        |> Seq.forall (fun arg -> Guards.isPureExpression model arg.Expression)
                     ->
                     match model.GetSymbolInfo(inv).Symbol, model.GetDeclaredSymbol m with
-                    | (:? IMethodSymbol as callee), (:? IMethodSymbol as self) when
-                        callee.IsAsync
+                    | (:? IMethodSymbol as callee), self when
+                        not (isNull self)
+                        && callee.IsAsync
                         && SymbolEqualityComparer.Default.Equals(callee.ReturnType, self.ReturnType)
                         && not (Text.holdsCommentOrDirective m)
                         ->

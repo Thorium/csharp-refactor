@@ -53,13 +53,17 @@ let private bodyOf (loop: SyntaxNode) : StatementSyntax =
     | :? DoStatementSyntax as d -> d.Statement
     | _ -> null
 
+[<return: Struct>]
+let inline private (|IsLoop|_|) input =
+    if isLoop input then ValueSome input else ValueNone
+
 /// The innermost loop the declaration sits in, reached only through the
 /// statement shapes that run it on the loop's own schedule.
 let private enclosingLoop (decl: LocalDeclarationStatementSyntax) : SyntaxNode option =
     let rec climb (n: SyntaxNode) =
         match n.Parent with
         | null -> None
-        | p when isLoop p -> Some p
+        | IsLoop p -> Some p
         | :? BlockSyntax
         | :? IfStatementSyntax
         | :? ElseClauseSyntax

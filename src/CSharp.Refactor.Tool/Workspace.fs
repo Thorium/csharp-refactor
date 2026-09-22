@@ -24,6 +24,9 @@ let isCSharpProject (path: string) =
 let samePath (a: string) (b: string) =
     String.Equals(Path.GetFullPath a, Path.GetFullPath b, StringComparison.OrdinalIgnoreCase)
 
+let private fscsvbprojRegex = Regex "\"([^\"]+\\.(?:fs|cs|vb)proj)\""
+let private pathssRegex = Regex "Path\\s*=\\s*\"([^\"]+)\""
+
 /// The project paths a solution lists — every language — resolved against
 /// the solution's own directory and filtered to files that exist. `.slnx`
 /// is XML with one `Path="..."` per project; the classic `.sln` has one
@@ -42,11 +45,9 @@ let projectsInSolution (solutionPath: string) : string list =
 
     let paths =
         if solutionPath.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase) then
-            Regex.Matches(text, "Path\\s*=\\s*\"([^\"]+)\"")
-            |> Seq.map (fun m -> m.Groups.[1].Value)
+            pathssRegex.Matches text |> Seq.map (fun m -> m.Groups.[1].Value)
         else
-            Regex.Matches(text, "\"([^\"]+\\.(?:fs|cs|vb)proj)\"")
-            |> Seq.map (fun m -> m.Groups.[1].Value)
+            fscsvbprojRegex.Matches text |> Seq.map (fun m -> m.Groups.[1].Value)
 
     paths
     |> Seq.filter isProjectFile

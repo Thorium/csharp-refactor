@@ -273,17 +273,16 @@ let private tupleDeclarations (tree: SyntaxTree) (model: SemanticModel) : (ISymb
             | _ -> None
         | :? ParameterSyntax as p ->
             match model.GetDeclaredSymbol p with
-            | :? IParameterSymbol as ps when isReferenceTuple ps.Type ->
-                Some(ps :> ISymbol, ps.Type :?> INamedTypeSymbol)
+            | ps when not (isNull ps) && isReferenceTuple ps.Type -> Some(ps :> ISymbol, ps.Type :?> INamedTypeSymbol)
             | _ -> None
         | :? MethodDeclarationSyntax as md ->
             match model.GetDeclaredSymbol md with
-            | :? IMethodSymbol as m when isReferenceTuple m.ReturnType ->
+            | m when not (isNull m) && isReferenceTuple m.ReturnType ->
                 Some(m :> ISymbol, m.ReturnType :?> INamedTypeSymbol)
             | _ -> None
         | :? PropertyDeclarationSyntax as pd ->
             match model.GetDeclaredSymbol pd with
-            | :? IPropertySymbol as p when isReferenceTuple p.Type -> Some(p :> ISymbol, p.Type :?> INamedTypeSymbol)
+            | p when not (isNull p) && isReferenceTuple p.Type -> Some(p :> ISymbol, p.Type :?> INamedTypeSymbol)
             | _ -> None
         | _ -> None)
     |> List.ofSeq

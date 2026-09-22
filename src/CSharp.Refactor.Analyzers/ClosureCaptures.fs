@@ -572,7 +572,7 @@ let private loopCaptures (tree: SyntaxTree) (model: SemanticModel) : Suggestion 
                         Suggestion.fix $"Copy '{local.Name}' into '{copy}' before the closure" LoopCaptureCode edits
                     ]
             }
-            |> Guards.checked model)
+            |> Guards.verified model)
 
     notes @ fixes
 

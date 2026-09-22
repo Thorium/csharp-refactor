@@ -88,7 +88,7 @@ let private fullNameOf (t: INamedTypeSymbol) =
 let private ownerName (s: ISymbol) =
     match s.ContainingType with
     | null -> ""
-    | t -> fullNameOf (t.OriginalDefinition :?> INamedTypeSymbol)
+    | t -> fullNameOf t.OriginalDefinition
 
 /// Is the member one of the effectful few (a clock, an enumeration forcer)?
 let private isEffectful (s: ISymbol) =
@@ -113,7 +113,7 @@ let private isBclIndexerReceiver (t: ITypeSymbol) =
     match t with
     | null -> false
     | :? IArrayTypeSymbol -> true
-    | :? INamedTypeSymbol as n -> (fullNameOf (n.OriginalDefinition :?> INamedTypeSymbol)).StartsWith "System."
+    | :? INamedTypeSymbol as n -> (fullNameOf n.OriginalDefinition).StartsWith "System."
     | _ -> false
 
 let private symbolOf (model: SemanticModel) (node: SyntaxNode) =
@@ -552,7 +552,7 @@ let rec enclosingCall (e: SyntaxNode) : SyntaxNode option =
 
 /// The first fix's edits pass the speculative check, or the suggestion
 /// loses its fixes and stays a note.
-let checked (model: SemanticModel) (s: Suggestion) : Suggestion =
+let verified (model: SemanticModel) (s: Suggestion) : Suggestion =
     let survive =
         s.Fixes |> List.filter (fun f -> f.EditorOnly || speculativeCheck model f.Edits)
 

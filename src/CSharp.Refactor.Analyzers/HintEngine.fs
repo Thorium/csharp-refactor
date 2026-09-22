@@ -456,7 +456,6 @@ let private render (rhs: ExpressionSyntax) (env: Map<string, Binding>) : Express
             | Expr _
             | Type _ -> original :> SyntaxNode
     )
-    :?> ExpressionSyntax
 
 // ---- proofs ----
 

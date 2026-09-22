@@ -73,6 +73,27 @@ class C
     Assert.Contains("    public int Angle; // less than <b> more", fixedSource)
     Assert.Contains("    public int Code; // x => x.Count() + 1", fixedSource)
 
+[<Fact>]
+let ``an enum member's trailing note becomes its summary, comma or not`` () =
+    let source =
+        """
+public enum MyErrorType
+{
+    Transient,      // Network issue
+    Validation,     // Malformed payload
+    Processing,     // Processing issue
+    BusinessLogic   // Data conflict
+}
+"""
+
+    let fired = suggestCode "CR0146" source
+    Assert.Equal(4, fired.Length)
+    let fixedSource = fixAll "CR0146" source
+
+    Assert.Contains("    /// <summary>Network issue</summary>\n    Transient,\n", fixedSource)
+
+    Assert.Contains("    /// <summary>Data conflict</summary>\n    BusinessLogic\n", fixedSource)
+
 // ---- CR0145 ----
 
 [<Fact>]

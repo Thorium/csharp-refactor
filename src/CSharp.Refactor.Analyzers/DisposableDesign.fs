@@ -100,8 +100,8 @@ let private ownedFields (model: SemanticModel) (t: TypeDeclarationSyntax) : ISym
                     | _ -> None)
             | :? PropertyDeclarationSyntax as p ->
                 match model.GetDeclaredSymbol p with
-                | :? IPropertySymbol as ps when isDisposableType ps.Type && not (isNull p.AccessorList) ->
-                    Seq.singleton (ps :> ISymbol)
+                | null -> Seq.empty
+                | ps when isDisposableType ps.Type && not (isNull p.AccessorList) -> Seq.singleton (ps :> ISymbol)
                 | _ -> Seq.empty
             | _ -> Seq.empty)
         |> List.ofSeq

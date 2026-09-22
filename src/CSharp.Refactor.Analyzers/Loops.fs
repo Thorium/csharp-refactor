@@ -418,7 +418,7 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                             (headerEdit :: aliasEdit @ readEdits)
                                     ]
                             }
-                            |> Guards.checked model)
+                            |> Guards.verified model)
             | _ -> None
         | _ -> None)
     |> List.ofSeq
@@ -586,10 +586,7 @@ let private captures (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
     |> Seq.collect (fun node ->
         match node with
         | :? ForStatementSyntax as f when not (isNull f.Declaration) ->
-            let loopVars =
-                f.Declaration.Variables
-                |> Seq.map (fun v -> model.GetDeclaredSymbol v :> ISymbol)
-                |> List.ofSeq
+            let loopVars = [ for v in f.Declaration.Variables -> model.GetDeclaredSymbol v ]
 
             let body = f.Statement
 

@@ -244,7 +244,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                                 [ Suggestion.replace f.Span replacement ]
                                         ]
                                 }
-                                |> Guards.checked model
+                                |> Guards.verified model
                             )
                         | None ->
                             match Usings.importEdit model tree source.SpanStart "System.Linq" "Enumerable" with
@@ -263,7 +263,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                                     (imports @ [ Suggestion.insert source.Span.End ".ToList()" ])
                                             ]
                                     }
-                                    |> Guards.checked model
+                                    |> Guards.verified model
                                 )
         | _ -> None)
     |> List.ofSeq

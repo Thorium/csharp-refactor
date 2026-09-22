@@ -63,11 +63,13 @@ let private nugetRoot =
     else
         Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.UserProfile, ".nuget", "packages")
 
+let private netddRegex = Regex @"^net(\d+)\.(\d+)$"
+
 /// Prefer the newest .NET target, then netstandard, then the rest.
 let private tfmRank (tfm: string) =
     let t = tfm.ToLowerInvariant()
 
-    let m = Regex.Match(t, @"^net(\d+)\.(\d+)$")
+    let m = netddRegex.Match t
 
     if m.Success then
         1000 + int m.Groups.[1].Value * 10 + int m.Groups.[2].Value

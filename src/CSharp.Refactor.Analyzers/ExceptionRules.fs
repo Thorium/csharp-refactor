@@ -83,6 +83,7 @@ open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.CSharp.Syntax
 open Microsoft.CodeAnalysis.Text
+open System.Text.RegularExpressions
 
 [<Literal>]
 let SwallowCode = "CR0064"
@@ -194,9 +195,9 @@ let private ioCatchTypes (model: SemanticModel) (position: int) =
     ]
 
 let private ioSmell =
-    System.Text.RegularExpressions.Regex(
+    Regex(
         @"\b(File|Directory|Path|FileInfo|DirectoryInfo|FileStream|StreamReader|StreamWriter|BinaryReader|BinaryWriter)\b",
-        System.Text.RegularExpressions.RegexOptions.Compiled
+        RegexOptions.Compiled
     )
 
 /// The file's own logging idiom: the receiver of a `LogError`/`LogWarning`
@@ -771,6 +772,8 @@ let private prints (t: ITypeSymbol) =
                 "System.TimeOnly"
             ]
 
+let private az09Regex = Regex @"[^a-z0-9_]+"
+
 let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     if Text.isTestFile tree then
         []
@@ -804,8 +807,7 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                                 | ps -> prints ps.Type)
                             |> List.ofSeq
 
-                        let words =
-                            System.Text.RegularExpressions.Regex.Split(lower, @"[^a-z0-9_]+") |> Set.ofArray
+                        let words = az09Regex.Split(lower) |> Set.ofArray
 
                         let mentionsParameter =
                             m.ParameterList.Parameters
@@ -864,12 +866,7 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                                 model.Compilation.SyntaxTrees
                                 |> Seq.exists (fun t ->
                                     let count =
-                                        System.Text.RegularExpressions.Regex
-                                            .Matches(
-                                                t.GetRoot().ToString(),
-                                                System.Text.RegularExpressions.Regex.Escape(lit.Token.Text)
-                                            )
-                                            .Count
+                                        Regex.Matches(t.GetRoot().ToString(), Regex.Escape(lit.Token.Text)).Count
 
                                     if t = tree then count > 1 else count > 0)
 

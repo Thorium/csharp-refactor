@@ -32,7 +32,7 @@ let ``an empty attribute argument list goes`` () =
     Assert.Contains("[Serializable]\n", fixAll "CR0141" source)
 
 [<Fact>]
-let ``a verbatim identifier keeps its @ on keywords, contextual keywords and the discard`` () =
+let ``a verbatim identifier keeps its at-sign on keywords, contextual keywords and the discard`` () =
     let source =
         "class C\n{\n    int @plain = 1;\n    int @class = 2;\n    int @var = 3;\n    int @_ = 4;\n    int M() => @plain + @class + @var + @_;\n}\n"
 

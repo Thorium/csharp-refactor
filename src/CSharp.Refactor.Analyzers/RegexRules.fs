@@ -384,6 +384,7 @@ let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestio
         | _ -> None)
     |> List.ofSeq
 
+let private aZaz3Regex = Regex "[A-Za-z]{3,}"
 // ---- CR0109 ----
 
 /// A name for the hoisted regex: the local it is bound to (`var emitted =
@@ -414,7 +415,7 @@ let private regexName (pattern: string) (site: SyntaxNode) (member': MemberDecla
     | Some local when local.Length > 1 && not (generic.Contains(local.ToLowerInvariant())) -> pascal local + "Regex"
     | _ ->
         let words =
-            Regex.Matches(pattern.Replace("\\", " "), "[A-Za-z]{3,}")
+            aZaz3Regex.Matches(pattern.Replace("\\", " "))
             |> Seq.cast<Match>
             |> Seq.map (fun m -> pascal (m.Value.ToLowerInvariant()))
             |> Seq.distinct

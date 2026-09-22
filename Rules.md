@@ -1775,7 +1775,10 @@ not a code fragment (`=>`, `();`, `return `, `var `), and holding no `<` or
 `&` (XML text; escaping would break the original-text proof); the file is
 not a test file (`*Tests.cs`, `*Test.cs`, `*Fixture*`), where a note labels
 the fixture. The doc line goes above the whole declaration, attributes
-included — a `///` between an attribute and its member is CS1587. F# twin:
+included — a `///` between an attribute and its member is CS1587. An enum
+member's note sits after the `,` that separates it from the next one, which
+belongs to the enum rather than to the member: it counts as the member's
+own, so every member of a list is documented, not only the last. F# twin:
 FR0132.
 
 ### CR0143 — cosmetic

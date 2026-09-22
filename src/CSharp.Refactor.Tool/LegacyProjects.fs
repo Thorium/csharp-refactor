@@ -24,16 +24,19 @@ open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.Text
 
+let private importsbSdksRegex = Regex @"<Import\s[^>]*\bSdk\s*="
+let private projectbRegex = Regex @"<Project\b[^>]*>"
+
 /// A project file that is not SDK-style: no `Sdk` attribute on the root
 /// and no `<Import Sdk=…>`.
 let isLegacy (projectPath: string) =
     try
         let text = Workspace.projectTextWithoutComments (File.ReadAllText projectPath)
-        let root = Regex.Match(text, @"<Project\b[^>]*>")
+        let root = projectbRegex.Match text
 
         root.Success
         && not (root.Value.Contains "Sdk=")
-        && not (Regex.IsMatch(text, @"<Import\s[^>]*\bSdk\s*="))
+        && not (importsbSdksRegex.IsMatch text)
     with
     | :? IOException
     | :? UnauthorizedAccessException -> false
