@@ -55,6 +55,52 @@ class C
     Assert.Contains("await Task.WhenAll(a, b); return a.Result + b.Result;", fixedSource)
 
 [<Fact>]
+let ``a drain behind a completion test in the same condition, or a WhenAny winner, is a read`` () =
+    let source =
+        """
+using System.Threading.Tasks;
+class C
+{
+    async Task<bool> A(Task<bool> work, Task timer)
+    {
+        var winner = await Task.WhenAny(work, timer);
+        if (winner == work && work.IsCompleted && work.Result) return true;
+        return false;
+    }
+    async Task<bool> B(Task<bool> work, Task timer)
+    {
+        var winner = await Task.WhenAny(work, timer).ConfigureAwait(false);
+        return winner == work && work.Result;
+    }
+    async Task<int> D(Task<int> t) => !t.IsCompleted ? 0 : t.Result;
+    async Task<int> E(Task<int> t) => !t.IsCompleted || t.Result > 0 ? 1 : 2;
+    async Task<int> F(Task<int> t) { if (!t.IsCompleted) { return t.Result; } return 0; }
+    async Task<bool> G(Task<bool> work, Task timer)
+    {
+        var winner = await Task.WhenAny(work, timer);
+        winner = timer;
+        return winner == work && work.Result;
+    }
+    async Task<bool> H(Task<bool> work, Task timer)
+    {
+        var winner = await Task.WhenAny(work, timer);
+        return winner != work && work.Result;
+    }
+}
+"""
+
+    let fixedSource = fixAll "CR0040" source
+    Assert.Contains("if (winner == work && work.IsCompleted && work.Result) return true;", fixedSource)
+    Assert.Contains("return winner == work && work.Result;", fixedSource)
+    Assert.Contains("!t.IsCompleted ? 0 : t.Result;", fixedSource)
+    Assert.Contains("!t.IsCompleted || t.Result > 0 ? 1 : 2;", fixedSource)
+    // a negated test proves nothing in its then-branch, a reassigned winner
+    // nothing, and `!=` nothing in the right operand of `&&`
+    Assert.Contains("if (!t.IsCompleted) { return await t; }", fixedSource)
+    Assert.Contains("winner = timer;\n        return winner == work && await work;", fixedSource.Replace("\r\n", "\n"))
+    Assert.Contains("return winner != work && await work;", fixedSource)
+
+[<Fact>]
 let ``a drain outside an async body is the boundary note, except on Main's spine`` () =
     let source =
         """
@@ -460,3 +506,57 @@ public class Tests
     )
 
     Assert.Contains("public void D() { Environment.SetEnvironmentVariable", fixedSource)
+
+[<Fact>]
+let ``a handler that can catch the AggregateException and reads its inner exceptions holds the await fix`` () =
+    let source =
+        """
+using System;
+using System.Threading.Tasks;
+class C
+{
+    void Log(string s) { }
+    async Task<int> A(Task<int> t) { try { return t.Result; } catch (Exception ex) { Log(ex.InnerException!.Message); return 0; } }
+    async Task<int> B(Task<int> t) { try { return t.Result; } catch (Exception ex) when (ex is AggregateException) { return 0; } }
+    async Task<int> D(Task<int> t) { try { return t.Result; } catch (Exception ex) { Log(ex.Message); return 0; } }
+}
+"""
+
+    let fixedSource = fixAll "CR0040" source
+    Assert.Contains("try { return t.Result; } catch (Exception ex) { Log(ex.InnerException!.Message);", fixedSource)
+    Assert.Contains("try { return t.Result; } catch (Exception ex) when (ex is AggregateException)", fixedSource)
+    Assert.Contains("try { return await t; } catch (Exception ex) { Log(ex.Message);", fixedSource)
+
+[<Fact>]
+let ``async void with no caller, or public in a library, keeps the note`` () =
+    let source =
+        """
+using System;
+using System.Threading.Tasks;
+public class C
+{
+    async void Orphan() { await Task.Yield(); }
+    public async void Go() { await Task.Yield(); }
+    async Task A() { Go(); }
+}
+"""
+
+    let fired = suggestCode "CR0043" source
+    Assert.Equal(2, fired.Length)
+    Assert.True(fired |> List.forall (fun s -> s.Fixes.IsEmpty))
+
+[<Fact>]
+let ``a caller's own AggregateException handler holds the taskify fix`` () =
+    let source =
+        """
+using System;
+using System.Threading.Tasks;
+class C
+{
+    Task<int> Source() => Task.FromResult(1);
+    private int Load() { var x = Source().Result; return x; }
+    async Task<int> A() { try { var r = Load(); return r; } catch (AggregateException) { return 0; } }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0041" source |> List.filter (fun s -> not s.Fixes.IsEmpty))

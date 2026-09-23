@@ -153,6 +153,8 @@ let isTestFile (tree: SyntaxTree) : bool =
     || (match tree.GetRoot() with
         | :? Syntax.CompilationUnitSyntax as root ->
             root.Usings
+            // a C# 12 alias of a type that is no name (`using P = (int, int);`) has none
+            |> Seq.filter (fun u -> not (isNull u.Name))
             |> Seq.exists (fun u ->
                 let n = u.Name.ToString()
 
@@ -162,3 +164,21 @@ let isTestFile (tree: SyntaxTree) : bool =
                 || n.StartsWith "Microsoft.VisualStudio.TestTools.UnitTesting"
                 || n.StartsWith "TUnit")
         | _ -> false)
+
+/// An expression's text as the receiver of a member access: a primary
+/// expression as written, anything else in parentheses. Spliced bare, `a ?? b`,
+/// `a + b` or a cast would hand the member to their last operand:
+/// `Regex.Replace(s ?? "", …)` must become `(s ?? "").Replace(…)`, not
+/// `s ?? "".Replace(…)`, which compiles and replaces nothing.
+let asReceiver (e: Syntax.ExpressionSyntax) : string =
+    match e with
+    | :? Syntax.IdentifierNameSyntax
+    | :? Syntax.GenericNameSyntax
+    | :? Syntax.MemberAccessExpressionSyntax
+    | :? Syntax.InvocationExpressionSyntax
+    | :? Syntax.ElementAccessExpressionSyntax
+    | :? Syntax.LiteralExpressionSyntax
+    | :? Syntax.InterpolatedStringExpressionSyntax
+    | :? Syntax.ParenthesizedExpressionSyntax
+    | :? Syntax.ThisExpressionSyntax -> e.ToString()
+    | _ -> "(" + e.ToString() + ")"

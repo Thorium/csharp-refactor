@@ -20,7 +20,11 @@
 /// conditional, an assignment or a lambda is parenthesised, and a `throw`
 /// branch is left alone; the speculative
 /// re-bind settles the conditional's typing (a natural common type, or
-/// the target type from C# 9). IDE0046 and IDE0045 offer the same
+/// the target type from C# 9), and every arm must still convert to the
+/// type it converted to before — arms of one type, a natural type equal to
+/// the target, or a target-typed conditional (`object M(bool a) { if (a)
+/// return 1; else return 2.0; }` would box a double; `a ? i : f` into a
+/// `double` rounds the int through `float`). IDE0046 and IDE0045 offer the same
 /// rewrite in the editor; where they are on, this rule yields.
 module CSharp.Refactor.ReturnHoist
 
@@ -129,10 +133,20 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                 && (Text.leadingWhitespace text ifs.SpanStart).Length + replacement.Length
                    <= wrapAt
 
-            let offer (span: TextSpan) (replacement: string) (message: string) (title: string) =
+            let offer
+                (span: TextSpan)
+                (arms: ExpressionSyntax list)
+                (replacement: string)
+                (message: string)
+                (title: string)
+                =
                 let edit = Suggestion.replace span replacement
 
-                if fits replacement && Guards.speculativeCheck model [ edit ] then
+                if
+                    fits replacement
+                    && Guards.speculativeCheck model [ edit ]
+                    && Guards.armsConvertAlike model edit arms
+                then
                     Some
                         {
                             Code = Code
@@ -162,6 +176,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         ->
                         offer
                             (TextSpan.FromBounds(ifs.SpanStart, endAt))
+                            [ thenValue; elseValue ]
                             $"return {cond} ? {armText thenValue} : {armText elseValue};"
                             "Both branches return: return the conditional"
                             "Return the conditional"
@@ -183,6 +198,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         ->
                         offer
                             ifs.Span
+                            [ thenValue; elseValue ]
                             $"{target} = {cond} ? {armText thenValue} : {armText elseValue};"
                             "Both branches assign the target: assign the conditional"
                             "Assign the conditional"

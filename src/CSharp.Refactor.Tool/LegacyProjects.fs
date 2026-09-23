@@ -25,10 +25,11 @@ open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.Text
 
 let private importsbSdksRegex = Regex @"<Import\s[^>]*\bSdk\s*="
+let private sdkElementRegex = Regex @"<Sdk\s[^>]*\bName\s*="
 let private projectbRegex = Regex @"<Project\b[^>]*>"
 
-/// A project file that is not SDK-style: no `Sdk` attribute on the root
-/// and no `<Import Sdk=…>`.
+/// A project file that is not SDK-style: no `Sdk` attribute on the root,
+/// no `<Import Sdk=…>` and no `<Sdk Name=…/>` element.
 let isLegacy (projectPath: string) =
     try
         let text = Workspace.projectTextWithoutComments (File.ReadAllText projectPath)
@@ -37,6 +38,7 @@ let isLegacy (projectPath: string) =
         root.Success
         && not (root.Value.Contains "Sdk=")
         && not (importsbSdksRegex.IsMatch text)
+        && not (sdkElementRegex.IsMatch text)
     with
     | :? IOException
     | :? UnauthorizedAccessException -> false

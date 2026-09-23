@@ -15,23 +15,31 @@
 /// initialiser; no constructor of the type assigns it; the type is not
 /// deserialized by the shape heuristic (a serializer constructs without
 /// initialisers); `required` is a demand on callers, so the scope gate
-/// of the shape rules applies.
+/// of the shape rules applies; every construction of a DERIVED type in the
+/// compilation sets it too (`new Derived()` would be CS9035); no type of
+/// the family is a `new()`-constrained type argument (CS9040); a type seen
+/// beyond the compilation (public in a library, internal with friends)
+/// needs the host's oracle, every site there a construction setting it —
+/// without the oracle it stands down.
 ///
 /// CR0150 (performance, fix, .NET 8, API): a `static readonly
 /// Dictionary<K,V>`/`HashSet<T>` filled in its initialiser and only ever
 /// read is a `FrozenDictionary<K,V>`/`FrozenSet<T>` via
-/// `.ToFrozenDictionary()`/`.ToFrozenSet()`. Guards: the field is private
-/// (internal under the friend check); every reference is a read
-/// (`TryGetValue`, indexer get, `ContainsKey`, `Contains`, `Count`,
-/// enumeration, `Keys`/`Values`, `GetValueOrDefault`); the comparer
-/// argument travels; `System.Collections.Frozen` resolves; the `using`
-/// is added.
+/// `.ToFrozenDictionary()`/`.ToFrozenSet()`. Guards: the scope gate;
+/// every reference — in this file, in the other files of the compilation,
+/// and, for a field seen beyond it, at every site the host's oracle finds
+/// (no oracle: it stands down) — is an order-independent read
+/// (`TryGetValue`, an indexer get, `ContainsKey`, `Contains`, `Count`,
+/// `GetValueOrDefault`, `Any`/`All`/`Sum`/`Min`/`Max`), never a write, an
+/// increment, a by-ref pass or an enumeration (a frozen collection
+/// enumerates in its own order); the comparer argument travels;
+/// `System.Collections.Frozen` resolves; the `using` is added.
 ///
 /// CR0152 (performance, fix, C# 13 + .NET 9): `private readonly object
 /// _gate = new();` whose every reference is a `lock` operand is `private
 /// readonly Lock _gate = new();` — the dedicated type skips the
-/// object-header path. `Monitor.*`, passing or comparing it vetoes;
-/// `System.Threading.Lock` resolves.
+/// object-header path. `Monitor.*`, passing or comparing it vetoes, in
+/// every part of a partial type; `System.Threading.Lock` resolves.
 ///
 /// CR0153 (idiom, fix, C# 14): a property whose private backing field is
 /// referenced only inside that property's own accessors uses the `field`
@@ -42,7 +50,8 @@
 ///
 /// CR0154 (idiom, fix, C# 14): `if (x != null) x.P = v;`, `if (x is not
 /// null) x[i] = v;` is `x?.P = v;`. Guards: the condition is a null test
-/// of a pure read `x`, the body exactly one assignment (compound
+/// of a pure read `x` (a `!=` the built-in reference test, never a
+/// user-defined operator), the body exactly one assignment (compound
 /// included) whose target is `x.P`/`x[i]` with `x` the same reference, no
 /// `else`; `x` not assigned inside the body. Yields to IDE0031.
 ///
@@ -84,27 +93,94 @@ let UnreachableCode = "CR0157"
 let private resolves (model: SemanticModel) (metadataName: string) =
     not (isNull (model.Compilation.GetTypeByMetadataName metadataName))
 
+/// A symbol's accessibility as its containers narrow it; a file-local type
+/// is as private as a private one.
+let rec private effective (s: ISymbol) =
+    match s with
+    | null -> Accessibility.Public
+    | s ->
+        let own =
+            match s with
+            | :? INamedTypeSymbol as t when t.IsFileLocal -> Accessibility.Private
+            | _ -> s.DeclaredAccessibility
+
+        let outer = effective s.ContainingType
+
+        if own = Accessibility.Private || outer = Accessibility.Private then
+            Accessibility.Private
+        elif own = Accessibility.Internal || outer = Accessibility.Internal then
+            Accessibility.Internal
+        else
+            own
+
 /// The scope gate of the shape rules.
 let private shapeOpen (ctx: RuleContext) (s: ISymbol) =
-    let rec effective (s: ISymbol) =
-        match s with
-        | null -> Accessibility.Public
-        | s ->
-            let own = s.DeclaredAccessibility
-            let outer = effective s.ContainingType
-
-            if own = Accessibility.Private || outer = Accessibility.Private then
-                Accessibility.Private
-            elif own = Accessibility.Internal || outer = Accessibility.Internal then
-                Accessibility.Internal
-            else
-                own
-
     match effective s with
     | Accessibility.Private -> true
     | Accessibility.Internal
     | Accessibility.ProtectedAndInternal -> RuleContext.internalShapeOpen ctx
     | _ -> RuleContext.publicShapeOpen ctx
+
+/// Is the symbol seen beyond this compilation — public in a library,
+/// internal with friends? Then only the host's oracle knows every use.
+let private exported (ctx: RuleContext) (s: ISymbol) =
+    match effective s with
+    | Accessibility.Private -> false
+    | Accessibility.Internal
+    | Accessibility.ProtectedAndInternal -> ctx.HasFriends
+    | _ -> not ctx.IsLeaf
+
+/// Every name bound to the symbol in the OTHER trees of this compilation
+/// (a member's name part, a type's name, a constructor call of the type),
+/// then — when the symbol is exported — every reference site the host's
+/// oracle finds beyond the compilation. `None` when a use may be unseen:
+/// an exported symbol and no oracle, or a site the oracle could not read.
+let private usesElsewhere (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) (s: ISymbol) =
+    let compilation = model.Compilation
+
+    let same (x: ISymbol) =
+        not (isNull x)
+        && (SymbolEqualityComparer.Default.Equals(x, s)
+            || SymbolEqualityComparer.Default.Equals(x.OriginalDefinition, s))
+
+    let inCompilation =
+        compilation.SyntaxTrees
+        |> Seq.filter (fun t -> t <> tree)
+        |> Seq.collect (fun t ->
+            let root = t.GetRoot()
+
+            if not (root.ToFullString().Contains s.Name) then
+                Seq.empty
+            else
+                let m = compilation.GetSemanticModel t
+
+                root.DescendantNodes()
+                |> Seq.choose (fun n ->
+                    match n with
+                    | :? SimpleNameSyntax as id when id.Identifier.ValueText = s.Name ->
+                        match m.GetSymbolInfo(id).Symbol with
+                        | bound when same bound -> Some(id :> SyntaxNode, m)
+                        | :? IMethodSymbol as ctor when
+                            ctor.MethodKind = MethodKind.Constructor && same ctor.ContainingType
+                            ->
+                            Some(id :> SyntaxNode, m)
+                        | _ -> None
+                    | _ -> None))
+        |> List.ofSeq
+
+    if not (exported ctx s) then
+        ValueSome inCompilation
+    else
+        match RuleContext.referencesOf ctx s with
+        | None -> ValueNone
+        | Some sites when sites |> List.exists (fun site -> isNull site.Node || isNull site.Model) -> ValueNone
+        | Some sites ->
+            let beyond =
+                sites
+                |> List.filter (fun site -> not (compilation.ContainsSyntaxTree site.Tree))
+                |> List.map (fun site -> site.Node, site.Model)
+
+            ValueSome(inCompilation @ beyond)
 
 // ---- CR0148 ----
 
@@ -187,6 +263,120 @@ let private serialized (s: ISymbol) =
     s.GetAttributes()
     |> Seq.exists (fun a -> serializerWords |> List.exists a.AttributeClass.Name.Contains)
 
+/// The type and every type deriving from it in this compilation.
+let private withDerived (index: Index.CompilationIndex) (t: INamedTypeSymbol) =
+    let seen =
+        System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
+
+    let rec walk (t: INamedTypeSymbol) =
+        if seen.Add t then
+            for d in Index.derivedTypesOf index t do
+                walk d
+
+    walk t
+    seen |> List.ofSeq
+
+/// Is one of the types a type argument for a `new()`-constrained type
+/// parameter anywhere in the compilation (`Make<Options>()`, `List<T>` with
+/// the constraint, an inferred generic call)? A required member makes that
+/// argument CS9040.
+let private newConstrainedArgument (compilation: Compilation) (types: ISymbol list) =
+    let isOne (t: ITypeSymbol) =
+        types
+        |> List.exists (fun x -> SymbolEqualityComparer.Default.Equals(x, t.OriginalDefinition))
+
+    let constrained
+        (parameters: System.Collections.Immutable.ImmutableArray<ITypeParameterSymbol>)
+        (arguments: System.Collections.Immutable.ImmutableArray<ITypeSymbol>)
+        =
+        Seq.zip parameters arguments
+        |> Seq.exists (fun (p, a) -> p.HasConstructorConstraint && isOne a)
+
+    compilation.SyntaxTrees
+    |> Seq.exists (fun t ->
+        let m = compilation.GetSemanticModel t
+
+        t.GetRoot().DescendantNodes()
+        |> Seq.exists (fun n ->
+            match n with
+            | :? GenericNameSyntax
+            | :? InvocationExpressionSyntax ->
+                match m.GetSymbolInfo(n).Symbol with
+                | :? IMethodSymbol as ms when ms.IsGenericMethod -> constrained ms.TypeParameters ms.TypeArguments
+                | :? INamedTypeSymbol as nt when nt.IsGenericType -> constrained nt.TypeParameters nt.TypeArguments
+                | _ -> false
+            | _ -> false))
+
+/// Does `required` leave every construction compiling: each construction of
+/// a DERIVED type sets the member too (`new Derived()` is CS9035), no type of
+/// the family is a `new()` argument (CS9040), and — for a type seen beyond
+/// the compilation — every site the host's oracle finds there is a
+/// construction setting it (without an oracle such a type stands down).
+let private requiredStaysSatisfied
+    (model: SemanticModel)
+    (ctx: RuleContext)
+    (index: Index.CompilationIndex)
+    (property: IPropertySymbol)
+    (setsIt: (bool * Set<string>) list -> bool)
+    =
+    let family = withDerived index property.ContainingType
+
+    let derivedSet =
+        family
+        |> List.forall (fun t ->
+            match t with
+            | :? INamedTypeSymbol as nt -> setsIt (Index.constructionsOf index nt)
+            | _ -> false)
+
+    // a site in another project: a construction setting the member, or a mention
+    // that constructs nothing (a declared type, a cast) — never a base type or a
+    // type argument there
+    let siteSafe (node: SyntaxNode) =
+        let rec name (n: SyntaxNode) =
+            match n.Parent with
+            | :? QualifiedNameSyntax as q when q.Right.Span = n.Span -> name q
+            | :? AliasQualifiedNameSyntax as q when q.Name.Span = n.Span -> name q
+            | _ -> n
+
+        let spelled = name node
+
+        let creation =
+            match spelled, spelled.Parent with
+            | (:? BaseObjectCreationExpressionSyntax as c), _ -> Some c
+            | _, (:? ObjectCreationExpressionSyntax as c) when c.Type.Span = spelled.Span ->
+                Some(c :> BaseObjectCreationExpressionSyntax)
+            | _ -> None
+
+        match creation with
+        | Some c ->
+            not (isNull c.Initializer)
+            && c.Initializer.Expressions
+               |> Seq.exists (fun e ->
+                   match e with
+                   | :? AssignmentExpressionSyntax as a -> a.Left.ToString() = property.Name
+                   | _ -> false)
+        | None ->
+            not (
+                spelled.AncestorsAndSelf()
+                |> Seq.exists (fun a -> a :? BaseListSyntax || a :? TypeArgumentListSyntax)
+            )
+
+    let beyondSafe () =
+        family
+        |> List.forall (fun t ->
+            not (exported ctx t)
+            || (match RuleContext.referencesOf ctx t with
+                | None -> false
+                | Some sites ->
+                    sites
+                    |> List.forall (fun site ->
+                        not (isNull site.Node)
+                        && (model.Compilation.ContainsSyntaxTree site.Tree || siteSafe site.Node))))
+
+    derivedSet
+    && beyondSafe ()
+    && not (newConstrainedArgument model.Compilation family)
+
 let private requiredMembers (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     if not (RuleContext.languageAtLeast ctx 11) then
         []
@@ -231,16 +421,17 @@ let private requiredMembers (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                     // every write an initialiser, and every construction of the type an initialiser setting it
                     let constructions = Index.constructionsOf index.Value property.ContainingType
 
-                    let everyConstructionSets =
-                        not constructions.IsEmpty
-                        && constructions
-                           |> List.forall (fun (hasInitializer, names) ->
-                               hasInitializer && names.Contains property.Name)
+                    let setsIt (constructions: (bool * Set<string>) list) =
+                        constructions
+                        |> List.forall (fun (hasInitializer, names) -> hasInitializer && names.Contains property.Name)
+
+                    let everyConstructionSets = not constructions.IsEmpty && setsIt constructions
 
                     if
                         not writes.IsEmpty
                         && writes |> List.forall (fun w -> w = Index.Initializer)
                         && everyConstructionSets
+                        && requiredStaysSatisfied model ctx index.Value property setsIt
                     then
                         // `required` goes after the accessibility
                         let edit = Suggestion.insert p.Type.SpanStart "required "
@@ -336,29 +527,44 @@ let private frozenCollections (tree: SyntaxTree) (model: SemanticModel) (ctx: Ru
                                     | _ -> None)
                                 |> List.ofSeq
 
-                        let allReads =
-                            reads
-                            |> List.forall (fun id ->
-                                let e: ExpressionSyntax =
-                                    match id.Parent with
-                                    | :? MemberAccessExpressionSyntax as ma when ma.Name.Span = id.Span ->
-                                        ma :> ExpressionSyntax
-                                    | _ -> id :> ExpressionSyntax
+                        let isRead (id: SyntaxNode) =
+                            let e: SyntaxNode =
+                                match id.Parent with
+                                | :? MemberAccessExpressionSyntax as ma when ma.Name.Span = id.Span -> ma
+                                | _ -> id
 
-                                match e.Parent with
-                                | :? MemberAccessExpressionSyntax as ma when ma.Expression.Span = e.Span ->
-                                    readOnlyMembers.Contains ma.Name.Identifier.ValueText
-                                | :? ElementAccessExpressionSyntax as ea when ea.Expression.Span = e.Span ->
-                                    // an indexer read, not a set
+                            match e.Parent with
+                            | :? MemberAccessExpressionSyntax as ma when ma.Expression.Span = e.Span ->
+                                readOnlyMembers.Contains ma.Name.Identifier.ValueText
+                            | :? ElementAccessExpressionSyntax as ea when ea.Expression.Span = e.Span ->
+                                // an indexer read, not a set, an increment or a by-ref pass
+                                match ea.Parent with
+                                | :? AssignmentExpressionSyntax as a -> a.Left.Span <> ea.Span
+                                | :? PostfixUnaryExpressionSyntax as u ->
+                                    u.IsKind SyntaxKind.SuppressNullableWarningExpression
+                                | :? PrefixUnaryExpressionSyntax as u ->
                                     not (
-                                        match ea.Parent with
-                                        | :? AssignmentExpressionSyntax as a -> a.Left.Span = ea.Span
-                                        | _ -> false
+                                        u.IsKind SyntaxKind.PreIncrementExpression
+                                        || u.IsKind SyntaxKind.PreDecrementExpression
                                     )
-                                | :? EqualsValueClauseSyntax when (e.Parent.Parent :? VariableDeclaratorSyntax) ->
-                                    // the declaration itself
-                                    (e.Parent.Parent :?> VariableDeclaratorSyntax).Identifier.Span = v.Identifier.Span
-                                | _ -> false)
+                                | :? ArgumentSyntax as a -> a.RefKindKeyword.IsKind SyntaxKind.None
+                                | _ -> true
+                            | :? EqualsValueClauseSyntax when (e.Parent.Parent :? VariableDeclaratorSyntax) ->
+                                // the declaration itself
+                                (e.Parent.Parent :?> VariableDeclaratorSyntax).Identifier.Span = v.Identifier.Span
+                            | _ -> false
+
+                        // the uses in other files (other parts of the class, callers of
+                        // an internal or public field): a write there breaks the build,
+                        // a `foreach` there changes its order silently
+                        let elsewhereReads () =
+                            match usesElsewhere tree model ctx field with
+                            | ValueNone -> false
+                            | ValueSome uses -> uses |> List.forall (fun (id, _) -> isRead id)
+
+                        let allReads =
+                            reads |> List.forall (fun id -> isRead id)
+                            && (effective field = Accessibility.Private || elsewhereReads ())
 
                         if not allReads || reads.IsEmpty then
                             None
@@ -455,21 +661,27 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                             | _ -> None)
                         |> List.ofSeq
 
+                    let lockOperand (id: SyntaxNode) =
+                        let e: SyntaxNode =
+                            match id.Parent with
+                            | :? MemberAccessExpressionSyntax as ma when
+                                ma.Name.Span = id.Span && (ma.Expression :? ThisExpressionSyntax)
+                                ->
+                                ma :> SyntaxNode
+                            | _ -> id
+
+                        match e.Parent with
+                        | :? LockStatementSyntax as l -> l.Expression.Span = e.Span
+                        | _ -> false
+
+                    // the other parts of a partial type see the field too
                     let onlyLocked =
                         not uses.IsEmpty
-                        && uses
-                           |> List.forall (fun id ->
-                               let e: SyntaxNode =
-                                   match id.Parent with
-                                   | :? MemberAccessExpressionSyntax as ma when
-                                       ma.Name.Span = id.Span && (ma.Expression :? ThisExpressionSyntax)
-                                       ->
-                                       ma :> SyntaxNode
-                                   | _ -> id :> SyntaxNode
-
-                               match e.Parent with
-                               | :? LockStatementSyntax as l -> l.Expression.Span = e.Span
-                               | _ -> false)
+                        && uses |> List.forall (fun id -> lockOperand id)
+                        && (field.ContainingType.DeclaringSyntaxReferences.Length <= 1
+                            || (match usesElsewhere tree model ctx field with
+                                | ValueSome elsewhere -> elsewhere |> List.forall (fun (id, _) -> lockOperand id)
+                                | ValueNone -> false))
 
                     if onlyLocked then
                         let edits =
@@ -661,7 +873,14 @@ let private nullConditionalAssignments (tree: SyntaxTree) (model: SemanticModel)
         // `x != null`, `x is not null`, `null != x`: the tested reference
         let nullTested (c: ExpressionSyntax) : ExpressionSyntax option =
             match c with
-            | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.NotEqualsExpression ->
+            | :? BinaryExpressionSyntax as b when
+                b.IsKind SyntaxKind.NotEqualsExpression
+                // the built-in reference test only: a user-defined `!=` may call a live
+                // object null (a destroyed Unity object), which `?.` never asks
+                && (match model.GetSymbolInfo(b).Symbol with
+                    | :? IMethodSymbol as op -> op.MethodKind <> MethodKind.UserDefinedOperator
+                    | _ -> true)
+                ->
                 if b.Right.IsKind SyntaxKind.NullLiteralExpression then
                     Some b.Left
                 elif b.Left.IsKind SyntaxKind.NullLiteralExpression then

@@ -301,6 +301,25 @@ let private build (compilation: Compilation) : CompilationIndex =
                     && g.TypeArgumentList.Arguments.Count >= 1
                 then
                     addType identity (typeOf m g.TypeArgumentList.Arguments.[0])
+
+                // a type argument for a `class`-constrained parameter cannot be a struct
+                let constrained (ps: System.Collections.Immutable.ImmutableArray<ITypeParameterSymbol>) =
+                    g.TypeArgumentList.Arguments
+                    |> Seq.iteri (fun i a ->
+                        if i < ps.Length && ps.[i].HasReferenceTypeConstraint then
+                            addType hostile (typeOf m a))
+
+                match m.GetSymbolInfo(g).Symbol with
+                | :? IMethodSymbol as ms -> constrained ms.TypeParameters
+                | :? INamedTypeSymbol as nt -> constrained nt.TypeParameters
+                | _ -> ()
+            | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.AsExpression -> addType hostile (typeOf m b.Right)
+            | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.CoalesceExpression ->
+                addType hostile (typeOf m b.Left)
+            | :? ConditionalAccessExpressionSyntax as ca -> addType hostile (typeOf m ca.Expression)
+            | :? LiteralExpressionSyntax as lit when lit.IsKind SyntaxKind.NullLiteralExpression ->
+                // `Small s = null;`, `return null;`: a null converted to the type
+                addType hostile (m.GetTypeInfo(lit).ConvertedType)
             | :? BinaryExpressionSyntax as b when
                 b.IsKind SyntaxKind.EqualsExpression || b.IsKind SyntaxKind.NotEqualsExpression
                 ->

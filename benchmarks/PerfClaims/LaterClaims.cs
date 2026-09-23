@@ -7,6 +7,8 @@
 //            hazard, not a micro-cost: the claim is deadlock and starvation.
 //   CR0054 — `Task.WhenAll(new[] { t })` is one array and one wrapper task
 //            per call; measurable but not worth a pair to say so.
+//   CR0178 — a query copied before Where/Select: the win is rows a database
+//            never reads or sends, a round trip, not an in-process cost.
 // A rule missing from this file and from that list is a claim unmeasured:
 // PerfClaimsTests keeps the accounting honest.
 using System.Collections.Frozen;

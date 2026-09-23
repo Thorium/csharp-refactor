@@ -171,6 +171,20 @@ class C
     Assert.Equal(1, (suggestCode "CR0126" source).Length)
 
 [<Fact>]
+let ``CR0126 keeps an object initializer: the factory call cannot carry the key and IV`` () =
+    let source =
+        """
+using System.Security.Cryptography;
+#pragma warning disable SYSLIB0021
+class C
+{
+    void A(byte[] k, byte[] iv) { using var aes = new AesManaged { Key = k, IV = iv, Mode = CipherMode.CBC }; }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0126" source)
+
+[<Fact>]
 let ``CR0109 takes the field form under a generic container`` () =
     let source =
         """

@@ -94,6 +94,22 @@ record Small(int X);
     Assert.Equal<string list>([ "Small" ], firedText source (suggestCode "CR0081" source))
     Assert.Contains("readonly record struct Small(int X);", fixAll "CR0081" source)
 
+[<Fact>]
+let ``CR0081 holds a record another file uses by null, as, coalesce, conditional access or a class constraint`` () =
+    let small = "record Small(int X);"
+    let plain = "class U { int M(Small s) => s.X; }"
+    Assert.Equal(1, (suggestInProject false false "CR0081" [ "Small.cs", small; "U.cs", plain ]).Length)
+
+    for other in
+        [
+            "#nullable disable\nclass U { Small M() { Small s = null; return s; } }"
+            "#nullable disable\nclass U { Small M(object o) => o as Small; }"
+            "#nullable disable\nclass U { Small M(Small a, Small b) => a ?? b; }"
+            "#nullable disable\nclass U { int? M(Small s) => s?.X; }"
+            "class U { static T Id<T>(T x) where T : class => x; Small M(Small s) => Id<Small>(s); }"
+        ] do
+        Assert.Empty(suggestInProject false false "CR0081" [ "Small.cs", small; "U.cs", other ])
+
 // ---- CR0082 ----
 
 [<Fact>]
@@ -118,6 +134,22 @@ class C
     Assert.Contains("private (int, string) Pair() => (1, \"a\");", fixedSource)
     Assert.Contains("Tuple<int, int> Checked()", fixedSource)
     Assert.Contains("Tuple<bool, bool> First()", fixedSource)
+
+[<Fact>]
+let ``CR0082 holds a reference tuple compared with == or !=`` () =
+    let source =
+        """
+using System;
+class C
+{
+    private Tuple<int, int> _last = Tuple.Create(0, 0);
+    private bool Changed(int a, int b) { var t = Tuple.Create(a, b); var changed = t != _last; _last = t; return changed; }
+    private Tuple<string, string> Pair() => Tuple.Create("a", "b");
+    private bool Same() { var p = Pair(); var q = Pair(); return p == q; }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0082" source)
 
 // ---- CR0089 ----
 
@@ -163,6 +195,24 @@ class Outer
     Assert.Contains("public DateTimeOffset LastSeen { get; set; }", fixedSource)
     Assert.Contains("LastSeen = DateTimeOffset.UtcNow;", fixedSource)
     Assert.Contains("DateTime day = DateTime.Now;", fixedSource)
+
+[<Fact>]
+let ``CR0089 holds a clock slot printed through ToString()`` () =
+    let source =
+        """
+using System;
+class Outer
+{
+    private class Stamp
+    {
+        DateTime at = DateTime.Now;
+        public string Show() => at.ToString();
+        public int Year() => at.Year;
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0089" source)
 
 // ---- CR0172, the field half ----
 

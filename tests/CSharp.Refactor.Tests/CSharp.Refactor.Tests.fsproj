@@ -37,6 +37,7 @@
     <Compile Include="SecurityTests.fs" />
     <Compile Include="LadderTests.fs" />
     <Compile Include="M3ReviewTests.fs" />
+    <Compile Include="QueryCopyTests.fs" />
     <Compile Include="DefectTests.fs" />
     <Compile Include="DefectReviewTests.fs" />
     <Compile Include="CrossCuttingTests.fs" />

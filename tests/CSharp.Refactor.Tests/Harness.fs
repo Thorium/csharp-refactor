@@ -208,3 +208,58 @@ let suggestRaw (compilation: CSharpCompilation) (tree: SyntaxTree) : Suggestion 
 let applyFixRaw (source: string) (fix: Fix) : string =
     let text = SourceText.From source
     text.WithChanges(fix.Edits |> List.map (fun e -> TextChange(e.Span, e.Replacement))).ToString()
+
+/// Several files of one project in a workspace: one rule's suggestions on
+/// the FIRST file, with the host's reference oracle when `withOracle` (the
+/// tool and the fix provider) or without it (the compiler, an editor).
+let suggestInProject
+    (withOracle: bool)
+    (apiChanges: bool)
+    (code: string)
+    (files: (string * string) list)
+    : Suggestion list =
+    let workspace = new AdhocWorkspace()
+
+    let project =
+        workspace
+            .AddProject("Test", LanguageNames.CSharp)
+            .WithCompilationOptions(
+                CSharpCompilationOptions(
+                    OutputKind.DynamicallyLinkedLibrary,
+                    nullableContextOptions = NullableContextOptions.Enable
+                )
+            )
+            .WithParseOptions(parseOptions)
+            .AddMetadataReferences
+            references
+
+    let solution, ids =
+        files
+        |> List.fold
+            (fun (solution: Solution, ids) (name, text) ->
+                let document =
+                    solution.GetProject(project.Id).AddDocument(name, normalize text, filePath = "C:/fake/" + name)
+
+                document.Project.Solution, ids @ [ document.Id ])
+            (project.Solution, [])
+
+    let document = solution.GetDocument(List.head ids)
+    let compilation = document.Project.GetCompilationAsync().Result
+    let errors = errorsAfterFix compilation
+
+    if not errors.IsEmpty then
+        failwithf "test input does not compile:\n%s" (String.Join("\n", errors))
+
+    let tree = document.GetSyntaxTreeAsync().Result
+    let model = compilation.GetSemanticModel(tree, false)
+    let ctx = Context.forTree None compilation tree apiChanges
+
+    let ctx =
+        if withOracle then
+            { ctx with
+                References = Some(References.oracle solution tree)
+            }
+        else
+            ctx
+
+    Rules.all tree model ctx |> List.filter (fun s -> s.Code = code)

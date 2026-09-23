@@ -100,6 +100,28 @@ class C
 
     Assert.Equal<string list>([], firedText source (suggestCode "CR0015" source))
 
+[<Fact>]
+let ``CR0015 keeps a worklist field a called method appends to`` () =
+    let source =
+        """
+using System.Collections.Generic;
+class C
+{
+    private readonly List<int> _pending = new List<int>();
+    private readonly List<int> _seen = new List<int>();
+    void Walk() { for (int i = 0; i < _pending.Count; i++) Visit(_pending[i]); }
+    void Visit(int x) { if (x < 10) _pending.Add(x + 1); }
+    int Sum() { var s = 0; for (int i = 0; i < _seen.Count; i++) s += System.Math.Abs(_seen[i]); return s; }
+}
+"""
+
+    Assert.Equal<string list>(
+        [ "for (int i = 0; i < _seen.Count; i++)" ],
+        firedText source (suggestCode "CR0015" source)
+    )
+
+    Assert.Contains("foreach (var item in _seen)", fixAll "CR0015" source)
+
 // ---- CR0017 ----
 
 [<Fact>]

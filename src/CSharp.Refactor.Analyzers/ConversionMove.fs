@@ -16,9 +16,10 @@
 /// copy must be `Enumerable.ToList`/`ToArray` (never `Queryable`'s, which
 /// runs the query); a source already a list or array gains nothing and is
 /// CA1829/CA1860's. A consumer that short-circuits (`Any`, `First`,
-/// `Contains`) sees fewer elements after the move, so the source
-/// expression must be pure (`callsOnlyCore`): a generator with effects
-/// would skip them; likewise a `foreach` body that can leave early (`break`,
+/// `Contains`) sees fewer elements after the move, so the source must be
+/// typed as a materialised collection, or be a local whose initializer is
+/// a core-only view of one (`var seq = Numbers(); seq.ToList().Any(p)` is
+/// a generator whose remaining effects the copy ran); likewise a `foreach` body that can leave early (`break`,
 /// `return`, `throw`) keeps its copy over a source that is not a collection. A lazy stage that moves before the copy runs its
 /// lambda at copy time instead of at enumeration time: the lambda must be
 /// pure. Each moved pair is measured in PerfClaims.
@@ -174,6 +175,38 @@ let private exitsEarly (body: StatementSyntax) =
         | :? GotoStatementSyntax -> true
         | _ -> false)
 
+/// Does enumerating the expression run nothing but core code over
+/// materialised data: it calls core members only, and every local or
+/// parameter it reads is typed as a collection, or is a local whose
+/// initializer is itself such an expression (a local is never reassigned
+/// here: the source is `owned`).
+let rec private materialised (model: SemanticModel) (depth: int) (e: ExpressionSyntax) =
+    depth > 0
+    && Guards.callsOnlyCore model e
+    && e.DescendantNodesAndSelf()
+       |> Seq.forall (fun n ->
+           match n with
+           | :? IdentifierNameSyntax as id ->
+               match model.GetSymbolInfo(id).Symbol with
+               | :? IParameterSymbol as p when
+                   // a lambda's own parameter is an element, not a source
+                   (match p.ContainingSymbol with
+                    | :? IMethodSymbol as m -> m.MethodKind <> MethodKind.AnonymousFunction
+                    | _ -> true)
+                   ->
+                   Linq.isCollection p.Type
+               | :? ILocalSymbol as l ->
+                   Linq.isCollection l.Type
+                   || (match l.DeclaringSyntaxReferences |> Seq.tryHead with
+                       | Some r ->
+                           match r.GetSyntax() with
+                           | :? VariableDeclaratorSyntax as d when not (isNull d.Initializer) ->
+                               materialised model (depth - 1) d.Initializer.Value
+                           | _ -> false
+                       | None -> false)
+               | _ -> true
+           | _ -> true)
+
 let private isCopy (model: SemanticModel) (inv: InvocationExpressionSyntax) =
     copies.Contains(Linq.nameOf inv)
     && inv.ArgumentList.Arguments.Count = 0
@@ -256,8 +289,11 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                         let consumes = Linq.consumers.Contains stageName
 
                         let sourcePure =
-                            // a short-circuiting consumer sees fewer elements after the move
-                            (not consumes) || Guards.callsOnlyCore model source
+                            // a short-circuiting consumer sees fewer elements after the move:
+                            // the source must be a materialised collection, or a local whose
+                            // initializer is (a pure view of) one — `var seq = Numbers();`
+                            // is a generator whose remaining effects the copy used to run
+                            (not consumes) || materialised model 3 source
 
                         if
                             not lambdaOk

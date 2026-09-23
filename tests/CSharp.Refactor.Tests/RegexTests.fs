@@ -52,6 +52,29 @@ class C
     Assert.Contains("Regex.Matches(s, @\"\\d+\").Count", fixedSource)
     Assert.Contains("using System;", fixedSource)
 
+[<Fact>]
+let ``a compound subject is parenthesised as the string operation's receiver`` () =
+    // `s ?? "".Replace(…)` would compile and replace nothing; a C# 12 alias
+    // of a tuple type has no Name, which the test-file probe must survive
+    let source =
+        """
+using System.Text.RegularExpressions;
+using Point = (int X, int Y);
+class C
+{
+    string A(string? s) => Regex.Replace(s ?? "", "-", "_");
+    string B(string a, string b) => Regex.Replace(a + b, "-", "_");
+    bool D(string a, string b) => Regex.IsMatch(a + b, "x");
+    string[] E(string? s) => Regex.Split(s ?? "", ",");
+}
+"""
+
+    let fixedSource = fixAll "CR0108" source
+    Assert.Contains("(s ?? \"\").Replace(\"-\", \"_\")", fixedSource)
+    Assert.Contains("(a + b).Replace(\"-\", \"_\")", fixedSource)
+    Assert.Contains("(a + b).Contains(\"x\")", fixedSource)
+    Assert.Contains("(s ?? \"\").Split(\",\")", fixedSource)
+
 // ---- CR0109 ----
 
 [<Fact>]
@@ -104,6 +127,24 @@ class C
     Assert.Contains("var regex = ARegex().IsMatch(s); var again = ARegex().IsMatch(s);", fixedSource)
     Assert.DoesNotContain("HRegex", fixedSource)
 
+[<Fact>]
+let ``CR0109 places a hoisted field above the static initializer that reaches its member`` () =
+    let source =
+        """
+using System.Text.RegularExpressions;
+class Table<T>
+{
+    static readonly string[] Parts = Split("a,b");
+
+    static string[] Split(string s) => Regex.Split(s, ",[ ]*");
+}
+"""
+
+    let fixedSource = fixAll "CR0109" source
+    let field = fixedSource.IndexOf "private static readonly Regex"
+    Assert.True(field > 0, fixedSource)
+    Assert.True(field < fixedSource.IndexOf "static readonly string[] Parts", fixedSource)
+
 // ---- CR0110 ----
 
 [<Fact>]
@@ -147,3 +188,18 @@ class C
         [ "dir + \"\\\\\" + file"; "root + \"/\" + name + \".txt\"" ],
         firedText source (suggestCode "CR0111" source)
     )
+
+[<Fact>]
+let ``a pattern the engine does not support under its options is not provable and keeps the rest of the file`` () =
+    let source =
+        """
+using System.Text.RegularExpressions;
+class C
+{
+    bool A(string s) => new Regex(@"(a)\1", RegexOptions.NonBacktracking).IsMatch(s);
+    bool B(string s) => Regex.IsMatch(s, @"\d+");
+}
+"""
+
+    Assert.Empty(suggestCode "CR0107" source)
+    Assert.Equal<string list>([ "Regex.IsMatch(s, @\"\d+\")" ], firedText source (suggestCode "CR0109" source))

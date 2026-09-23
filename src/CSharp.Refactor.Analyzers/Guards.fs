@@ -604,3 +604,73 @@ let speculativeSymbol (model: SemanticModel) (position: int) (expression: string
     else
         model.GetSpeculativeSymbolInfo(position, e, SpeculativeBindingOption.BindAsExpression).Symbol
         |> Option.ofObj
+
+/// Do the values a conditional or `switch` expression is folded from keep
+/// their conversions? Each arm was converted to the target (the return
+/// type, the assigned variable's) on its own; folded, the arms first meet
+/// at the expression's natural type and that converts to the target —
+/// `a ? 1 : 2.0` into `object` boxes a double where the `if` boxed an int,
+/// `a ? i : f` into `double` rounds the int through `float`. Safe when
+/// every arm has one and the same natural type (the conversion chain is
+/// the one each arm took), or when, patched, every arm converts to the
+/// very type it converted to before (a natural type equal to the target,
+/// or a target-typed expression). `arms` are the original values, in the
+/// order the replacement's outermost conditional or switch holds them (a
+/// throw arm left out); the edit's replacement holds that expression.
+let armsConvertAlike (model: SemanticModel) (edit: TextEdit) (arms: ExpressionSyntax list) : bool =
+    let natural = arms |> List.map (fun a -> model.GetTypeInfo(a).Type)
+
+    let sameNatural =
+        match natural with
+        | first :: rest when not (isNull first) ->
+            rest |> List.forall (fun t -> SymbolEqualityComparer.Default.Equals(first, t))
+        | _ -> false
+
+    sameNatural
+    || (try
+            let tree = model.SyntaxTree
+            let text = tree.GetText()
+
+            let newTree =
+                tree.WithChangedText(text.WithChanges(TextChange(edit.Span, edit.Replacement)))
+
+            let newModel =
+                model.Compilation.ReplaceSyntaxTree(tree, newTree).GetSemanticModel(newTree, false)
+
+            let window = TextSpan(edit.Span.Start, edit.Replacement.Length)
+
+            let newArms =
+                newTree.GetRoot().DescendantNodes window
+                |> Seq.tryPick (fun n ->
+                    if not (window.Contains n.Span) then
+                        None
+                    else
+                        match n with
+                        | :? ConditionalExpressionSyntax as c -> Some [ c.WhenTrue; c.WhenFalse ]
+                        | :? SwitchExpressionSyntax as s ->
+                            s.Arms
+                            |> Seq.map (fun a -> a.Expression)
+                            |> Seq.filter (fun e -> not (e :? ThrowExpressionSyntax))
+                            |> List.ofSeq
+                            |> Some
+                        | _ -> None)
+
+            match newArms with
+            | Some newArms when newArms.Length = arms.Length ->
+                List.forall2
+                    (fun (o: ExpressionSyntax) (n: ExpressionSyntax) ->
+                        let before = model.GetTypeInfo(o).ConvertedType
+                        let after = newModel.GetTypeInfo(n).ConvertedType
+
+                        // two compilations: a type declared in source is a
+                        // different symbol in each, so symbol equality says
+                        // "differs" for every user type — compare the names
+                        not (isNull before)
+                        && not (isNull after)
+                        && before.ToDisplayString SymbolDisplayFormat.FullyQualifiedFormat =
+                            after.ToDisplayString SymbolDisplayFormat.FullyQualifiedFormat)
+                    arms
+                    newArms
+            | _ -> false
+        with _ ->
+            false)

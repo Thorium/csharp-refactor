@@ -11,10 +11,10 @@
 /// take the rewrite, compile, and switch to the real clock); at least one
 /// real write pins the clock; `Now` and `UtcNow` never mix across the
 /// migration; every read is a parity member — a comparison, a
-/// subtraction, `.Ticks`, `.Year`…`.Second`, `.AddDays`…`.AddMinutes`,
-/// `.ToString()` with no format — never `.Date` (returns `DateTime`),
-/// `.Kind`, `.ToLocalTime()`, `.ToUniversalTime()`, a format string (it
-/// prints differently), or the value handed to a call; the slot is
+/// subtraction, `.Ticks`, `.Year`…`.Second`, `.AddDays`…`.AddMinutes` —
+/// never `.Date` (returns `DateTime`), `.Kind`, `.ToLocalTime()`,
+/// `.ToUniversalTime()`, `.ToString()` in any form (a `DateTimeOffset`
+/// appends its offset), or the value handed to a call; the slot is
 /// confirmed by symbol, never by name. Off by default: a serialization-
 /// shape change (`csharp_refactor.CR0089 = true` or `--codes CR0089`).
 module CSharp.Refactor.ClockMigration
@@ -177,14 +177,10 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                             | :? AssignmentExpressionSyntax as a when a.Right.Span = e.Span -> isSlot a.Left
                             // a parity read
                             | :? MemberAccessExpressionSyntax as ma when ma.Expression.Span = e.Span ->
+                                // `ToString()` is not parity: a DateTimeOffset appends its
+                                // offset (`… +02:00`) to the same text
                                 let name = ma.Name.Identifier.ValueText
-
-                                if name = "ToString" then
-                                    match ma.Parent with
-                                    | :? InvocationExpressionSyntax as inv -> inv.ArgumentList.Arguments.Count = 0
-                                    | _ -> false
-                                else
-                                    parityMembers.Contains name
+                                name <> "ToString" && parityMembers.Contains name
                             | :? BinaryExpressionSyntax as b ->
                                 // compared with or subtracted from another slot or a clock read
                                 let other = if b.Left.Span = e.Span then b.Right else b.Left

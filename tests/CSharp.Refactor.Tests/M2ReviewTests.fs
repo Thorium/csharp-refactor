@@ -66,6 +66,27 @@ class C
     Assert.Contains("xs.Select(x => (x + 1) * 2)", fixAll "CR0029" source)
 
 [<Fact>]
+let ``CR0029 does not fuse a lambda that writes its parameter: fused, the write lands in the source`` () =
+    let source =
+        """
+using System.Collections.Generic;
+using System.Linq;
+struct P { public int F; }
+class Person { public string? Name { get; set; } }
+class C
+{
+    static int Norm(ref int v) => v;
+    IEnumerable<int> A(int[] arr, int[] idx, int k) => idx.Select(i => arr[i]).Select(v => v *= k);
+    IEnumerable<string> B(List<Person> ps) => ps.Select(p => p.Name).Select(n => n ??= "");
+    IEnumerable<int> D(int[] arr, int[] idx) => idx.Select(i => arr[i]).Select(v => Norm(ref v));
+    IEnumerable<int> E(int[] arr, int[] idx) => idx.Select(i => arr[i]).Select(v => v++);
+    IEnumerable<int> F(P[] ps, int[] idx) => idx.Select(i => ps[i]).Select(s => s.F = 1);
+}
+"""
+
+    Assert.Empty(suggestCode "CR0029" source)
+
+[<Fact>]
 let ``CR0032 leaves a concurrent dictionary alone, CR0033 an array piece`` () =
     let source =
         """

@@ -21,7 +21,10 @@
 /// on an integral, `char`, `string`, `bool` or enum scrutinee (nullable of
 /// those included); a chain link may be an `||` of such comparisons; three
 /// comparisons at least — two read fine as `if`/`else`; no constant
-/// repeats (the second arm is dead, and the switch would not compile). The
+/// repeats (the second arm is dead, and the switch would not compile); the
+/// expression form keeps every arm's conversion to the target (arms of one
+/// type, a natural type equal to the target, or a target-typed switch —
+/// `1` and `2L` returned as `object` keep the statement form). The
 /// shared switch guards (SwitchRewrite) apply to the statement form.
 module CSharp.Refactor.IfChainSwitch
 
@@ -239,12 +242,28 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                                         List.zip labels exprs
                                         |> List.map (fun (l, e) -> indent + unit + l + " => " + e + ",")
 
-                                    Some(
+                                    let replacement =
                                         [ $"{lead}{scrutineeText} switch"; indent + "{" ]
                                         @ armLines
                                         @ [ indent + "};" ]
                                         |> String.concat newline
-                                    )
+
+                                    // each arm keeps the conversion it took to the target: folded, the
+                                    // arms meet at the switch's natural type first (`1` and `2L` as
+                                    // `object` would box a long where the chain boxed an int)
+                                    let values =
+                                        armsOf
+                                        |> List.choose (function
+                                            | Returns e
+                                            | Assigns(_, e) -> Some e
+                                            | Throws _ -> None)
+
+                                    if
+                                        Guards.armsConvertAlike model (Suggestion.replace head.Span replacement) values
+                                    then
+                                        Some replacement
+                                    else
+                                        None
                                 | _ -> None
                         | _ -> None
 

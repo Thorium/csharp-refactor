@@ -105,6 +105,26 @@ class C
     Assert.Contains("string.Join(\", \", xs);", fixedSource)
     Assert.Contains("$\"{x.ToString():N0} items\"", fixedSource)
 
+[<Fact>]
+let ``a ToString in a FormattableString or a provider's handler stays: the hole would format differently`` () =
+    // `FormattableString.Invariant($"{d}")` prints 1.5 where `$"{d.ToString()}"` printed 1,5 under fi-FI
+    let source =
+        """
+using System;
+using System.Globalization;
+class C
+{
+    string A(double d) => FormattableString.Invariant($"{d.ToString()}");
+    string B(double d) => string.Create(CultureInfo.InvariantCulture, $"{d.ToString()}");
+    FormattableString D(int id) => $"select {id.ToString()}";
+    string E(double d) => $"{d.ToString()}";
+}
+"""
+
+    let fired = suggestCode "CR0102" source
+    // only E, a plain string
+    Assert.Equal(1, fired.Length)
+
 // ---- CR0104 ----
 
 [<Fact>]

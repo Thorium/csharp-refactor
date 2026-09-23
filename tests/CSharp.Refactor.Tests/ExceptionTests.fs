@@ -86,6 +86,29 @@ class C
     Assert.Contains("catch (IOException ex) when (ex.HResult != 5) {  }", fixedSource)
     Assert.Contains("if (Console.Read() > 0) throw;", fixedSource)
 
+[<Fact>]
+let ``CR0065 keeps a guard whose condition can throw as a note`` () =
+    let source =
+        """
+using System;
+using System.IO;
+class C
+{
+    void A() { try { } catch (IOException ex) { if (!(ex.InnerException.HResult == 5)) throw; Console.WriteLine("a"); } }
+    void B() { try { } catch (IOException ex) { if ((int)ex.Data["code"] != 5) throw; Console.WriteLine("b"); } }
+    void D() { try { } catch (IOException ex) { if (!ex.Message.Contains("disk")) throw; Console.WriteLine("d"); } }
+}
+"""
+
+    let fired = suggestCode "CR0065" source
+    Assert.Equal(3, fired.Length)
+    // A reads through a possibly-null inner exception, B indexes and casts: notes
+    Assert.Equal(2, fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0065" source
+    Assert.Contains("if (!(ex.InnerException.HResult == 5)) throw;", fixedSource)
+    Assert.Contains("if ((int)ex.Data[\"code\"] != 5) throw;", fixedSource)
+    Assert.Contains("catch (IOException ex) when (ex.Message.Contains(\"disk\"))", fixedSource)
+
 // ---- CR0066 / CR0067 / CR0068 ----
 
 [<Fact>]

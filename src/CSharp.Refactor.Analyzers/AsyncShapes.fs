@@ -17,8 +17,13 @@
 /// (each is its own boundary; only the innermost function attributes a
 /// site); a `catch (AggregateException)` around the site stands the fix
 /// down — `.Result` and `Wait()` throw the wrapper, `await` the inner
-/// exception, and the handler would go dead; a task known complete (under
-/// its own `IsCompleted` test, born of `Task.FromResult`/`CompletedTask`,
+/// exception, and the handler would go dead — and so does a `catch
+/// (Exception)` or bare `catch` whose filter or body reads the wrapper
+/// (`InnerException`, `InnerExceptions`, `Flatten`, `is
+/// AggregateException`); a task known complete (under
+/// its own `IsCompleted` test — an `if`/`?:` branch or the right operand of
+/// `&&`/`||`, negation followed — or compared equal to the winner of
+/// `await Task.WhenAny(…, t, …)`, born of `Task.FromResult`/`CompletedTask`,
 /// after its own `Wait(timeout)` or `proc.WaitForExit()`) is a read, not a
 /// block; a body choreographed around a thread (a `Thread`, a signal,
 /// `Interlocked`) gets the note only — a bind moves the continuation off
@@ -229,18 +234,42 @@ let private inCatchOrFinally (fn: Function) (node: SyntaxNode) =
     |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, fn.Node)))
     |> Seq.exists (fun a -> a :? CatchClauseSyntax || a :? FinallyClauseSyntax)
 
-/// A `try` around the node whose handler names `AggregateException`.
-let private underAggregateCatch (fn: Function) (node: SyntaxNode) =
+/// A `try` around the node whose handler names `AggregateException`, or
+/// can catch one (`Exception`, or no type) and reads the wrapper — its
+/// `InnerException`, `InnerExceptions`, `Flatten`, or the type by name in
+/// the filter or body: after `await` it sees the inner exception instead.
+let underAggregateCatch (fn: Function) (node: SyntaxNode) =
+    let catchesWrapper (c: CatchClauseSyntax) =
+        let named =
+            not (isNull c.Declaration)
+            && c.Declaration.Type.ToString().EndsWith "AggregateException"
+
+        let broad =
+            isNull c.Declaration
+            || (match c.Declaration.Type.ToString() with
+                | "Exception"
+                | "System.Exception"
+                | "global::System.Exception" -> true
+                | _ -> false)
+
+        let readsWrapper () =
+            c.DescendantTokens()
+            |> Seq.exists (fun t ->
+                t.IsKind SyntaxKind.IdentifierToken
+                && (match t.ValueText with
+                    | "InnerException"
+                    | "InnerExceptions"
+                    | "Flatten"
+                    | "AggregateException" -> true
+                    | _ -> false))
+
+        named || (broad && readsWrapper ())
+
     node.Ancestors()
     |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, fn.Node)))
     |> Seq.exists (fun a ->
         match a with
-        | :? TryStatementSyntax as t ->
-            t.Block.Span.Contains node.Span
-            && t.Catches
-               |> Seq.exists (fun c ->
-                   not (isNull c.Declaration)
-                   && c.Declaration.Type.ToString().EndsWith "AggregateException")
+        | :? TryStatementSyntax as t -> t.Block.Span.Contains node.Span && t.Catches |> Seq.exists catchesWrapper
         | _ -> false)
 
 /// A body that choreographs threads by hand: a bind would move the
@@ -265,6 +294,10 @@ let private threadChoreographed (body: SyntaxNode) =
             || (m.Name.Identifier.ValueText = "Set" && text.Contains "Event")
             || m.Name.Identifier.ValueText = "WaitOne"
         | _ -> false)
+
+/// The properties that read `true` only on a finished task.
+let private completionProbes =
+    set [ "IsCompleted"; "IsCompletedSuccessfully"; "IsFaulted"; "IsCanceled" ]
 
 /// Is the task known complete where it is drained?
 let private knownComplete (model: SemanticModel) (fn: Function) (receiver: ExpressionSyntax) (site: SyntaxNode) =
@@ -301,17 +334,119 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
             | _ -> false
         | e -> bornComplete e
 
-    // under `if (t.IsCompleted)` / `IsCompletedSuccessfully` in the then-branch
+    // `winner` of `var winner = await Task.WhenAny(…, t, …);`, never assigned
+    // again: `winner == t` proves `t` complete
+    let whenAnyArguments (winner: ExpressionSyntax) =
+        match winner with
+        | :? IdentifierNameSyntax as id ->
+            match model.GetSymbolInfo(id).Symbol with
+            | :? ILocalSymbol as l ->
+                let reassigned =
+                    fn.Node.DescendantNodes()
+                    |> Seq.exists (fun n ->
+                        match n with
+                        | :? AssignmentExpressionSyntax as a ->
+                            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, l)
+                        | _ -> false)
+
+                if reassigned then
+                    []
+                else
+                    l.DeclaringSyntaxReferences
+                    |> Seq.collect (fun r ->
+                        match r.GetSyntax() with
+                        | :? VariableDeclaratorSyntax as v when not (isNull v.Initializer) ->
+                            match v.Initializer.Value with
+                            | :? AwaitExpressionSyntax as a ->
+                                // `.ConfigureAwait(false)` sits on the WhenAny call
+                                let call =
+                                    match a.Expression with
+                                    | :? InvocationExpressionSyntax as ca when
+                                        (match ca.Expression with
+                                         | :? MemberAccessExpressionSyntax as m ->
+                                             m.Name.Identifier.ValueText = "ConfigureAwait"
+                                         | _ -> false)
+                                        ->
+                                        (ca.Expression :?> MemberAccessExpressionSyntax).Expression
+                                    | e -> e
+
+                                match call with
+                                | :? InvocationExpressionSyntax as inv when inv.Expression.ToString() = "Task.WhenAny" ->
+                                    inv.ArgumentList.Arguments
+                                    |> Seq.collect (fun arg ->
+                                        match arg.Expression with
+                                        | :? ImplicitArrayCreationExpressionSyntax as arr ->
+                                            arr.Initializer.Expressions |> Seq.map string
+                                        | :? ArrayCreationExpressionSyntax as arr when not (isNull arr.Initializer) ->
+                                            arr.Initializer.Expressions |> Seq.map string
+                                        | :? CollectionExpressionSyntax as c ->
+                                            c.Elements
+                                            |> Seq.choose (fun e ->
+                                                match e with
+                                                | :? ExpressionElementSyntax as x -> Some(string x.Expression)
+                                                | _ -> None)
+                                        | e -> Seq.singleton (string e))
+                                | _ -> Seq.empty
+                            | _ -> Seq.empty
+                        | _ -> Seq.empty)
+                    |> List.ofSeq
+            | _ -> []
+        | _ -> []
+
+    // the receivers a condition proves complete when it is true, and when
+    // it is false: `t.IsCompleted` (or `IsCompletedSuccessfully`,
+    // `IsFaulted`, `IsCanceled`), a WhenAny winner compared to `t`, through
+    // `&&`, `||` and `!`
+    let rec completionTests (cond: ExpressionSyntax) : string list * string list =
+        match cond with
+        | :? ParenthesizedExpressionSyntax as p -> completionTests p.Expression
+        | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.LogicalAndExpression ->
+            fst (completionTests b.Left) @ fst (completionTests b.Right), []
+        | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.LogicalOrExpression ->
+            [], snd (completionTests b.Left) @ snd (completionTests b.Right)
+        | :? PrefixUnaryExpressionSyntax as u when u.IsKind SyntaxKind.LogicalNotExpression ->
+            let t, f = completionTests u.Operand
+            f, t
+        | :? MemberAccessExpressionSyntax as m when completionProbes.Contains m.Name.Identifier.ValueText ->
+            [ m.Expression.ToString() ], []
+        | :? BinaryExpressionSyntax as b when
+            b.IsKind SyntaxKind.EqualsExpression || b.IsKind SyntaxKind.NotEqualsExpression
+            ->
+            let compared =
+                [
+                    if List.contains (b.Right.ToString()) (whenAnyArguments b.Left) then
+                        b.Right.ToString()
+                    if List.contains (b.Left.ToString()) (whenAnyArguments b.Right) then
+                        b.Left.ToString()
+                ]
+
+            if b.IsKind SyntaxKind.EqualsExpression then
+                compared, []
+            else
+                [], compared
+        | _ -> [], []
+
+    // under a completion test: the then-branch of `if (t.IsCompleted)`, the
+    // right operand of `t.IsCompleted && …`, their negated twins
     let underCompletedTest =
         site.Ancestors()
         |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, fn.Node)))
         |> Seq.exists (fun a ->
+            let proves (cond: ExpressionSyntax) (branch: SyntaxNode) whenTrue =
+                not (isNull branch)
+                && branch.Span.Contains site.Span
+                && List.contains text ((if whenTrue then fst else snd) (completionTests cond))
+
             match a with
-            | :? IfStatementSyntax as ifs when ifs.Statement.Span.Contains site.Span ->
-                let c = ifs.Condition.ToString()
-                c.Contains(text + ".IsCompleted")
-            | :? ConditionalExpressionSyntax as c when c.WhenTrue.Span.Contains site.Span ->
-                c.Condition.ToString().Contains(text + ".IsCompleted")
+            | :? IfStatementSyntax as ifs ->
+                proves ifs.Condition ifs.Statement true
+                || (not (isNull ifs.Else) && proves ifs.Condition ifs.Else.Statement false)
+            | :? ConditionalExpressionSyntax as c ->
+                proves c.Condition c.WhenTrue true || proves c.Condition c.WhenFalse false
+            | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.LogicalAndExpression ->
+                proves b.Left b.Right true
+            | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.LogicalOrExpression ->
+                proves b.Left b.Right false
             | _ -> false)
 
     // after its own `Wait(timeout)` or a `WaitForExit()` in the same block

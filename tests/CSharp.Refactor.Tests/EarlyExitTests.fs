@@ -117,6 +117,32 @@ class C
 
     Assert.Equal<string list>([], firedText source (suggestCode "CR0006" source))
 
+[<Fact>]
+let ``CR0006 keeps a then block that declares a using var`` () =
+    let source =
+        $"""
+using System;
+using System.IO;
+class C
+{{
+    void Run(bool ok, string path)
+    {{
+        if (ok)
+        {{
+            using var stream = File.OpenRead(path);
+{twentyLines}
+        }}
+        else
+        {{
+            return;
+        }}
+        File.Delete(path);
+    }}
+}}
+"""
+
+    Assert.Empty(suggestCode "CR0006" source)
+
 // ---- CR0016 ----
 
 [<Fact>]

@@ -637,7 +637,12 @@ let private obsoleteCrypto (tree: SyntaxTree) (model: SemanticModel) : Suggestio
     root.DescendantNodes()
     |> Seq.choose (fun n ->
         match n with
-        | :? ObjectCreationExpressionSyntax as c when isNull c.ArgumentList || c.ArgumentList.Arguments.Count = 0 ->
+        // an object initializer (`{ Key = k, IV = iv }`) is part of the span a
+        // factory call cannot carry: the key and IV would go with it
+        | :? ObjectCreationExpressionSyntax as c when
+            (isNull c.ArgumentList || c.ArgumentList.Arguments.Count = 0)
+            && isNull c.Initializer
+            ->
             match model.GetTypeInfo(c).Type with
             | null -> None
             | t when

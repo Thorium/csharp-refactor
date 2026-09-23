@@ -432,6 +432,46 @@ class C
     Assert.Empty(suggestCode "CR0005" source)
 
 [<Fact>]
+let ``CR0005 holds a comment beside the outer paren, above an unbraced inner if, or on the outer else`` () =
+    let source =
+        """
+class C
+{
+    void A(bool a, bool b)
+    {
+        if (a) // only for a
+        {
+            if (b) System.Console.WriteLine("x");
+        }
+    }
+    void B(bool a, bool b)
+    {
+        if (a)
+            // only when b
+            if (b) System.Console.WriteLine("x");
+    }
+    void D(bool a, bool b)
+    {
+        if (a)
+        {
+            if (b) System.Console.WriteLine("x");
+            else System.Console.WriteLine("y");
+        }
+        else // the fallback
+            System.Console.WriteLine("y");
+    }
+    void E(bool a, bool b)
+    {
+        if (a)
+            if (b) System.Console.WriteLine("x"); // kept
+    }
+}
+"""
+
+    Assert.Equal<string list>([ "if (a)" ], firedText source (suggestCode "CR0005" source))
+    Assert.Contains("if (a && b) System.Console.WriteLine(\"x\"); // kept", fixAll "CR0005" source)
+
+[<Fact>]
 let ``a table of constants with a throwing default is not a stub`` () =
     let source =
         """
@@ -577,3 +617,51 @@ class C
     Assert.Contains("else throw new InvalidOperationException();", fixedSource)
     Assert.Contains("if (a) P = \"1\"; else P = \"2\";", fixedSource)
     Assert.Contains("int? R(bool a) { return a ? 1 : null; }", fixedSource)
+
+[<Fact>]
+let ``a conditional whose arms meet at a wider natural type than each arm converted to stands down`` () =
+    let source =
+        """
+class C
+{
+    object Boxed(bool a) { if (a) return 1; else return 2.0; }
+    double ViaFloat(bool a, int i, float f) { if (a) return i; return f; }
+    void Assigned(bool a, int i, float f) { double d; if (a) d = i; else d = f; System.Console.WriteLine(d); }
+    object SameType(bool a) { if (a) return "x"; return "y"; }
+    object TargetTyped(bool a) { if (a) return 1; return "x"; }
+    long ToTarget(bool a, int i, long l) { if (a) return i; return l; }
+}
+"""
+
+    let fired = suggestCode "CR0173" source |> firedText source
+
+    Assert.Equal<string list>(
+        [
+            "if (a) return \"x\"; return \"y\";"
+            "if (a) return 1; return \"x\";"
+            "if (a) return i; return l;"
+        ],
+        fired
+    )
+
+[<Fact>]
+let ``a null arm beside a value of the return type still folds`` () =
+    // ICSharpCode.TextEditor's getters: `if (c) return null; return x;` — the
+    // null converts to the return type either way; the guard must not stand down
+    let source =
+        """
+using System.Collections.Generic;
+interface IItem { }
+class C
+{
+    IItem[] items = new IItem[0];
+    Dictionary<int, IItem> map = new();
+    Stack<(IItem p, int n)> stack = new();
+    IItem A(int i) { if (i < 0) return null; return items[i]; }
+    IItem B(int k) { if (!map.ContainsKey(k)) return null; return map[k]; }
+    IItem D { get { if (stack.Count == 0) return null; return stack.Peek().p; } }
+    IItem E(List<IItem> list) { if (list.Count != 0) return list[index: 0]; return null; }
+}
+"""
+
+    Assert.Equal(4, (suggestCode "CR0173" source).Length)

@@ -275,6 +275,45 @@ type EndToEnd() =
         Assert.Equal(0, Sweep.runTotalApplied)
 
     [<Fact>]
+    member _.``a fix that raises an analyzer warning the project treats as an error is held, the others stand``() =
+        let dir = tempDir ()
+
+        File.WriteAllText(
+            Path.Combine(dir, "Sample.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup></Project>"
+        )
+
+        // a custom hint is its author's to aim: this one writes the Any()
+        // CA1860 forbids on an array
+        File.WriteAllText(Path.Combine(dir, "hints.txt"), "x.Length > 0 ===> x.Any()\n")
+
+        File.WriteAllText(
+            Path.Combine(dir, ".editorconfig"),
+            "root = true\n[*.cs]\ndotnet_diagnostic.CA1860.severity = warning\ncsharp_refactor.hints = hints.txt\n"
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "Arrays.cs"),
+            "using System.Linq;\nnamespace Sample;\npublic static class Arrays\n{\n    public static bool HasAny(int[] xs) => xs.Length > 0;\n}\n"
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "Sequences.cs"),
+            "using System.Collections.Generic;\nusing System.Linq;\nnamespace Sample;\npublic static class Sequences\n{\n    public static bool HasAny(IEnumerable<int> xs) => xs.Count() > 0;\n}\n"
+        )
+
+        let project = Path.Combine(dir, "Sample.csproj")
+        Sweep.resetRun ()
+
+        match parseArgs [| project; "--codes"; "CR0011" |] with
+        | Ok opts -> Sweep.executeRun opts |> ignore
+        | Error e -> failwith e
+
+        Assert.Contains("xs.Length > 0;", File.ReadAllText(Path.Combine(dir, "Arrays.cs")))
+        Assert.Contains("xs.Any();", File.ReadAllText(Path.Combine(dir, "Sequences.cs")))
+        Assert.Equal(1, Sweep.runTotalApplied)
+
+    [<Fact>]
     member _.``under the api pass a friend project's callers are rewritten through the reference oracle and both projects build``
         ()
         =
@@ -372,6 +411,28 @@ type EndToEnd() =
         Assert.Equal<byte[]>(original.[0..39], bytes.[0..39])
 
 // ---- legacy projects ----
+
+[<Fact>]
+let ``a project naming its SDK in an Sdk element is not legacy`` () =
+    let dir = tempDir ()
+
+    let write (name: string) (text: string) =
+        let path = Path.Combine(dir, name)
+        File.WriteAllText(path, text)
+        path
+
+    let element =
+        write
+            "Element.csproj"
+            "<Project>\n  <Sdk Name=\"Microsoft.NET.Sdk\" />\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n</Project>"
+
+    let legacy =
+        write
+            "Legacy.csproj"
+            "<Project ToolsVersion=\"15.0\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\"><ItemGroup><Compile Include=\"A.cs\" /></ItemGroup></Project>"
+
+    Assert.False(LegacyProjects.isLegacy element)
+    Assert.True(LegacyProjects.isLegacy legacy)
 
 [<Fact>]
 let ``a legacy project parses at the language version its build will use`` () =
@@ -483,6 +544,14 @@ let ``the MCP server answers the handshake, lists its tools and rules, and analy
                 """{"jsonrpc":"2.0","id":2,"method":"tools/list"}"""
                 """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_rules","arguments":{}}}"""
                 $"""{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"analyze","arguments":{{"target":"{target}","codes":"CR0090"}}}}}}"""
+                // unknown codes and categories are errors, as on the command line
+                $"""{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"analyze","arguments":{{"target":"{target}","codes":"CR9999"}}}}}}"""
+                $"""{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"analyze","arguments":{{"target":"{target}","categories":"bogus"}}}}}}"""
+                // malformed requests are JSON-RPC errors, and the server keeps serving
+                """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":5}}"""
+                """{"jsonrpc":"2.0","id":8,"method":"tools/call","params":[1]}"""
+                """{"jsonrpc":"2.0","id":9,"method":null}"""
+                """{"jsonrpc":"2.0","id":10,"method":"ping"}"""
             ] do
             p.StandardInput.WriteLine request
 
@@ -530,6 +599,13 @@ let ``the MCP server answers the handshake, lists its tools and rules, and analy
         Assert.Contains("CR0090", content (byId 4))
         // a dry run by default: the file is as it was
         Assert.Equal(source, File.ReadAllText(Path.Combine(dir, "C.cs")))
+
+        for id in [ 5; 6; 7; 8; 9 ] do
+            Assert.True(fst ((byId id).TryGetProperty "error"), $"request {id} should be an error")
+
+        Assert.Contains("not a rule code: CR9999", (byId 5).GetProperty("error").GetProperty("message").GetString())
+        Assert.Contains("not a category", (byId 6).GetProperty("error").GetProperty("message").GetString())
+        Assert.True(fst ((byId 10).TryGetProperty "result"))
         Assert.Equal(0, p.ExitCode)
         let! _ = stderr
         ()

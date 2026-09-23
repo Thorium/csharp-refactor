@@ -132,6 +132,7 @@ module Rules =
             "LinqNotes", LinqNotes.analyze
             "CollectionFixes", CollectionFixes.analyze
             "ConversionMove", ConversionMove.analyze
+            "QueryCopy", QueryCopy.analyze
             "SelectFusion", SelectFusion.analyze
             "Accumulation", Accumulation.analyze
             "FillLoop", FillLoop.analyze

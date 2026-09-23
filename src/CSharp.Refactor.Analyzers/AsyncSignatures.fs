@@ -7,7 +7,10 @@
 /// form): the method is private (internal under the friend check, public
 /// never); every caller is in this file, is a bindable statement of an
 /// `async` body — `var x = M(…);`, `return M(…);`, `M(…);` — and not
-/// inside a lambda, a local function, a `lock`, a `catch` or a `finally`;
+/// inside a lambda, a local function, a `lock`, a `catch` or a `finally`,
+/// nor inside a `try` whose handler catches the `AggregateException` the
+/// sync call threw (CR0040's handler test: the awaited call throws the
+/// inner exception, and the handler would go dead);
 /// every drain in the body is one CR0040 could await (no known-complete
 /// read, no `AggregateException` handler, no no-bind zone, no
 /// thread-choreographed body); no `out`/`ref` parameters, no iterator, no
@@ -26,9 +29,14 @@
 /// shaped, not subscribed to any event in the compilation (`+=`, `-=`, a
 /// delegate constructor) or mentioned as a method group, not an override,
 /// virtual, abstract, partial or interface implementation, no attribute (a handler-style attribute would hand the runtime a Task it
-/// does not await); every caller is in this file and in an `async`
-/// context — a call site in a sync context would become a silent
-/// fire-and-forget, so it vetoes the fix and the rule notes instead.
+/// does not await); at least one caller, every caller in this file and in
+/// an `async` context — a call site in a sync context would become a
+/// silent fire-and-forget, and a method nothing here calls is called by
+/// the framework, reflection or another assembly, which would get a Task
+/// nobody awaits, so either vetoes the fix and the rule notes instead;
+/// the scope gate (`async void` → `async Task` is a signature change: a
+/// public or protected method needs the public shape open, an internal one
+/// the friend check).
 /// Yields to VSTHRD100.
 ///
 /// CR0045 (performance, fix): a test that blocks on a task —
@@ -109,6 +117,9 @@ let private bindableCall (inv: InvocationExpressionSyntax) : bool =
                 || a :? AnonymousFunctionExpressionSyntax
                 || a :? LocalFunctionStatementSyntax)
         )
+        // the caller's own handler of the wrapper: the sync call threw the
+        // AggregateException, the awaited one throws the inner exception
+        && not (AsyncShapes.underAggregateCatch f inv)
     | _ -> false
 
 /// All references to a method symbol across the compilation are in this tree.
@@ -456,7 +467,7 @@ let private taskify (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext)
 
 // ---- CR0043 ----
 
-let private asyncVoids (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+let private asyncVoids (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
         match n with
@@ -488,8 +499,28 @@ let private asyncVoids (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                 else
                     let callers = callSites model tree self
 
+                    let rec effective (s: ISymbol) =
+                        match s with
+                        | null -> Accessibility.Public
+                        | s ->
+                            match s.DeclaredAccessibility, effective s.ContainingType with
+                            | Accessibility.Private, _
+                            | _, Accessibility.Private -> Accessibility.Private
+                            | Accessibility.Internal, _
+                            | Accessibility.ProtectedAndInternal, _
+                            | _, Accessibility.Internal -> Accessibility.Internal
+                            | own, _ -> own
+
+                    let shapeOpen =
+                        match effective self with
+                        | Accessibility.Private -> true
+                        | Accessibility.Internal -> RuleContext.internalShapeOpen ctx
+                        | _ -> RuleContext.publicShapeOpen ctx
+
                     let convertible =
-                        allReferencesHere model tree self
+                        shapeOpen
+                        && not callers.IsEmpty
+                        && allReferencesHere model tree self
                         && not (mentionedAsGroup model self)
                         && callers
                            |> List.forall (fun c ->
@@ -517,7 +548,7 @@ let private asyncVoids (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                         Some(
                             Suggestion.note
                                 AsyncVoidCode
-                                "async void: no caller can await it and an exception in it crashes the process; a caller in a sync context or another file keeps this a note"
+                                "async void: no caller can await it and an exception in it crashes the process; a caller in a sync context or another file, no caller in sight (framework, reflection, another assembly) or a closed public surface keeps this a note"
                                 m.ReturnType.Span
                         )
         | _ -> None)
@@ -692,4 +723,4 @@ let private testTasks (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
         |> List.ofSeq
 
 let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
-    taskify tree model ctx @ asyncVoids tree model @ testTasks tree model
+    taskify tree model ctx @ asyncVoids tree model ctx @ testTasks tree model

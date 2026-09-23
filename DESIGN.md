@@ -398,6 +398,7 @@ at the SDK's default analysis level. These get no CR rule; the tool defers.
 | FR0166 | `s.Substring(0, 6) = "ORDER-"` → `StartsWith(…, Ordinal)` | — | CR0175, under a length guard (a short string threw where StartsWith answers false) |
 | FR0167 | `for c in s.ToCharArray()` → `for c in s` | — | CR0176, the `foreach` only (LINQ over a string is slower than over the array) |
 | FR0071 | hoist a loop-invariant `let` above the loop | — | CR0177: the initializer pure and reading nothing the loop changes; measured, a concatenation 4×, local and readonly-field arithmetic parity (the JIT hoists it; a mutable field is never read) |
+| FR0174 | `q.ToList().Where(f).Select(g)` → `q.Where(f).Select(g).ToList()` on an `IQueryable` | — | CR0178: trivial column comparisons and projections only; a sweep moves exact translations (integers, bool, enums, Guid), the editor offers string, decimal, date and nullable ones |
 | FR0118 (omitted token) | forward the `CancellationToken` | CA2016 | defer; CR0055 keeps the explicit `None` |
 | FR0124 (count, interpolated template) | template/argument mismatch | CA2017, CA2254 | defer; CR0114 keeps the remainder |
 | FR0130 | `static readonly` constant → `const`, and a constant local | CA1802 | CR0172: the field under the API gate (a `const` is a different member to a compiled consumer), the local always |

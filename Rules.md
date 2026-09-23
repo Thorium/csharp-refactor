@@ -140,6 +140,7 @@ a section, and its category and default state match the code.
 | CR0175 | Performance | v | | | | `s.Length >= 6 && s.Substring(0, 6) == "ORDER-"`, `s[..6] == "ORDER-"`, `s[^3..] != "MED"` under a length guard | `s.StartsWith("ORDER-", StringComparison.Ordinal)`, `!s.EndsWith("MED", StringComparison.Ordinal)` |
 | CR0176 | Performance | v | | | | `foreach (var c in s.ToCharArray())` | `foreach (var c in s)` |
 | CR0177 | Performance | v | | | | `foreach (var x in xs) { var label = tag + ":"; Use(x, label); }` | `var label = tag + ":"; foreach (var x in xs) { Use(x, label); }` |
+| CR0178 | Performance | v | | | | `db.Orders.ToList().Where(o => o.Total > 0).Select(o => o.Id)` | `db.Orders.Where(o => o.Total > 0).Select(o => o.Id).ToList()` |
 
 \*) Enabled by default. A blank cell means the rule is off until
 `.editorconfig` turns it on (`dotnet_diagnostic.CRxxxx.severity = suggestion`)
@@ -214,7 +215,10 @@ incremented, taken by `ref` or passed `ref`/`out`; a mutable struct element
 is never dereferenced (`ps[i].Bump()` mutates the array's element, a copy
 after the rewrite); `xs` is not assigned or mutated through a known
 mutator, and a list is not passed to any method in the body (`foreach`
-throws on a list modified under it); the alias binder is dropped only when
+throws on a list modified under it); a list held in a field is walked by
+a body whose every call is to a core member and which constructs nothing
+(`for (…; i < _pending.Count; …) Visit(_pending[i]);` with `Visit`
+appending to `_pending` is a worklist the `for` walks to its end); the alias binder is dropped only when
 never reassigned, else it stays a copy; the element name is the
 collection's singular (`pages` → `page`, `entries` → `entry`), else `item`,
 `item2`…, unused in the enclosing member. `break`/`continue` stay. Measured:
@@ -261,8 +265,10 @@ source, never calls a mutating method on any receiver (`Add`, `Remove`,
 `Clear`, `Insert`, `Push`, `Enqueue`, `Set…`, `RemoveAt`…), never sets an
 indexer or member, holds no `await`; a source already a list or array
 gains nothing and is CA1829/CA1860's; a short-circuiting consumer sees
-fewer elements after the move, so the source expression is pure through
-`callsOnlyCore`; a lazy stage moved before the copy runs its lambda at copy
+fewer elements after the move, so the source is typed as a materialised
+collection, or is a local whose initializer is a `callsOnlyCore` view of
+one (`var seq = Numbers(); seq.ToList().Any(p)` keeps the copy: the
+generator's remaining effects ran); a lazy stage moved before the copy runs its lambda at copy
 time, so the lambda is pure too. Measured (PerfClaims): dropping the copy
 before a consumer or a `foreach` wins on allocation (85× less) and the
 `Where` move holds parity on time with a third of the allocation; the
@@ -476,7 +482,9 @@ operand exactly as C# evaluates it; an interpolated-string argument is
 left alone (.NET 6+ handles it without an intermediate); every piece
 appends the characters `+` produced (`Append(int)`, `Append(char)`,
 `Append(object)` format as concatenation does, `null` appends nothing
-either way); no comment in the argument.
+either way); no piece reads a `StringBuilder` (`sb.Append("Len:" +
+sb.Length)` read the length before appending, the chain would read it
+after the first piece); no comment in the argument.
 
 ### CR0034 — correctness
 
@@ -520,7 +528,9 @@ filter, a `finally`, an `unsafe` block, a non-`async` lambda or a local
 function (each is its own boundary; only the innermost function attributes
 a site); a `catch (AggregateException)` around the site holds the fix to a
 note — `.Result` and `Wait()` throw the wrapper, `await` the inner
-exception, and the handler would go dead; a task known complete is a read,
+exception, and the handler would go dead — as does a `catch (Exception)`
+or bare `catch` whose filter or body reads the wrapper (`InnerException`,
+`InnerExceptions`, `Flatten`, `is AggregateException`); a task known complete is a read,
 not a block: under its own `IsCompleted` test, born of `Task.FromResult`/
 `CompletedTask` (through a local or a `readonly` field), after its own
 `Wait(timeout)`, an `await` of it or of a `Task.WhenAll` naming it, or a
@@ -545,7 +555,10 @@ file, in another file of the compilation, or (through the reference
 oracle a host with a solution gives, under the api pass) in a friend
 project — is a bindable statement of an `async` body — `var x = M(…);`,
 `return M(…);`, `M(…);`, `x = M(…);` — not inside a lambda, a local
-function, a `lock`, a `catch` or a `finally`; every drain in the body is
+function, a `lock`, a `catch` or a `finally`, nor inside a `try` whose
+handler catches the `AggregateException` the sync call threw (CR0040's
+handler test: the awaited call throws the inner exception, and the
+handler would go dead); every drain in the body is
 one CR0040 could await (no known-complete read, no `AggregateException`
 handler, no no-bind zone, no thread-choreographed body) and none sits in
 a lambda inside it; no `out`/`ref` parameters, no iterator, no `unsafe`,
@@ -589,10 +602,14 @@ subscribed to any event in the compilation (`+=`, `-=`, a delegate
 constructor, a method group handed to a call, `nameof`), not an
 override, virtual, abstract, partial or interface implementation, no
 attribute (a handler-style attribute would
-hand the runtime a Task it does not await); every caller is in this file,
-in an `async` context, as a statement — a call from a sync context, a
-lambda or another file would become a silent fire-and-forget, so it vetoes
-the fix and the rule notes instead. Yields to VSTHRD100.
+hand the runtime a Task it does not await); at least one caller, and every
+caller is in this file, in an `async` context, as a statement — a call
+from a sync context, a lambda or another file would become a silent
+fire-and-forget, and a method with no caller in sight is called by the
+framework, reflection or another assembly, which would get a Task nobody
+awaits, so either vetoes the fix and the rule notes instead; the scope
+gate (a public or protected method needs the public shape open, an
+internal one the friend check). Yields to VSTHRD100.
 
 ### CR0045 — performance
 
@@ -877,7 +894,13 @@ calling nothing but the BCL (a filter runs before inner `finally` blocks,
 so an effectful condition would reorder effects); no existing filter; the
 catch is the last of its try (a rethrow skips the sibling catches, a
 declining filter lets them see the exception); no comment on the guard
-line; the condition is negated by CR0001's rule.
+line; the condition cannot throw — an exception inside a filter is
+swallowed and the filter declines, where the guard in the handler threw
+(`if (!(ex.InnerException.HResult == 5)) throw;` on a null inner
+exception): members are read only on the exception, a value, a type or a
+receiver the flow analysis proves non-null, `?.` is fine, no element
+access, cast, division by a variable or call beyond a `string` method with
+constant arguments — else a note; the condition is negated by CR0001's rule.
 
 ### CR0066 — correctness
 
@@ -981,7 +1004,9 @@ else. Guards: every instance field an unmanaged struct or enum (`int`,
 record, nothing deriving from it, no interface beyond the compiler's
 `IEquatable<T>`, no attribute, not `partial` or `abstract`; not used as
 `T?` anywhere (that spelling would change from a nullable reference to
-`Nullable<T>`), not compared with `null`, not converted to `object` or an
+`Nullable<T>`), not compared with or assigned `null`, not the operand of
+`as`, `??` or `?.`, not a type argument for a `class`-constrained
+parameter — in any file of the compilation — not converted to `object` or an
 interface (boxing), not `lock`ed, not inside an expression-tree lambda
 (`IQueryable` providers translate struct members differently); the scope
 gate of CR0080. F# twin: FR0070.
@@ -999,8 +1024,10 @@ down): an `Item1..ItemN` read (shared with
 `ValueTuple`), a deconstruction, a return, an argument to a parameter of
 the same tuple type declared in this compilation (retyped with it) — an
 argument to a library's `Tuple<…>`, a type parameter, `object` or a call
-that does not bind vetoes; a null comparison
-(`t == null`, `t is null`, `t?.Item1`) or a delegate-style call vetoes; a
+that does not bind vetoes; any operator on the tuple — a null comparison
+(`t == null`, `t is null`, `t?.Item1`), `t != _last` (a reference
+comparison on `Tuple<…>`, an element comparison on the value tuple),
+`is`/`as`/`??` — or a delegate-style call vetoes; a
 spelling inside a generic argument (`List<Tuple<…>>`) is a different
 shape and vetoes the type; at most four elements (a struct tuple is
 copied by value). The rewrite retypes every spelling of the type in every
@@ -1082,9 +1109,10 @@ and switch to the real clock) or another slot of the migration; at least
 one real write pins the clock; `Now` and `UtcNow` never mix across the
 migration; every read is a parity member — a comparison or subtraction
 against a slot or a clock read, `.Ticks`, `.Year`…`.Millisecond`,
-`.AddDays`…`.AddYears`, `.Subtract`, `.CompareTo`, `.ToString()` with no
-format — never `.Date` (returns `DateTime`), `.Kind`, `.ToLocalTime()`,
-a format string (it prints differently), a binding to a local or the
+`.AddDays`…`.AddYears`, `.Subtract`, `.CompareTo` — never `.Date`
+(returns `DateTime`), `.Kind`, `.ToLocalTime()`, `.ToString()` in any
+form (a `DateTimeOffset` appends its offset, `… +02:00`, even with no
+format), a binding to a local or the
 value handed to a call; every mention in this file. The slots and their
 clock writes change together. F# twin: FR0134.
 
@@ -1097,7 +1125,12 @@ but produces `00000000-…`. The fix states the value as `Guid.Empty`
 qualification the source spelled); the editor also offers `Guid.NewGuid()` —
 the likely intent, but a behaviour change only a human confirms.
 Typed-gated to `System.Guid`, so a user type named `Guid` never matches;
-`new Guid(bytes)` and friends are deliberate and stay. F# twin: FR0136.
+`new Guid(bytes)` and friends are deliberate and stay. A parameter default
+(`void M(Guid g = new Guid())`) and an attribute argument stay: a default
+must be a constant, and `Guid.Empty` is not one (CS1736). A target-typed
+`new()` is spelled `Guid.Empty` only where the file resolves `Guid`, else
+`System.Guid.Empty`; the speculative check proves the rewrite binds. F#
+twin: FR0136.
 
 ### CR0100 — idiom
 
@@ -1229,7 +1262,10 @@ translation table, not a clock read. F# twin: FR0121.
 engine rejects is a guaranteed `ArgumentException` at the first call.
 Priority; note. The check constructs the pattern with the call's own
 constant `RegexOptions` (a pattern legal under `IgnorePatternWhitespace`
-may be illegal without it); non-constant options stand down. F# twin:
+may be illegal without it); non-constant options stand down; only the
+engine's `ArgumentException` is proof — any other exception (a
+`NotSupportedException` for a backreference under `NonBacktracking`)
+leaves the pattern unproven, and CR0109 keeps it unhoisted. F# twin:
 FR0122.
 
 ### CR0108 — performance
@@ -1277,7 +1313,10 @@ under an interface or a generic container, where the generator does not
 apply — a `private static readonly Regex LitRegex = new Regex("lit");`
 field. The
 declaration lands above the enclosing member's leading comment block and
-never under a directive; a construction becomes the reference, a static
+never under a directive — a field, though, above the first static field
+or property initializer that precedes the member (static initializers run
+in text order, and one above could reach the member during type
+initialization while the field is still null); a construction becomes the reference, a static
 call an instance call with the pattern dropped (`Regex.Replace(s, "p",
 "r")` → `PRegex().Replace(s, "r")`); a call carrying a timeout stays, a
 construction carrying one hoists whole as a field. Guards: a literal
@@ -1421,7 +1460,10 @@ name; every comparison is `==` (either way round) against a compile-time
 constant through the built-in operator, on an integral, `char`, `string`,
 `bool` or enum scrutinee (nullable of those included); a chain link may
 be an `||` of such comparisons; three comparisons at least — two read
-fine as `if`/`else`; no constant repeats. The shared switch guards of
+fine as `if`/`else`; no constant repeats; the expression form keeps every
+arm's conversion to the target (arms of one type, a natural type equal
+to the target, or a target-typed switch: `1` and `2L` returned as
+`object` keep the statement form). The shared switch guards of
 CR0003 apply to the statement form. F# twin: FR0112.
 
 ### CR0003 — idiom
@@ -1478,7 +1520,11 @@ and no `else` at all. The tempting third shape — an inner `if` without
 run the `else` where the original ran nothing. The inner `if` must be the
 only statement of the outer `then`; both conditions are `bool` through
 built-in operators; an `||`-topped condition gains parentheses before
-joining the `&&`; the braces may hide no comment; the moved lines hold no
+joining the `&&`; no comment or directive lies in the outer statement
+outside what the replacement keeps (the inside of the two conditions and
+the inner `if` after its `)`) — one beside the outer `)` in Allman style,
+above an unbraced inner `if`, on a brace or on the outer `else` holds the
+fix; the moved lines hold no
 multi-line literal and move left by the block's indentation; a merged
 condition that would run past the wrap column (`csharp_refactor.CR0005.wrap_column`,
 else the file's `max_line_length`, else 120) keeps the nesting — two
@@ -1496,8 +1542,10 @@ ends in `return`/`throw`/`continue`/`break`; the condition is `bool`, and
 its negation unwraps an existing `!` or flips a comparison where that is
 exact (CR0001's rule); the `if` is a statement of a block, so the freed
 lines become its siblings; no comment or directive outside the two blocks
-(the `else` line goes); no multi-line literal in the moved lines; the
-speculative check holds the fix where a local of the `then` block would
+(the `else` line goes); no multi-line literal in the moved lines; no
+`using var` declared directly in the `then` block (freed into the
+enclosing block it would be disposed later, past the code after the old
+`if`); the speculative check holds the fix where a local of the `then` block would
 clash with a later sibling scope. F# twin: FR0114.
 
 ### CR0016 — idiom
@@ -1841,7 +1889,14 @@ override or an explicit interface implementation, its accessors plain;
 no serializer attribute on the property or the type and no Entity
 Framework entity (a serializer constructs without initialisers);
 `required` is a demand on callers, so the scope gate of the shape rules
-applies. Off by default: `required` is also a runtime demand on every
+applies; every construction of a type DERIVED from it in the compilation
+sets the property too (`new Derived()` would be CS9035); neither the type
+nor a derived one is a type argument for a `new()`-constrained parameter
+(`Make<Options>()` would be CS9040); a type seen beyond the compilation
+(public in a library, internal with friends) needs the host's reference
+oracle, and every site it finds there must be a construction setting the
+property — never a base list or a type argument; without the oracle such
+a type stands down. Off by default: `required` is also a runtime demand on every
 deserializer of the type (System.Text.Json throws on a missing required
 member), which no build can prove absent — `csharp_refactor.CR0149 =
 true` or `--codes CR0149` turns it on for a compilation known not to be
@@ -1852,12 +1907,17 @@ deserialized. F# twin: FR0145 (the inverse).
 A `static readonly Dictionary<K,V>` or `HashSet<T>` filled in its
 initialiser and only ever read is a `FrozenDictionary<K,V>`/`FrozenSet<T>`
 (.NET 8) via `.ToFrozenDictionary()`/`.ToFrozenSet()`, built for lookups.
-Guards: a collection-initialiser construction; every reference in the
-file a lookup or an order-independent aggregate (`TryGetValue`, an
-indexer get, `ContainsKey`, `Contains`, `Count`, `GetValueOrDefault`,
-`Any`/`All`/`Sum`/`Min`/`Max`) — enumeration, `Keys`/`Values` and the
-ordered LINQ readers veto, a frozen collection enumerating in its own
-order where a `Dictionary` follows insertion; a partial type spread over
+Guards: a collection-initialiser construction; every reference a lookup
+or an order-independent aggregate (`TryGetValue`, an indexer get,
+`ContainsKey`, `Contains`, `Count`, `GetValueOrDefault`,
+`Any`/`All`/`Sum`/`Min`/`Max`) — a write, an increment or a by-ref pass
+breaks the build, and enumeration, `Keys`/`Values` and the ordered LINQ
+readers veto, a frozen collection enumerating in its own order where a
+`Dictionary` follows insertion. That holds in this file, in every other
+file of the compilation (an internal field's `Registry.Map[k] = v`
+elsewhere), and, for a field seen beyond the compilation (public in a
+library, internal with friends), at every site the host's reference
+oracle finds — without the oracle such a field stands down; a partial type spread over
 files stands down; the scope gate
 (a `Dictionary`-typed field is API); the comparer argument travels to the
 converter; `System.Collections.Frozen` resolves and its `using` is added.
@@ -1872,8 +1932,15 @@ arguments without an array. Guards: the parameter is used only for
 parameter; never stored, returned, captured by a lambda or local
 function, passed to an array or `IEnumerable<T>` parameter, used with
 LINQ; the method is not `async`, an iterator, virtual, abstract or an
-override; the scope gate (a `params` type change is binary-breaking); the
-speculative check re-binds every call in the file.
+override; the scope gate (a `params` type change is binary-breaking);
+every reference to the method, in this file and through the host's
+reference oracle in every other, is a plain call outside an expression
+tree (a method group `Func<int[], int> f = H.Sum;` stops converting, an
+expression tree cannot hold a span `params` call) — without an oracle the
+compilation's own trees are read, complete only for a private method or
+an internal one no friend assembly sees, so anything wider stands down;
+the speculative check re-binds every call in the file and the files
+referencing it.
 
 ### CR0152 — performance
 
@@ -1881,7 +1948,8 @@ speculative check re-binds every call in the file.
 file is the operand of a `lock` statement is `private readonly Lock
 _gate = new();` (C# 13, .NET 9): the dedicated type skips the
 object-header path, and the `lock` statement binds to its scope.
-`Monitor.*`, passing, comparing or storing it vetoes; `System.Threading.Lock`
+`Monitor.*`, passing, comparing or storing it vetoes — in every part of
+a partial type, the other files included; `System.Threading.Lock`
 resolves, and its `using` is added.
 
 ### CR0153 — idiom
@@ -1905,7 +1973,9 @@ contextual keyword would shadow it); no comment on the field line.
 
 `if (x != null) x.P = v;`, `if (x is not null) x[i] = v;` is `x?.P = v;`
 (C# 14). Guards: the condition is a null test of a pure read `x`
-(identifier or dotted read), the body exactly one assignment — compound
+(identifier or dotted read) through the built-in reference test — a
+user-defined `!=` (a Unity object's "destroyed is null") answers what
+`?.` never asks, and holds the fix — the body exactly one assignment — compound
 included — whose target is `x.P` or `x[i]` with `x` the same reference,
 no `else`; `x` not assigned inside the body. The right-hand side is not
 evaluated when `x` is null, which is what the original did too. Yields
@@ -1917,7 +1987,10 @@ A static class holding only `this T`-extension methods on one receiver
 type and name is an `extension(T x) { … }` block (C# 14), every method
 body kept verbatim with the receiver parameter dropped. Off by default:
 the class name disappears for reflection and for callers who invoked the
-methods statically; the scope gate applies.
+methods statically; the scope gate applies. A method with attributes, or
+a receiver with attributes or `ref`/`in`/`scoped` beside `this`, holds the
+class: the block renders neither, and `extension(T x)` would receive a
+copy where `this ref T x` mutated the caller's.
 
 ### CR0156 — idiom
 
@@ -2095,6 +2168,11 @@ non-null under `#nullable` — a numeric parse under `catch
 (FormatException)` used to let an overflow propagate, and the rewrite
 would swallow it; `OverflowException` alone, `ArgumentException` and
 `ArgumentNullException` (which never caught a format error) are notes;
+under a broad catch every argument (and the target) is one whose
+evaluation cannot throw — a literal or constant, a local, a parameter, a
+field, a static member named through its type — since `try { v =
+int.Parse(parts[1]); } catch { v = 0; }` also caught the index out of
+range that `TryParse` would let escape;
 the catch variable, if named, is not read (the message would be lost). On
 the failure path `TryParse` sets the target to `default` where `Parse`
 left it untouched, so a local keeps the fix only when it was declared
@@ -2239,7 +2317,11 @@ line within the wrap column (`wrap_column`, else `max_line_length`, else
 itself a conditional, an assignment, a lambda, a switch expression or a
 `throw` is parenthesised, and a `throw` statement is not an arm; the
 speculative re-bind settles the conditional's typing (a natural common
-type, or the target type from C# 9). No F# twin: F# has no `return`, and
+type, or the target type from C# 9), and every arm still converts to the
+type it converted to before — arms of one type, a natural type equal to
+the target, or a target-typed conditional (`if (a) return 1; else return
+2.0;` in an `object` method would box a double; `a ? i : f` into a
+`double` rounds the int through `float`). No F# twin: F# has no `return`, and
 its `if` is the expression already. Yields to IDE0046 and IDE0045.
 
 ### CR0174 — performance
@@ -2332,3 +2414,52 @@ outside the loop; the hoisted name is spelled nowhere in the member
 outside the loop and written nowhere in the loop; the loop statement
 heads its line; no comment or directive rides on the declaration; the
 speculative check re-binds. F# twin: FR0071.
+
+### CR0178 — performance
+
+A query copied before `Where` or `Select` runs them in the query, copying
+after: `db.Orders.ToList().Where(o => o.Total > 0 || o.State == 0).Select(o => o.Id)`
+→ `db.Orders.Where(o => o.Total > 0 || o.State == 0).Select(o => o.Id).ToList()`.
+The copy (`ToList`, `ToArray`, `AsEnumerable`) on an `IQueryable<T>` loads
+every row of the query and filters and projects them in memory; moved after
+the stages, the database filters and sends only the columns asked for. No
+runtime pair measures it: the win is rows not read off a server, not
+nanoseconds. A stage moves only while a provider translates it exactly —
+a function call, arithmetic or a nested object might not translate (a
+runtime error) or translate to something else: a `Where` of `&&`, `||`
+and `!` over comparisons (built-in or the BCL's own operator) and `bool`
+columns, each comparison a column against a column, a literal, a local, a
+parameter, a `const` or an enum member; a `Select` of a column or an
+anonymous object of columns; a column an instance auto-property of the
+lambda's parameter, not `[NotMapped]`. The first stage that does not
+qualify stays in memory after the copy. A sweep moves only comparisons
+SQL answers as C# does — integers, `bool`, enums, `Guid`, not nullable,
+and `== null`/`!= null` on any column. A string compares under the
+column's collation (case-insensitive on SQL Server's default), a
+`decimal` or `DateTime` value is rounded to the column's scale, a floating
+value is the server's, a nullable column is NULL-unknown under `!=` or `!`
+where C# says true: those the editor offers and a sweep leaves as a note.
+Guards: the captured locals and parameters are written nowhere after
+their declaration (the in-memory stage read them when the result was
+enumerated, the query reads them when it runs); no comment or directive
+in the chain; a copy of the same kind right after the stages is the one
+kept; the speculative check re-binds the lambdas as expression trees.
+A column is a VALUE column: a navigation property (`o.Customer`) is an
+auto-property too, but in memory it is whatever the copy loaded — null
+without an `Include` — where the query joins it, so a null test or a
+projection of one stays in memory. Moving `ToList()`/`ToArray()` to the end
+changes the chain's static type from `IEnumerable<T>` to `List<T>`/`T[]`:
+an overload taking `List<T>` would win, a generic argument would infer
+differently, a `var` local would carry the new type on, and `.Reverse()`
+would bind to `List<T>.Reverse()`, which reverses in place. So a sweep
+moves the copy only where the value goes into a `foreach`, a further
+Enumerable call (not `Reverse`), an argument of a method with one
+candidate and a non-generic parameter, a member's `return` or expression
+body, an explicitly typed declaration or an assignment, or a `var` local
+used only so; elsewhere the editor offers it (`AsEnumerable()` keeps the
+type, and always moves). One difference the rule does not guard: with EF
+Core the copy materialised and TRACKED every entity; after the move only
+the filtered rows (or, under a projection, none) are tracked, so code that
+relied on the context having loaded the whole table — relationship
+fix-up, `DbSet.Local` — sees less.
+F# twin: FR0174.

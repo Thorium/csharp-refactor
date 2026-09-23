@@ -14,7 +14,10 @@
 /// two `else` blocks are textually identical, comments included; both
 /// conditions are `bool` through built-in operators; an `||`-topped
 /// condition gains parentheses before joining the `&&`; no comment or
-/// directive is swallowed with the braces; the moved lines hold no
+/// directive lies in the outer statement outside what the replacement keeps
+/// (the inside of the two conditions, the inner if's tail after its `)`) —
+/// one beside the outer `)`, above an unbraced inner if, on a brace or on
+/// the outer `else` would be dropped; the moved lines hold no
 /// multi-line literal.
 module CSharp.Refactor.NestedIfMerge
 
@@ -97,24 +100,28 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
         match node with
         | :? IfStatementSyntax as outer when not (outer.Parent :? ElseClauseSyntax) ->
             match innerIf outer.Statement with
-            | ValueSome(inner, block) when
+            | ValueSome(inner, _) when
                 isBool model outer.Condition
                 && isBool model inner.Condition
                 && not (spansLines inner)
-                // only comments INSIDE the inner if's own span travel with it;
-                // one anywhere else in the outer block — above the inner if,
-                // beside a brace — would be dropped, and holds the fix
-                && (match block with
-                    | Some b ->
-                        not (
-                            b.DescendantTrivia(descendIntoTrivia = true)
-                            |> Seq.exists (fun t ->
-                                (t.IsKind SyntaxKind.SingleLineCommentTrivia
-                                 || t.IsKind SyntaxKind.MultiLineCommentTrivia
-                                 || t.IsDirective)
-                                && not (inner.Span.Contains t.Span))
-                        )
-                    | None -> true)
+                // only what the replacement keeps travels: the inside of both
+                // conditions and the inner if's tail after its `)`; a comment
+                // anywhere else in the outer statement — beside the outer `)`,
+                // above an unbraced inner if, on a brace, on the outer else —
+                // would be dropped, and holds the fix
+                && not (
+                    outer.DescendantTrivia(descendIntoTrivia = true)
+                    |> Seq.exists (fun t ->
+                        (t.IsKind SyntaxKind.SingleLineCommentTrivia
+                         || t.IsKind SyntaxKind.MultiLineCommentTrivia
+                         || t.IsKind SyntaxKind.SingleLineDocumentationCommentTrivia
+                         || t.IsKind SyntaxKind.MultiLineDocumentationCommentTrivia
+                         || t.IsDirective)
+                        && outer.Span.Contains t.Span
+                        && not (outer.Condition.Span.Contains t.Span)
+                        && not (inner.Condition.Span.Contains t.Span)
+                        && not (TextSpan.FromBounds(inner.CloseParenToken.Span.End, inner.Span.End).Contains t.Span))
+                )
                 ->
                 let sameElse =
                     match outer.Else, inner.Else with

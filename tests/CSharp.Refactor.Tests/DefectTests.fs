@@ -466,6 +466,39 @@ class C
     Assert.Contains("return double.TryParse(s, out var parsed) ? parsed : 0.0;", fixedSource)
     Assert.Contains("try { _port = int.Parse(s); } catch (FormatException) { }", fixedSource)
 
+[<Fact>]
+let ``CR0166 keeps a broad catch whose parse argument can throw on its own`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+class C
+{
+    int A(string[] parts)
+    {
+        int v;
+        try { v = int.Parse(parts[1]); } catch { v = 0; }
+        return v;
+    }
+    int B(Dictionary<string, string> d)
+    {
+        try { return int.Parse(d["port"]); } catch (Exception) { return 0; }
+    }
+    int D(string s)
+    {
+        int v;
+        try { v = int.Parse(s, CultureInfo.InvariantCulture); } catch { v = 0; }
+        return v;
+    }
+}
+"""
+
+    // parts[1] and d["port"] were caught too; D's arguments cannot throw
+    Assert.Equal<string list>([ "try" ], firedText source (suggestCode "CR0166" source))
+
+    Assert.Contains("if (!int.TryParse(s, CultureInfo.InvariantCulture, out v)) { v = 0; }", fixAll "CR0166" source)
+
 // ---- CR0167 / CR0168 ----
 
 [<Fact>]

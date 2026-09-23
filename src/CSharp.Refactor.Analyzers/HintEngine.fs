@@ -62,6 +62,12 @@ type Proof =
     /// These metavariables are atoms, not operator applications (for a
     /// custom hint whose left side is a bare `!a`).
     | Atomic of string list
+    /// These metavariables have no `Count`/`Length` of their own: not an
+    /// array, a string, an `ICollection<T>` or `IReadOnlyCollection<T>`.
+    /// There the size is a property read, which CA1829 asks for, and the
+    /// `Any()` this rule would write is what CA1860 forbids — an error
+    /// under TreatWarningsAsErrors.
+    | Unsized of string list
 
 type Hint =
     {
@@ -149,11 +155,11 @@ let builtinHints: Hint list =
         h "x.Where(p).Count() > 0 ===> x.Any(p)" [] [ "CA1827" ]
         h "x.Where(p).Count() != 0 ===> x.Any(p)" [] [ "CA1827" ]
         h "x.Where(p).Count() == 0 ===> !x.Any(p)" [] [ "CA1827" ]
-        h "x.Count() > 0 ===> x.Any()" [] [ "CA1827" ]
-        h "x.Count() != 0 ===> x.Any()" [] [ "CA1827" ]
-        h "x.Count() >= 1 ===> x.Any()" [] [ "CA1827" ]
-        h "x.Count() == 0 ===> !x.Any()" [] [ "CA1827" ]
-        h "x.Count() < 1 ===> !x.Any()" [] [ "CA1827" ]
+        h "x.Count() > 0 ===> x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
+        h "x.Count() != 0 ===> x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
+        h "x.Count() >= 1 ===> x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
+        h "x.Count() == 0 ===> !x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
+        h "x.Count() < 1 ===> !x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
         h "x.Count(p) > 0 ===> x.Any(p)" [] [ "CA1827" ]
         h "x.Count(p) != 0 ===> x.Any(p)" [] [ "CA1827" ]
         h "x.Count(p) == 0 ===> !x.Any(p)" [] [ "CA1827" ]
@@ -514,6 +520,7 @@ let private proven (model: SemanticModel) (ctx: RuleContext) (env: Map<string, B
     | Comparable names -> all names isComparable
     | StringComparison names -> all names (fun t -> not (isNull t) && t.ToDisplayString() = "System.StringComparison")
     | Language major -> RuleContext.languageAtLeast ctx major
+    | Unsized names -> all names (fun t -> not (isNull t || Linq.isCollection t))
     | Atomic names ->
         names
         |> List.forall (fun n ->

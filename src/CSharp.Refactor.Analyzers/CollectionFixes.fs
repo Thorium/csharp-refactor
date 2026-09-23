@@ -36,7 +36,9 @@
 /// string argument is left alone (.NET 6+ handles it without an
 /// intermediate); each piece appends the same characters `+` produced
 /// (`Append(int)`, `Append(char)`, `Append(object)` format as concatenation
-/// does; an array piece stands down, `Append(char[])` appending the characters).
+/// does; an array piece stands down, `Append(char[])` appending the characters);
+/// no piece reads a `StringBuilder` (`sb.Append("Len:" + sb.Length)` read
+/// the length before the append, the chain after the first piece).
 module CSharp.Refactor.CollectionFixes
 
 open Microsoft.CodeAnalysis
@@ -371,6 +373,18 @@ let private appendChains (tree: SyntaxTree) (model: SemanticModel) : Suggestion 
                     parts.Length < 2
                     || Text.holdsCommentOrDirective inv.ArgumentList
                     || parts |> List.exists (fun p -> p :? InterpolatedStringExpressionSyntax)
+                    // `sb.Append("Len:" + sb.Length)`: the concatenation read the builder
+                    // before the append, the chain reads it after the first piece
+                    || parts
+                       |> List.exists (fun p ->
+                           p.DescendantNodesAndSelf()
+                           |> Seq.exists (fun d ->
+                               match d with
+                               | :? ExpressionSyntax as e ->
+                                   match model.GetTypeInfo(e).Type with
+                                   | null -> false
+                                   | t -> t.ToDisplayString() = "System.Text.StringBuilder"
+                               | _ -> false))
                     // `Append(char[])` appends the characters where `+` printed the type name
                     || parts
                        |> List.exists (fun p ->

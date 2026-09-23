@@ -505,6 +505,15 @@ let private redundantToStrings (tree: SyntaxTree) (model: SemanticModel) : Sugge
             isNull hole.AlignmentClause
             && isNull hole.FormatClause
             && not (Text.insideExpressionTree model hole)
+            // only a string made in the current culture: a FormattableString
+            // (`FormattableString.Invariant`, EF's `FromSqlInterpolated`) or a
+            // handler with a provider (`string.Create(CultureInfo.InvariantCulture, …)`)
+            // formats the hole its own way, or passes it on as a parameter
+            && (match hole.Parent with
+                | :? InterpolatedStringExpressionSyntax as s ->
+                    let converted = model.GetTypeInfo(s).ConvertedType
+                    not (isNull converted) && converted.SpecialType = SpecialType.System_String
+                | _ -> false)
             ->
             match hole.Expression with
             | :? InvocationExpressionSyntax as inv when isParameterlessToString model inv ->

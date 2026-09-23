@@ -69,6 +69,7 @@
     <Compile Include="LinqNotes.fs" />
     <Compile Include="CollectionFixes.fs" />
     <Compile Include="ConversionMove.fs" />
+    <Compile Include="QueryCopy.fs" />
     <Compile Include="SelectFusion.fs" />
     <Compile Include="Accumulation.fs" />
     <Compile Include="FillLoop.fs" />

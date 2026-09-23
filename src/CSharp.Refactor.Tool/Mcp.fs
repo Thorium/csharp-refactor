@@ -96,26 +96,27 @@ let private handleAnalyze (args: JsonElement) =
     match getString "target" with
     | None -> Error "analyze needs a 'target'"
     | Some target ->
-        match parseArgs [| target |] with
+        // codes and categories go through the command line's own parser: an
+        // unknown code or category is an error there, never an empty, clean run
+        let argv =
+            [|
+                target
+                match getString "codes" with
+                | Some codes -> yield! [ "--codes"; codes ]
+                | None -> ()
+                match getString "categories" with
+                | Some categories -> yield! [ "--categories"; categories ]
+                | None -> ()
+            |]
+
+        match parseArgs argv with
         | Error message -> Error message
         | Ok baseOpts ->
-            let codes =
-                getString "codes"
-                |> Option.map (fun s -> s.Split ',' |> Array.map (fun c -> c.Trim().ToUpperInvariant()) |> Set.ofArray)
-
-            let categories =
-                getString "categories"
-                |> Option.map (fun s -> s.Split ',' |> Array.choose RuleCatalog.parse |> Set.ofArray)
-
             let opts =
                 { baseOpts with
                     DryRun = not (getBool "apply")
                     ParseOnly = getBool "parseOnly"
-                    Codes = codes
-                    ExplicitCodes = codes
-                    Categories = categories
                 }
-                |> applyCategories
 
             Sweep.resetRun ()
             let exitCode = Sweep.executeRun opts
@@ -178,9 +179,10 @@ let run () =
                         | true, v -> v.GetRawText()
                         | _ -> "null"
 
+                    // `"method": null` (or a number) is no method: unparseable
                     let m =
                         match root.TryGetProperty "method" with
-                        | true, v -> v.GetString()
+                        | true, v when v.ValueKind = JsonValueKind.String -> v.GetString()
                         | _ -> ""
 
                     let p =
@@ -202,32 +204,39 @@ let run () =
             | "ping" -> respond idJson "{}"
             | "tools/list" -> respond idJson toolsJson
             | "tools/call" ->
-                let name, args =
+                // a malformed call is an invalid-params error, never a crash of the server
+                let call =
                     match params_ with
-                    | Some p ->
+                    | Some p when p.ValueKind = JsonValueKind.Object ->
                         let n =
                             match p.TryGetProperty "name" with
-                            | true, v -> v.GetString()
-                            | _ -> ""
+                            | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString())
+                            | _ -> None
 
                         let a =
                             match p.TryGetProperty "arguments" with
-                            | true, v -> v
-                            | _ -> JsonDocument.Parse("{}").RootElement
+                            | true, v when v.ValueKind = JsonValueKind.Object -> Some v
+                            | true, _ -> None
+                            | _ -> Some(JsonDocument.Parse("{}").RootElement)
 
-                        n, a
-                    | None -> "", JsonDocument.Parse("{}").RootElement
+                        match n, a with
+                        | Some n, Some a -> Ok(n, a)
+                        | None, _ -> Error "tools/call needs a string 'name'"
+                        | _, None -> Error "tools/call 'arguments' must be an object"
+                    | Some _ -> Error "tools/call 'params' must be an object"
+                    | None -> Error "tools/call needs 'params'"
 
-                match name with
-                | "list_rules" -> respond idJson (serialize (mcpToolResult (serialize (rulesJson ()))))
-                | "analyze" ->
+                match call with
+                | Error message -> respondError idJson -32602 message
+                | Ok("list_rules", _) -> respond idJson (serialize (mcpToolResult (serialize (rulesJson ()))))
+                | Ok("analyze", args) ->
                     try
                         handleAnalyze args
                         |> Result.map (mcpToolResult >> serialize >> respond idJson)
                         |> Result.defaultWith (fun msg -> respondError idJson -32602 msg)
                     with ex ->
                         respondError idJson -32603 $"analyze failed: {ex.Message}"
-                | other -> respondError idJson -32601 $"unknown tool '{other}'"
+                | Ok(other, _) -> respondError idJson -32601 $"unknown tool '{other}'"
             | "" -> respondError idJson -32700 "unparseable request"
             | notification when not (notification.StartsWith "notifications/") && idJson <> "null" ->
                 respondError idJson -32601 $"unknown method '{notification}'"

@@ -9,7 +9,9 @@
 /// bytes; no inheritance either way (no base but `object`, nothing
 /// derives from it); no interface beyond the compiler's `IEquatable<T>`;
 /// not used as `T?` anywhere (that spelling would change from a nullable
-/// reference to `Nullable<T>`), not compared with `null`, not boxed to
+/// reference to `Nullable<T>`), not compared with or assigned `null`, not
+/// the operand of `as`/`??`/`?.`, not a `class`-constrained type argument
+/// (the index reads every file of the compilation), not boxed to
 /// `object`/an interface, not `lock`ed, not the element of an expression
 /// tree lambda (`IQueryable` providers translate struct members
 /// differently); the scope gate. The fix inserts `readonly … struct`
@@ -21,7 +23,8 @@
 /// uses of a declaration — every construction is `Tuple.Create(…)` or
 /// `new Tuple<…>(…)`, every read is an `Item1..ItemN` member (shared with
 /// `ValueTuple`) or a deconstruction; a use through `ITuple`, reflection,
-/// or a null comparison vetoes; at most four elements (a struct tuple is
+/// or any operator (`==`/`!=` compare references on `Tuple<…>` and
+/// elements on the value tuple; a null test, `is`, `as`, `??`) vetoes; at most four elements (a struct tuple is
 /// copied by value); a public signature is API and follows the scope
 /// gate; the serializer heuristic (a `ValueTuple`'s elements are fields,
 /// which System.Text.Json ignores by default — a shape change). The
@@ -249,13 +252,12 @@ let private simpleUse (m: SemanticModel) (symbol: ISymbol) (id: SyntaxNode) =
     | :? MemberAccessExpressionSyntax as ma when ma.Expression.Span = e.Span ->
         let name = ma.Name.Identifier.ValueText
         name.StartsWith "Item" && name.Length = 5 && System.Char.IsDigit name.[4]
-    | :? BinaryExpressionSyntax as b ->
-        // a null comparison vetoes
-        not (
-            b.Left.IsKind SyntaxKind.NullLiteralExpression
-            || b.Right.IsKind SyntaxKind.NullLiteralExpression
-        )
-    | :? IsPatternExpressionSyntax as p -> not (p.Pattern.ToString().Contains "null")
+    | :? BinaryExpressionSyntax
+    | :? IsPatternExpressionSyntax ->
+        // `t != _last` compares references on `Tuple<…>` and elements on the value
+        // tuple; a null test, `??`, `is`/`as` a type box or ask what a struct never
+        // is: every operator use vetoes
+        false
     | :? InvocationExpressionSyntax -> symbol :? IMethodSymbol // a method's call site; a delegate call otherwise
     | :? ConditionalAccessExpressionSyntax -> false // `t?.Item1`: a null test
     | _ -> true

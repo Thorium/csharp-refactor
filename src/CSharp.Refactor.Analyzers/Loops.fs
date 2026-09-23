@@ -20,7 +20,9 @@
 /// and stays the author's call); no `xs[i]` is written, taken by `ref`,
 /// or passed `ref`/`out`; `xs` is not assigned, mutated through a known
 /// mutator, or — for a list, which `foreach` guards against modification —
-/// passed to any method in the body; the element name is the alias line's
+/// passed to any method in the body; a list in a field is walked by a body
+/// that calls core members only (a method the body calls may append to the
+/// field — a worklist); the element name is the alias line's
 /// (`var x = xs[i];` first, `x` never reassigned) or `item`, `item2`…,
 /// unused in the enclosing member. A `break`/`continue` stays as it is.
 ///
@@ -256,8 +258,23 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                 isList || not (a.RefKindKeyword.IsKind SyntaxKind.None)
                             | _ -> false)
 
+                    // a list in a field may be reached from any method the body calls —
+                    // `Visit(_pending[i])` appending to `_pending` is a growing worklist
+                    // the `for` walks to its end and a `foreach` throws on: every call in
+                    // the body must be a core member's (a local keeps the syntactic rule)
+                    let reachable =
+                        isList
+                        && (model.GetSymbolInfo(xs).Symbol :? IFieldSymbol)
+                        && body.DescendantNodes()
+                           |> Seq.exists (fun n ->
+                               match n with
+                               | :? InvocationExpressionSyntax as inv -> not (Guards.callsOnlyCore model inv)
+                               | :? BaseObjectCreationExpressionSyntax -> true
+                               | _ -> false)
+
                     if
                         uses.IsEmpty
+                        || reachable
                         || reads.Length <> uses.Length
                         || not (reads |> List.forall isReadOnlyUse)
                         || Text.assignsTo xsText body

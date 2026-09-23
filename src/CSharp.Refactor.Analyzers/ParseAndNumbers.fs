@@ -11,7 +11,9 @@
 /// one parse statement (nothing else is under the catch); the target is a
 /// local or a field; one filter-less catch of `FormatException`/
 /// `OverflowException`/`ArgumentException`/`Exception`, no `finally`; the
-/// catch variable is unread; on the failure path `TryParse` sets the
+/// catch variable is unread; under a broad catch every argument and the
+/// target cannot throw when evaluated (no element access, invocation or
+/// member chain — `parts[1]` was caught too); on the failure path `TryParse` sets the
 /// target to default where `Parse` left it — so a local keeps the fix only
 /// when it was declared without a value (or with `default`), the catch
 /// assigns it, or the catch leaves (`return`/`throw`/`continue`); a field
@@ -119,12 +121,39 @@ let private caughtTypes =
 let private noOverflow =
     set [ "Boolean"; "Char"; "Guid"; "DateTime"; "DateTimeOffset"; "Enum" ]
 
+/// An expression whose evaluation cannot throw: a literal or constant, a
+/// local, a parameter, a field of `this` or a static field or property named
+/// through its type (`CultureInfo.InvariantCulture`) — never an element
+/// access, an invocation or a member chain on a value that may be null.
+let private nonThrowing (model: SemanticModel) (e: ExpressionSyntax) =
+    match e with
+    | _ when model.GetConstantValue(e).HasValue -> true
+    | :? LiteralExpressionSyntax -> true
+    | :? IdentifierNameSyntax ->
+        match symbolOf model e with
+        | :? ILocalSymbol
+        | :? IParameterSymbol
+        | :? IFieldSymbol -> true
+        | _ -> false
+    | :? MemberAccessExpressionSyntax as ma when ma.IsKind SyntaxKind.SimpleMemberAccessExpression ->
+        match symbolOf model ma, ma.Expression with
+        | (:? IFieldSymbol as f), (:? ThisExpressionSyntax) when not f.IsStatic -> true
+        | (:? IFieldSymbol as f), _ when f.IsStatic -> symbolOf model ma.Expression :? ITypeSymbol
+        | (:? IPropertySymbol as p), _ when p.IsStatic -> symbolOf model ma.Expression :? ITypeSymbol
+        | _ -> false
+    | _ -> false
+
 /// Does the catch cover every failure the `TryParse` twin would turn into
 /// `false`? Otherwise the rewrite swallows what used to propagate.
 let private catchCovers (model: SemanticModel) (caughtType: string) (parse: InvocationExpressionSyntax) =
     match caughtType with
     | "System.Exception"
-    | "System.SystemException" -> true
+    | "System.SystemException" ->
+        // a broad catch also swallowed what EVALUATING the arguments threw (an
+        // index out of range, a missing key, a null receiver): `TryParse`
+        // lets that escape, so every argument must be one that cannot throw
+        parse.ArgumentList.Arguments
+        |> Seq.forall (fun a -> nonThrowing model a.Expression)
     | "System.FormatException" ->
         let owner =
             match model.GetSymbolInfo(parse).Symbol with
@@ -279,7 +308,8 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                 | :? IFieldSymbol as f when not f.IsReadOnly -> Text.assignsTo targetText c.Block
                                 | _ -> false
 
-                            if not defaultSafe then
+                            // `other.v = …` under the catch: a null `other` was caught there
+                            if not (defaultSafe && nonThrowing model target) then
                                 note ()
                             else
                                 let call = callText callee args targetText

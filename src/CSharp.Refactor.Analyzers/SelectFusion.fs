@@ -127,6 +127,24 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
 
                         let duplicates = yUses.Length > 1 || underLambda
 
+                        // `v => v *= k`, `n => n ??= ""`, `f => Norm(ref f)`, `s => s.F = 1`:
+                        // the lambda wrote its own copy; fused, the write lands in the
+                        // source (`arr[i] *= k`, `p.Name ??= ""`)
+                        let written =
+                            yUses
+                            |> List.exists (fun u ->
+                                u.AncestorsAndSelf()
+                                |> Seq.takeWhile (fun n -> not (obj.ReferenceEquals(n, b)))
+                                |> Seq.exists (fun n ->
+                                    match n.Parent with
+                                    | :? AssignmentExpressionSyntax as a -> obj.ReferenceEquals(a.Left, n)
+                                    | :? PrefixUnaryExpressionSyntax as p ->
+                                        p.IsKind SyntaxKind.PreIncrementExpression
+                                        || p.IsKind SyntaxKind.PreDecrementExpression
+                                    | :? PostfixUnaryExpressionSyntax -> true
+                                    | :? ArgumentSyntax as arg -> not (arg.RefKindKeyword.IsKind SyntaxKind.None)
+                                    | _ -> false))
+
                         // explicit type arguments would be lost with the call
                         let explicitTypes =
                             (m.Name :? GenericNameSyntax)
@@ -136,6 +154,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
 
                         if
                             yUses.IsEmpty
+                            || written
                             || explicitTypes
                             || (duplicates && not pureA)
                             || Text.mentionsName x b

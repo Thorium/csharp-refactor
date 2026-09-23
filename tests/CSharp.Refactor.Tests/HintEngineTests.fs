@@ -86,6 +86,31 @@ class C
     Assert.Equal<string list>([], firedText source (suggestCode code source))
 
 [<Fact>]
+let ``Count() > 0 becomes Any() only where the receiver has no size of its own`` () =
+    // on a sized receiver CA1829 asks for `.Length > 0`, and the `Any()`
+    // would be CA1860's error under TreatWarningsAsErrors
+    let source =
+        """
+using System.Collections.Generic;
+using System.Linq;
+class C
+{
+    bool A(int[] xs) => xs.Count() > 0;
+    bool B(List<int> xs) => xs.Count() != 0;
+    bool D(IReadOnlyCollection<int> xs) => xs.Count() == 0;
+    bool E(string s) => s.Count() > 0;
+    bool F(IEnumerable<int> xs) => xs.Count() > 0;
+}
+"""
+
+    let fixedSource = fixAll code source
+    Assert.Contains("bool A(int[] xs) => xs.Count() > 0;", fixedSource)
+    Assert.Contains("bool B(List<int> xs) => xs.Count() != 0;", fixedSource)
+    Assert.Contains("bool D(IReadOnlyCollection<int> xs) => xs.Count() == 0;", fixedSource)
+    Assert.Contains("bool E(string s) => s.Count() > 0;", fixedSource)
+    Assert.Contains("bool F(IEnumerable<int> xs) => xs.Any();", fixedSource)
+
+[<Fact>]
 let ``only the outermost of nested matches fires and effectful bindings are not duplicated`` () =
     let source =
         """

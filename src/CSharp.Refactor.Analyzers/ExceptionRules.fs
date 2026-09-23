@@ -28,7 +28,11 @@
 /// atoms (a filter runs BEFORE inner `finally` blocks, so an effectful
 /// condition would reorder effects); no existing filter; the catch is the
 /// last of its try (a rethrow skips the sibling catches, a declining
-/// filter lets them see the exception); no comment on the guard line.
+/// filter lets them see the exception); no comment on the guard line; the
+/// condition cannot throw (a filter that throws declines silently, where
+/// the guard threw): member reads only on the exception, a value, a type
+/// or a receiver proven non-null, no element access, cast or call beyond a
+/// `string` method with constant arguments — otherwise a note.
 ///
 /// CR0066 (correctness, note, priority): a `throw` inside `finally`
 /// replaces whatever exception was in flight. Throws the block itself
@@ -501,6 +505,53 @@ let private swallows (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
 
 // ---- CR0065 ----
 
+/// Can evaluating the condition throw? A filter that throws is a filter
+/// that declines — the original exception flies on — where the guard in
+/// the handler threw the new one (`ex.InnerException.HResult` on a null
+/// inner exception). Safe: a member read on the exception itself, on a value
+/// type, through a type name, or on a receiver the flow analysis proves
+/// non-null; `?.`; a `System.String` method with constant arguments;
+/// operators other than a division by a variable. An element access, a
+/// cast, any other call, `Nullable<T>.Value` is not.
+let private conditionCannotThrow (model: SemanticModel) (binder: string) (condition: ExpressionSyntax) =
+    let nonNullReceiver (r: ExpressionSyntax) =
+        match r with
+        | :? IdentifierNameSyntax as id when id.Identifier.ValueText = binder -> true
+        | _ ->
+            match model.GetSymbolInfo(r).Symbol with
+            | :? INamedTypeSymbol
+            | :? INamespaceSymbol -> true
+            | _ ->
+                let info = model.GetTypeInfo r
+
+                (not (isNull info.Type)
+                 && info.Type.IsValueType
+                 && info.Type.OriginalDefinition.SpecialType <> SpecialType.System_Nullable_T)
+                || ((model.GetNullableContext r.SpanStart).HasFlag NullableContext.AnnotationsEnabled
+                    && info.Nullability.FlowState = NullableFlowState.NotNull)
+
+    condition.DescendantNodesAndSelf()
+    |> Seq.forall (fun x ->
+        match x with
+        | :? ElementAccessExpressionSyntax
+        | :? CastExpressionSyntax -> false
+        | :? BinaryExpressionSyntax as b when
+            b.IsKind SyntaxKind.DivideExpression || b.IsKind SyntaxKind.ModuloExpression
+            ->
+            model.GetConstantValue(b.Right).HasValue
+        | :? MemberAccessExpressionSyntax as ma when ma.IsKind SyntaxKind.SimpleMemberAccessExpression ->
+            nonNullReceiver ma.Expression
+        | :? InvocationExpressionSyntax as inv ->
+            match model.GetSymbolInfo(inv).Symbol with
+            | :? IMethodSymbol as ms ->
+                ms.ContainingType.SpecialType = SpecialType.System_String
+                && inv.ArgumentList.Arguments
+                   |> Seq.forall (fun a ->
+                       let c = model.GetConstantValue a.Expression
+                       c.HasValue && not (isNull c.Value))
+            | _ -> false
+        | _ -> true)
+
 let private filters (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     let text = tree.GetText()
 
@@ -563,6 +614,20 @@ let private filters (tree: SyntaxTree) (model: SemanticModel) : Suggestion list 
                     | _ -> false
 
                 if
+                    rethrows
+                    && lastCatch
+                    && Text.mentionsName binder ifs.Condition
+                    && readsOnlyException
+                    && not (Text.holdsCommentOrDirective ifs)
+                    && not (conditionCannotThrow model binder ifs.Condition)
+                then
+                    Some(
+                        Suggestion.note
+                            FilterCode
+                            "A guard that rethrows reads like an exception filter, but its condition can throw: in a filter that would silently decline instead"
+                            ifs.Span
+                    )
+                elif
                     rethrows
                     && lastCatch
                     && Text.mentionsName binder ifs.Condition

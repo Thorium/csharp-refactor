@@ -56,3 +56,22 @@ class C
 """
 
     Assert.Empty(suggestCode code source)
+
+[<Fact>]
+let ``a parameter default stays, a target-typed new() without using System is qualified`` () =
+    let source =
+        """
+class C
+{
+    void M(System.Guid g = new System.Guid()) { }
+    void N(System.Guid g = new()) { }
+    System.Guid A()
+    {
+        System.Guid g = new();
+        return g;
+    }
+}
+"""
+
+    Assert.Equal<string list>([ "new()" ], firedText source (suggestCode code source))
+    Assert.Contains("System.Guid g = System.Guid.Empty;", fixAll code source)

@@ -19,7 +19,9 @@
 /// unwraps an existing `!` or flips a comparison where exact); the `if` is
 /// a statement of a block, so the freed lines become its siblings; no
 /// comment or directive outside the two blocks (the `else` line goes); no
-/// multi-line literal in the moved lines; the speculative check catches a
+/// multi-line literal in the moved lines; no `using var` declared directly
+/// in the `then` block (its disposal would move to the end of the enclosing
+/// block); the speculative check catches a
 /// local of the `then` block clashing with a later sibling.
 module CSharp.Refactor.PyramidFlip
 
@@ -79,6 +81,15 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                 && lineCount text elseBlock <= elseAtMost
                 && isBool model ifs.Condition
                 && not (Text.spansLines thenBlock)
+                // a `using var` disposes at the end of its block: freed into the
+                // enclosing block it would live on past the old `}`
+                && not (
+                    thenBlock.Statements
+                    |> Seq.exists (fun s ->
+                        match s with
+                        | :? LocalDeclarationStatementSyntax as d -> not (d.UsingKeyword.IsKind SyntaxKind.None)
+                        | _ -> false)
+                )
                 ->
                 let spans = [ inner thenBlock; inner elseBlock ]
 

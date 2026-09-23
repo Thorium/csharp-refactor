@@ -387,3 +387,23 @@ class C
 
     // the statement form would drop the comment too, so nothing fires
     Assert.Empty(suggestCode "CR0002" source)
+
+[<Fact>]
+let ``arms that meet at a wider natural type keep the statement form`` () =
+    let source =
+        """
+class C
+{
+    object Name(int k)
+    {
+        if (k == 1) return 1;
+        else if (k == 2) return 2L;
+        else if (k == 3) return 3;
+        else return 4;
+    }
+}
+"""
+
+    let fixedSource = fixAll "CR0002" source
+    Assert.DoesNotContain("=> 2L", fixedSource)
+    Assert.Contains("case 2:", fixedSource)

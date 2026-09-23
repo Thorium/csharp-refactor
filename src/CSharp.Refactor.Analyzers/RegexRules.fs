@@ -4,7 +4,10 @@
 /// `Regex.IsMatch(s, "[")` — a literal pattern the engine rejects is a
 /// guaranteed `ArgumentException` at the first call. The check constructs
 /// the pattern with the call's own constant `RegexOptions` (a pattern
-/// legal under `IgnorePatternWhitespace` may be illegal without it).
+/// legal under `IgnorePatternWhitespace` may be illegal without it); only
+/// the engine's `ArgumentException` is proof — any other exception (a
+/// `NotSupportedException` for a backreference under `NonBacktracking`)
+/// leaves the pattern unproven, and CR0109 keeps such a pattern unhoisted.
 ///
 /// CR0108 (performance, fix): `Regex.IsMatch(s, "^abc")` is
 /// `s.StartsWith("abc", StringComparison.Ordinal)`, `Regex.IsMatch(s,
@@ -36,7 +39,8 @@
 /// `[GeneratedRegex("lit")] private static partial Regex LitRegex();`
 /// (every type in the chain gains `partial`); otherwise a `private static
 /// readonly Regex LitRegex = new Regex("lit");` field above the member's
-/// doc comment. Guards: a literal pattern and constant options, on one
+/// doc comment — or above the first static field or property initializer
+/// preceding the member, which type initialization runs first. Guards: a literal pattern and constant options, on one
 /// line; the hoist lands above the enclosing member's leading comment
 /// block and under no `#if`; the name comes from the local the result is
 /// bound to, else the pattern's words, else the enclosing member's name,
@@ -134,7 +138,8 @@ let private invalidPatterns (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                 try
                     Regex(text, defaultArg options RegexOptions.None) |> ignore
                     None
-                with :? ArgumentException as e ->
+                with
+                | :? ArgumentException as e ->
                     Some(
                         Suggestion.note
                             InvalidCode
@@ -142,6 +147,9 @@ let private invalidPatterns (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                              + e.Message)
                             pattern.Span
                     )
+                // anything else (`NotSupportedException`: a backreference under
+                // `NonBacktracking`) proves nothing about the pattern
+                | _ -> None
             | _ -> None
         | None -> None)
     |> List.ofSeq
@@ -214,7 +222,7 @@ let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                 // one question: is the plain text there? `Contains`, or `StartsWith`
                 // behind a `^` anchor; `negated` spells the `Count == 0` side
                 let presence (text: string, token: SyntaxToken) (site: TextSpan) (negated: bool) =
-                    let subject = args.[0].Expression.ToString()
+                    let subject = Text.asReceiver args.[0].Expression
                     let spelled = token.Text
 
                     // a `$` anchor also matches before a final newline, which EndsWith
@@ -318,7 +326,8 @@ let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                             && plainText text
                             && model.GetTypeInfo(args.[0].Expression).Nullability.FlowState = NullableFlowState.NotNull
                             ->
-                            let replacement = $"{args.[0].Expression}.AsSpan().Count({token.Text})"
+                            let replacement =
+                                $"{Text.asReceiver args.[0].Expression}.AsSpan().Count({token.Text})"
 
                             Usings.importEdit model tree inv.SpanStart "System" "MemoryExtensions"
                             |> Option.map (fun usingEdits ->
@@ -338,7 +347,8 @@ let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                 | "Split", 2 when argsOk && splitOnString ->
                     match literalOf args.[1].Expression with
                     | Some(text, token) when plainText text ->
-                        let edit = Suggestion.replace inv.Span $"{args.[0].Expression}.Split({token.Text})"
+                        let edit =
+                            Suggestion.replace inv.Span $"{Text.asReceiver args.[0].Expression}.Split({token.Text})"
 
                         if Guards.speculativeCheck model [ edit ] then
                             Some
@@ -359,7 +369,7 @@ let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                         && not (replacementText.Contains "\"")
                         ->
                         let replacement =
-                            args.[0].Expression.ToString()
+                            Text.asReceiver args.[0].Expression
                             + ".Replace("
                             + patternToken.Text
                             + ", "
@@ -525,7 +535,7 @@ let private hoists (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                 && (try
                         Regex(patternText, defaultArg options RegexOptions.None) |> ignore
                         true
-                    with :? ArgumentException ->
+                    with _ ->
                         false)
                 ->
                 let staticCall =
@@ -768,9 +778,43 @@ let private hoists (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                                     else
                                         []
 
-                                let declarationEdits = partialEdits @ [ Suggestion.insert insertAt declaration ]
+                                // static initializers run in text order: one above the member
+                                // may reach it during type initialization, before a field
+                                // placed below it is set — the field goes above the first
+                                let fieldAt =
+                                    if useGenerated then
+                                        Some insertAt
+                                    else
+                                        typeDecl.Members
+                                        |> Seq.tryFind (fun m ->
+                                            m.SpanStart < member'.SpanStart
+                                            && m.Modifiers |> Seq.exists (fun k -> k.IsKind SyntaxKind.StaticKeyword)
+                                            && (match m with
+                                                | :? FieldDeclarationSyntax as f ->
+                                                    f.Declaration.Variables
+                                                    |> Seq.exists (fun v -> not (isNull v.Initializer))
+                                                | :? PropertyDeclarationSyntax as p -> not (isNull p.Initializer)
+                                                | _ -> false))
+                                        |> function
+                                            | None -> Some insertAt
+                                            | Some first ->
+                                                first.DescendantNodes()
+                                                |> Seq.tryHead
+                                                |> Option.bind (hoistPoint text)
+                                                |> Option.map snd
 
-                                match suggestion reference declarationEdits with
+                                let declarationEdits =
+                                    partialEdits
+                                    @ (fieldAt
+                                       |> Option.map (fun at -> Suggestion.insert at declaration)
+                                       |> Option.toList)
+
+                                match
+                                    (if fieldAt.IsNone then
+                                         None
+                                     else
+                                         suggestion reference declarationEdits)
+                                with
                                 | Some s ->
                                     shared.[key] <- (reference, declarationEdits)
                                     Some s

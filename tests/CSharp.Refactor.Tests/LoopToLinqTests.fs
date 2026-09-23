@@ -14,7 +14,7 @@ using System.Collections.Generic;
 using System.Linq;
 class C
 {
-    bool A(IEnumerable<int> xs) => xs.ToList().Any(x => x > 1);
+    bool A(HashSet<int> xs) => xs.ToList().Any(x => x > 1);
     void B(IEnumerable<int> xs) { foreach (var x in xs.ToList()) Console.WriteLine(x); }
     IEnumerable<int> D(IEnumerable<int> xs) => xs.ToList().Where(x => x > 1);
     void E(List<int> list) { foreach (var x in list.ToList()) list.Remove(x); }
@@ -29,11 +29,31 @@ class C
     let fired = suggestCode "CR0020" source
     Assert.Equal(3, fired.Length)
     let fixedSource = fixAll "CR0020" source
-    Assert.Contains("bool A(IEnumerable<int> xs) => xs.Any(x => x > 1);", fixedSource)
+    Assert.Contains("bool A(HashSet<int> xs) => xs.Any(x => x > 1);", fixedSource)
     Assert.Contains("void B(IEnumerable<int> xs) { foreach (var x in xs) Console.WriteLine(x); }", fixedSource)
     Assert.Contains("IEnumerable<int> D(IEnumerable<int> xs) => xs.Where(x => x > 1).ToList();", fixedSource)
     // a query's copy ran the query: the loop would run over an open reader
     Assert.Contains("foreach (var x in q.ToList()) Console.WriteLine(x);", fixedSource)
+
+[<Fact>]
+let ``CR0020 keeps the copy before a short-circuiting consumer over a generator`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+class C
+{
+    IEnumerable<int> Numbers() { for (var i = 0; i < 5; i++) { Console.WriteLine(i); yield return i; } }
+    bool A() { var seq = Numbers(); return seq.ToList().Any(p => p > 1); }
+    bool B(IEnumerable<int> xs) => xs.ToList().Any(p => p > 1);
+    bool D(int[] xs) { var view = xs.Where(x => x > 0); return view.ToList().Any(p => p > 1); }
+}
+"""
+
+    // A's generator prints all five before; B's may be one; D's is a pure view of an array
+    Assert.Equal<string list>([ ".ToList()" ], firedText source (suggestCode "CR0020" source))
+    Assert.Contains("return view.Any(p => p > 1);", fixAll "CR0020" source)
 
 // ---- CR0029 ----
 

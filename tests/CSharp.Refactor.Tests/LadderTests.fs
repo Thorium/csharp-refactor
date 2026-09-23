@@ -49,6 +49,26 @@ class Use
     Assert.Equal<string list>([ "Name" ], firedText source (suggestCode "CR0149" source))
     Assert.Contains("public required string Name { get; init; }", fixAll "CR0149" source)
 
+[<Fact>]
+let ``CR0149 stands down for a derived type constructed bare in another file and for a new() type argument`` () =
+    let options = "class Options { public string Name { get; init; } }"
+    let setting = "class Use { Options A() => new Options { Name = \"a\" }; }"
+    Assert.Equal(1, (suggestInProject false false "CR0149" [ "Options.cs", options; "Use.cs", setting ]).Length)
+
+    let derived =
+        "class Derived : Options { }\nclass Use { Options A() => new Options { Name = \"a\" }; Derived B() => new Derived(); }"
+
+    Assert.Empty(suggestInProject false false "CR0149" [ "Options.cs", options; "Use.cs", derived ])
+
+    let generic =
+        "class Use { Options A() => new Options { Name = \"a\" }; static T Make<T>() where T : new() => new T(); Options B() => Make<Options>(); }"
+
+    Assert.Empty(suggestInProject false false "CR0149" [ "Options.cs", options; "Use.cs", generic ])
+    // a public type of a library under --api-changes: without the oracle, callers beyond are unseen
+    let exported = "public class Options { public string Name { get; init; } }"
+    Assert.Empty(suggestInProject false true "CR0149" [ "Options.cs", exported; "Use.cs", setting ])
+    Assert.Equal(1, (suggestInProject true true "CR0149" [ "Options.cs", exported; "Use.cs", setting ]).Length)
+
 // ---- CR0150 / CR0152 ----
 
 [<Fact>]
@@ -90,6 +110,51 @@ class C
     Assert.Equal(1, (suggestCode "CR0152" source).Length)
     Assert.Contains("private readonly Lock _gate = new();", fixAll "CR0152" source)
 
+[<Fact>]
+let ``CR0150 reads the uses of a shared field in the other files: a write or a foreach there keeps the Dictionary`` () =
+    let registry (access: string) =
+        $"""
+using System.Collections.Generic;
+{access} static class Registry
+{{
+    {access} static readonly Dictionary<string, int> Map = new Dictionary<string, int> {{ ["a"] = 1 }};
+    static int Get(string k) => Map.TryGetValue(k, out var v) ? v : 0;
+}}
+"""
+
+    let writer =
+        "class Writer { void M() { Registry.Map[\"b\"] = 2; Registry.Map.Add(\"c\", 3); } }"
+
+    let walker =
+        "class Walker { int M() { var n = 0; foreach (var kv in Registry.Map) n += kv.Value; return n; } }"
+
+    let reader = "class Reader { bool M(string k) => Registry.Map.ContainsKey(k); }"
+
+    let files other =
+        [ "Registry.cs", registry "internal"; "Other.cs", other ]
+
+    Assert.Empty(suggestInProject false false "CR0150" (files writer))
+    Assert.Empty(suggestInProject false false "CR0150" (files walker))
+    Assert.Equal(1, (suggestInProject false false "CR0150" (files reader)).Length)
+    // a public field of a library under --api-changes: only the oracle sees every caller
+    let exported = [ "Registry.cs", registry "public"; "Other.cs", reader ]
+    Assert.Empty(suggestInProject false true "CR0150" exported)
+    Assert.Equal(1, (suggestInProject true true "CR0150" exported).Length)
+    Assert.Empty(suggestInProject true true "CR0150" [ "Registry.cs", registry "public"; "Other.cs", writer ])
+
+[<Fact>]
+let ``CR0152 keeps the object gate a Monitor call uses in another part of the partial type`` () =
+    let part =
+        "partial class C\n{\n    private readonly object _gate = new();\n    void E() { lock (_gate) { } }\n}\n"
+
+    let locking = "partial class C { void F() { lock (_gate) { } } }"
+
+    let monitoring =
+        "using System.Threading;\npartial class C { void F() { Monitor.Enter(_gate); Monitor.Exit(_gate); } }"
+
+    Assert.Equal(1, (suggestInProject false false "CR0152" [ "A.cs", part; "B.cs", locking ]).Length)
+    Assert.Empty(suggestInProject false false "CR0152" [ "A.cs", part; "B.cs", monitoring ])
+
 // ---- CR0153 / CR0154 ----
 
 [<Fact>]
@@ -119,6 +184,24 @@ class C
     let assigned = fixAll "CR0154" source
     Assert.Contains("void A(C other, int v) { other?.Count = v; }", assigned)
     Assert.Contains("void B(C other, int v) { other?.Count += v; }", assigned)
+
+[<Fact>]
+let ``CR0154 keeps a null test through a user-defined inequality`` () =
+    let source =
+        """
+class Node
+{
+    public int Count { get; set; }
+    public static bool operator ==(Node? a, Node? b) => ReferenceEquals(a, b) || (a is not null && b is not null && a.Count == -1);
+    public static bool operator !=(Node? a, Node? b) => !(a == b);
+    public override bool Equals(object? o) => ReferenceEquals(this, o);
+    public override int GetHashCode() => 0;
+    void A(Node? other, int v) { if (other != null) other.Count = v; }
+    void B(Node? other, int v) { if (other is not null) other.Count = v; }
+}
+"""
+
+    Assert.Equal<string list>([ "other is not null" ], firedText source (suggestCode "CR0154" source))
 
 // ---- CR0157 ----
 
@@ -229,3 +312,89 @@ sealed record Square(double S) : Shape;
 
     Assert.Empty(suggestCode "CR0156" source)
     Assert.Empty(suggestCode "CR0158" source)
+
+/// CR0151 over a two-file compilation: `H` declares the params methods, the
+/// other file uses them; `oracle` runs the rules as the tool and the fix
+/// provider do, with the solution's reference finder.
+let private paramsSpanAcrossFiles (oracle: bool) =
+    let declaring =
+        """
+using System;
+static class H
+{
+    internal static int Sum(params int[] xs) { var t = 0; foreach (var x in xs) t += x; return t; }
+    internal static bool In(int v, params int[] xs) { foreach (var x in xs) if (x == v) return true; return false; }
+    internal static int Ok(params int[] xs) => xs.Length;
+    public static int Open(params int[] xs) => xs.Length;
+}
+"""
+
+    let using' =
+        """
+using System;
+using System.Linq.Expressions;
+static class U
+{
+    static Func<int[], int> f = H.Sum;
+    static Expression<Func<int, bool>> e = x => H.In(x, 1, 2);
+    static int g = H.Ok(1, 2) + H.Open(3);
+}
+"""
+
+    use workspace = new Microsoft.CodeAnalysis.AdhocWorkspace()
+
+    let project =
+        workspace
+            .AddProject("Test", Microsoft.CodeAnalysis.LanguageNames.CSharp)
+            .WithCompilationOptions(
+                Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
+                    Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                )
+            )
+            .WithParseOptions(parseOptions)
+            .AddMetadataReferences
+            metadataReferences
+
+    let d = project.AddDocument("H.cs", normalize declaring, filePath = "C:/fake/H.cs")
+    let u = d.Project.AddDocument("U.cs", normalize using', filePath = "C:/fake/U.cs")
+    let d = u.Project.GetDocument d.Id
+    let compilation = d.Project.GetCompilationAsync().Result
+    Assert.Empty(errorsAfterFix compilation)
+    let tree = d.GetSyntaxTreeAsync().Result
+    let model = compilation.GetSemanticModel(tree, false)
+
+    let ctx =
+        { CSharp.Refactor.Roslyn.Context.forTree None compilation tree false with
+            References =
+                if oracle then
+                    Some(CSharp.Refactor.Roslyn.References.oracle d.Project.Solution tree)
+                else
+                    None
+        }
+
+    let text = tree.GetText().ToString()
+
+    CSharp.Refactor.Roslyn.Rules.all tree model ctx
+    |> List.filter (fun s -> s.Code = "CR0151")
+    |> List.map (fun s -> text.Substring(s.Span.Start, s.Span.Length))
+
+[<Fact>]
+let ``a params array referenced from another file as a method group or inside an expression tree keeps its type`` () =
+    // the compiler's view: no reference oracle, the compilation's own trees are read
+    Assert.Equal<string list>([ "params int[] xs"; "params int[] xs" ], paramsSpanAcrossFiles false)
+    // the tool's and the fix provider's view: the solution's reference finder
+    Assert.Equal<string list>([ "params int[] xs"; "params int[] xs" ], paramsSpanAcrossFiles true)
+
+// ---- CR0155 ----
+
+[<Fact>]
+let ``CR0155 holds a class with an attributed method or a ref receiver`` () =
+    let source =
+        """
+using System;
+static class Plain { public static int Twice(this int x) => x * 2; }
+static class ByRef { public static void Bump(this ref int x) { x++; } }
+static class Marked { [Obsolete] public static int Half(this int x) => x / 2; }
+"""
+
+    Assert.Equal<string list>([ "Plain" ], firedText source (suggestCode "CR0155" source))

@@ -23,13 +23,21 @@
 /// captured by a lambda, passed to an array or `IEnumerable<T>` parameter,
 /// used with LINQ, or in an `async`/iterator body (a span cannot cross an
 /// await or a yield); the method is private/internal or the public shape
-/// is open (a `params` type change is binary-breaking); the speculative
-/// check re-binds the file.
+/// is open (a `params` type change is binary-breaking); every reference to
+/// the method — in this file and, through the host's reference oracle, in
+/// every other — is a plain call outside an expression tree (a method group
+/// `Func<int[], int> f = H.Sum;` stops converting, an expression tree
+/// cannot hold a span `params` call); without an oracle the compilation's
+/// own trees are read, which is complete only for a private method or an
+/// internal one no friend assembly sees, so anything wider stands down;
+/// the speculative check re-binds the file and every file referencing it.
 ///
 /// CR0155 (idiom, fix, C# 14, off, v2): a static class holding only
 /// `this T`-extension methods on one receiver type is an `extension(T x)
 /// { … }` block. Off by default: the class name disappears for reflection
-/// and for callers who invoked the methods statically.
+/// and for callers who invoked the methods statically. Guards: no method
+/// or receiver attribute (the block renders none), the receiver's only
+/// modifier `this` (`this ref`/`this in` would become a by-value copy).
 ///
 /// CR0156 (idiom, fix, C# 15, API): a memberless `abstract record Base;`
 /// whose only derived types are sealed records in the same assembly is
@@ -63,22 +71,22 @@ let UnionCode = "CR0156"
 [<Literal>]
 let UnionDiscardCode = "CR0158"
 
+let rec private effectiveAccessibility (s: ISymbol) =
+    match s with
+    | null -> Accessibility.Public
+    | s ->
+        let own = s.DeclaredAccessibility
+        let outer = effectiveAccessibility s.ContainingType
+
+        if own = Accessibility.Private || outer = Accessibility.Private then
+            Accessibility.Private
+        elif own = Accessibility.Internal || outer = Accessibility.Internal then
+            Accessibility.Internal
+        else
+            own
+
 let private shapeOpen (ctx: RuleContext) (s: ISymbol) =
-    let rec effective (s: ISymbol) =
-        match s with
-        | null -> Accessibility.Public
-        | s ->
-            let own = s.DeclaredAccessibility
-            let outer = effective s.ContainingType
-
-            if own = Accessibility.Private || outer = Accessibility.Private then
-                Accessibility.Private
-            elif own = Accessibility.Internal || outer = Accessibility.Internal then
-                Accessibility.Internal
-            else
-                own
-
-    match effective s with
+    match effectiveAccessibility s with
     | Accessibility.Private -> true
     | Accessibility.Internal
     | Accessibility.ProtectedAndInternal -> RuleContext.internalShapeOpen ctx
@@ -358,9 +366,83 @@ let private paramsSpans (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                     else
                         let elementType = (p.Type :?> ArrayTypeSyntax).ElementType.ToString()
                         let edit = Suggestion.replace p.Type.Span ($"ReadOnlySpan<{elementType}>")
+                        let self = model.GetDeclaredSymbol m
 
-                        // every call site in the file must still bind
-                        if Guards.speculativeCheck model [ edit ] then
+                        // every reference, here and elsewhere: this file's own, plus the
+                        // oracle's; with no oracle, the compilation's trees — complete only
+                        // when nothing outside the compilation can see the method
+                        let referencesIn (t: SyntaxTree) (tm: SemanticModel) =
+                            t.GetRoot().DescendantNodes()
+                            |> Seq.filter (fun x ->
+                                match x with
+                                | :? SimpleNameSyntax as sn ->
+                                    sn.Identifier.ValueText = self.Name
+                                    && (match tm.GetSymbolInfo(sn).Symbol with
+                                        | null -> false
+                                        | s -> SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, self))
+                                | _ -> false)
+                            |> Seq.map (fun x ->
+                                {
+                                    Tree = t
+                                    Model = tm
+                                    Node = x
+                                    Editable = true
+                                })
+                            |> List.ofSeq
+
+                        let elsewhere =
+                            match RuleContext.referencesOf ctx self with
+                            | Some sites -> Some sites
+                            | None when
+                                (match effectiveAccessibility self with
+                                 | Accessibility.Private -> true
+                                 | Accessibility.Internal
+                                 | Accessibility.ProtectedAndInternal -> not ctx.HasFriends
+                                 | _ -> false)
+                                ->
+                                model.Compilation.SyntaxTrees
+                                |> Seq.filter (fun t -> not (obj.ReferenceEquals(t, tree)))
+                                |> Seq.collect (fun t -> referencesIn t (model.Compilation.GetSemanticModel(t, false)))
+                                |> List.ofSeq
+                                |> Some
+                            | None -> None
+
+                        // a plain call, bound to the method, not inside an expression tree
+                        let plainCall (site: ReferenceSite) =
+                            site.Editable
+                            && not (isNull site.Model || isNull site.Node)
+                            && (let name =
+                                    match site.Node.Parent with
+                                    | :? MemberAccessExpressionSyntax as ma when
+                                        obj.ReferenceEquals(ma.Name, site.Node)
+                                        ->
+                                        ma :> SyntaxNode
+                                    | :? MemberBindingExpressionSyntax as mb -> mb :> SyntaxNode
+                                    | _ -> site.Node
+
+                                match name.Parent with
+                                | :? InvocationExpressionSyntax as inv when obj.ReferenceEquals(inv.Expression, name) ->
+                                    not (Guards.insideExpressionTree site.Model inv)
+                                | _ -> false)
+
+                        let callsOnly =
+                            match elsewhere with
+                            | Some sites -> (referencesIn tree model @ sites) |> List.forall plainCall
+                            | None -> false
+
+                        let external =
+                            elsewhere
+                            |> Option.defaultValue []
+                            |> List.filter (fun s -> not (obj.ReferenceEquals(s.Tree, tree)))
+
+                        // every call site, in this file and the others, must still bind
+                        if
+                            callsOnly
+                            && (if external.IsEmpty then
+                                    Guards.speculativeCheck model [ edit ]
+                                else
+                                    Guards.speculativeCheckAcross model external [ edit ])
+                        then
                             Some
                                 {
                                     Code = ParamsSpanCode
@@ -400,6 +482,12 @@ let private extensionBlocks (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                             md.ParameterList.Parameters.Count > 0
                             && md.ParameterList.Parameters.[0].Modifiers
                                |> Seq.exists (fun k -> k.IsKind SyntaxKind.ThisKeyword)
+                            // a `this ref`/`this in` receiver would become a by-value copy
+                            // in `extension(T x)`, and the method's or the receiver's
+                            // attributes have no place in the rendering: they stand down
+                            && md.ParameterList.Parameters.[0].Modifiers.Count = 1
+                            && md.ParameterList.Parameters.[0].AttributeLists.Count = 0
+                            && md.AttributeLists.Count = 0
                             && isNull md.TypeParameterList
                             ->
                             Some md

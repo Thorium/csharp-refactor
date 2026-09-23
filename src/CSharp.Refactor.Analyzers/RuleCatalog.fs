@@ -267,6 +267,7 @@ let rules: Rule list =
             "CR0177"
             Category.Performance
             "a local computed inside a loop from nothing the loop changes is computed once, above it"
+        rule "CR0178" Category.Performance "a query copied before Where or Select runs them in the query, copying after"
     ]
 
 let private byCode = rules |> List.map (fun r -> r.Code, r) |> Map.ofList

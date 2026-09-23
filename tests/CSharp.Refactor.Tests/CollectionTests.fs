@@ -131,6 +131,19 @@ class C
     Assert.Contains("sb.Append(n + 1).Append(a);", fixedSource)
     Assert.Contains("sb.Append(n + 1);", fixedSource)
 
+[<Fact>]
+let ``CR0033 keeps a concatenation that reads the builder`` () =
+    let source =
+        """
+using System.Text;
+class C
+{
+    void A(StringBuilder sb) { sb.Append("Len:" + sb.Length); sb.Append("x" + sb); }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0033" source)
+
 // ---- CR0026 / CR0027 / CR0030 / CR0035 notes ----
 
 [<Fact>]
