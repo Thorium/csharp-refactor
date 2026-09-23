@@ -16,6 +16,8 @@ never gate your build.
 
 # Using it
 
+The tool is fully offline: AI has been used to make it, but it doesn't use AI.
+
 ## Quick start
 
 Nothing to configure — the tool reads your project, reports what it would
