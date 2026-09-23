@@ -3,9 +3,7 @@
 > The C# little-sister of [FSharp.Refactor](https://github.com/Thorium/fsharp-refactor)
 
 Functional refactoring suggestions for C#, implemented in F# on Roslyn.
-The rules care about correctness, measured performance and clear
-functional idiom — and deliberately not about naming, layout or
-conventions.
+The rules care about correctness, measured performance and clear idiomatic C# — and deliberately not about naming, layout or conventions.
 
 - light bulb quick fixes in your editor (Visual Studio, VS Code, Rider,
   anything that hosts Roslyn analyzers)
@@ -13,16 +11,6 @@ conventions.
 
 Suggestions are `Info` severity: they mark an opportunity, not a defect, and
 never gate your build.
-
-Status: pre-release. Every rule of the v1 catalog (124 rules across
-families A–J) is implemented and swept over real repositories; the
-cross-project edit sets, the editor extensions and the publishing scripts
-are still open. The design and the rule catalog with its guards are in
-[DESIGN.md](DESIGN.md); [Rules.md](Rules.md) documents every shipped rule
-(kept complete by tests, and the target of every finding's help link, e.g.
-`Rules.md#cr0025--performance`); [CHANGELOG.md](CHANGELOG.md) has every
-version's notes.
-
 
 ---
 
@@ -35,14 +23,20 @@ change, and only edits when you tell it to:
 
 ```bash
 dotnet tool install --global csharp-refactor
-csharp-refactor Your.csproj --dry-run
+csharp-refactor Your.csproj --dry-run --api-changes
 ```
 
 That prints every fix it would make, with file and position, and writes
 nothing. When the list looks right, drop the flag to apply them:
 
 ```bash
-csharp-refactor Your.csproj
+csharp-refactor Your.csproj --api-changes
+```
+
+If you don't want change public methods / API, drop `--api-changes`:
+
+```bash
+csharp-refactor Your.fsproj
 ```
 
 It refuses a compilation that does not already build, recompiles in memory
