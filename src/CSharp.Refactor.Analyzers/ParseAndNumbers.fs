@@ -14,10 +14,17 @@
 /// catch variable is unread; under a broad catch every argument and the
 /// target cannot throw when evaluated (no element access, invocation or
 /// member chain — `parts[1]` was caught too); on the failure path `TryParse` sets the
-/// target to default where `Parse` left it — so a local keeps the fix only
-/// when it was declared without a value (or with `default`), the catch
-/// assigns it, or the catch leaves (`return`/`throw`/`continue`); a field
-/// only when the catch assigns it; the `TryParse` overload with the same
+/// target to default where `Parse` left it — so a local keeps the `out v`
+/// form only when it was declared without a value (or with `default`), the
+/// catch assigns it, or the catch leaves (`return`/`throw`/`continue`); a
+/// field only when the catch assigns it. Any other local or field target
+/// goes through a fresh local, written only on success: `if
+/// (int.TryParse(s, out var parsed)) v = parsed;` (`else { …catch… }` for a
+/// catch that does something); `parsed`, `parsed2`, … is the first name no
+/// symbol in scope has and the member never spells, one skipped per earlier
+/// `try` of the member (two `out var` in one block clash); a `try` that is
+/// the unbraced body of an `if` with an `else` gets the replacement in
+/// braces (a bare `if` would take that `else`); the `TryParse` overload with the same
 /// arguments binds (the speculative check proves it). Another `try` whose
 /// catch names `FormatException` around a `Parse` is a note.
 ///
@@ -211,8 +218,32 @@ let private leaves (block: BlockSyntax) =
     | Some(:? ContinueStatementSyntax) -> true
     | _ -> false
 
+/// How the target takes a `TryParse`: `out target` itself (the failure's
+/// default is harmless), or a fresh local written back only on success.
+type private TargetForm =
+    | OutTarget
+    | ViaFresh
+    | Unsafe
+
 let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     let text = tree.GetText()
+
+    // `parsed`, `parsed2`, …: a name no symbol in scope has and the member
+    // never spells, one skipped per earlier `try` of the member — an `out
+    // var` in a statement scopes to the whole block, so two would clash
+    let freshName (t: TryStatementSyntax) =
+        let scope = Text.enclosingMember t
+
+        let earlier =
+            scope.DescendantNodes()
+            |> Seq.filter (fun d -> d :? TryStatementSyntax && d.SpanStart < t.SpanStart)
+            |> Seq.length
+
+        Seq.append [ "parsed" ] (Seq.initInfinite (fun i -> $"parsed{i + 2}"))
+        |> Seq.filter (fun candidate ->
+            not (Text.mentionsName candidate scope)
+            && model.LookupSymbols(t.SpanStart, name = candidate).IsEmpty)
+        |> Seq.item earlier
 
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
@@ -256,7 +287,13 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
             elif t.Block.Statements.Count <> 1 then
                 note ()
             else
-                let tryText (replacement: string) = Suggestion.replace t.Span replacement
+                // the `try` as the unbraced body of an `if` with an `else`: a bare
+                // `if (…TryParse…) …;` there would take that `else` for its own
+                let tryText (replacement: string) =
+                    match t.Parent with
+                    | :? IfStatementSyntax as outer when not (isNull outer.Else) ->
+                        Suggestion.replace t.Span $"{{ {replacement} }}"
+                    | _ -> Suggestion.replace t.Span replacement
 
                 let callText (callee: string) (args: string) (target: string) =
                     // `T.Parse(…)` → `T.TryParse(…, out target)`; the Enum form already carries TryParse
@@ -282,7 +319,7 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                             let target = a.Left
                             let targetText = target.ToString()
 
-                            let defaultSafe =
+                            let form =
                                 match symbolOf model target with
                                 | :? ILocalSymbol as l ->
                                     let declaredBare =
@@ -304,24 +341,44 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                             | _ -> false
                                         | None -> false
 
-                                    declaredBare || Text.assignsTo targetText c.Block || leaves c.Block
-                                | :? IFieldSymbol as f when not f.IsReadOnly -> Text.assignsTo targetText c.Block
-                                | _ -> false
+                                    if declaredBare || Text.assignsTo targetText c.Block || leaves c.Block then
+                                        OutTarget
+                                    else
+                                        ViaFresh
+                                | :? IFieldSymbol as f when not f.IsReadOnly ->
+                                    if Text.assignsTo targetText c.Block then
+                                        OutTarget
+                                    else
+                                        ViaFresh
+                                | _ -> Unsafe
 
                             // `other.v = …` under the catch: a null `other` was caught there
-                            if not (defaultSafe && nonThrowing model target) then
+                            if form = Unsafe || not (nonThrowing model target) then
                                 note ()
                             else
-                                let call = callText callee args targetText
-
                                 let replacement =
-                                    if emptyCatch then
-                                        $"{call};"
-                                    elif Text.multiLine text c.Block then
-                                        $"if (!{call}){nl}{indent}{catchText}"
+                                    if form = OutTarget then
+                                        let call = callText callee args targetText
+
+                                        if emptyCatch then
+                                            $"{call};"
+                                        elif Text.multiLine text c.Block then
+                                            $"if (!{call}){nl}{indent}{catchText}"
+                                        else
+                                            // a one-line catch stays one line: `if (!…) { v = -1; }`
+                                            $"if (!{call}) {catchText}"
                                     else
-                                        // a one-line catch stays one line: `if (!…) { v = -1; }`
-                                        $"if (!{call}) {catchText}"
+                                        // the failure leaves the target as it was, as `Parse` did
+                                        let name = freshName t
+                                        let call = callText callee args ("var " + name)
+                                        let success = $"if ({call}) {targetText} = {name};"
+
+                                        if emptyCatch then
+                                            success
+                                        elif Text.multiLine text c.Block then
+                                            $"{success}{nl}{indent}else{nl}{indent}{catchText}"
+                                        else
+                                            $"{success} else {catchText}"
 
                                 Some(
                                     {
@@ -344,11 +401,7 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                             not (isNull fallback.Expression)
                             && Guards.isPureExpression model fallback.Expression
                             ->
-                            let scope = Text.enclosingMember t
-
-                            let name =
-                                Seq.append [ "parsed" ] (Seq.initInfinite (fun i -> $"parsed{i + 1}"))
-                                |> Seq.find (fun candidate -> not (Text.mentionsName candidate scope))
+                            let name = freshName t
 
                             let call = callText callee args $"var {name}"
 

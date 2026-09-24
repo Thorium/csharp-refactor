@@ -21,7 +21,9 @@
 /// innermost loop is the target); the initializer is literals, `nameof`,
 /// reads of locals, parameters, `const` and `readonly` fields (outside a
 /// constructor), built-in operators over those (`/` and `%` by a non-zero
-/// literal only: an empty loop never divided), `?:`, and an interpolated
+/// literal, negated or not, only: an empty loop never divided — and never
+/// by an integral `-1`, since `int.MinValue / -1` throws even unchecked),
+/// `?:`, and an interpolated
 /// string whose holes are such reads of primitives or strings; every
 /// local or parameter it reads is assigned nowhere in the member but its
 /// own declaration, and declared outside the loop; the hoisted name is
@@ -77,18 +79,33 @@ let private enclosingLoop (decl: LocalDeclarationStatementSyntax) : SyntaxNode o
 
     climb decl
 
-/// The names a `/` or `%` may divide by: a non-zero numeric literal.
-let private nonZeroLiteral (e: ExpressionSyntax) =
-    match e with
-    | :? LiteralExpressionSyntax as l when l.IsKind SyntaxKind.NumericLiteralExpression ->
+/// The divisors a `/` or `%` may take: a non-zero numeric literal, negated
+/// or not — but never an integral `-1`: `int.MinValue / -1` (and `% -1`)
+/// throws OverflowException even unchecked, once above the loop where an
+/// empty loop never divided. A floating or decimal divisor never overflows.
+let private safeDivisor (e: ExpressionSyntax) =
+    let literal, negated =
+        match e with
+        | :? LiteralExpressionSyntax as l -> Some l, false
+        | :? PrefixUnaryExpressionSyntax as u when u.IsKind SyntaxKind.UnaryMinusExpression ->
+            match u.Operand with
+            | :? LiteralExpressionSyntax as l -> Some l, true
+            | _ -> None, false
+        | _ -> None, false
+
+    // `-1u` is a long -1: the sign, not the literal's type, decides
+    let integral (zero: bool) (one: bool) = not (zero || negated && one)
+
+    match literal with
+    | Some l when l.IsKind SyntaxKind.NumericLiteralExpression ->
         match l.Token.Value with
-        | :? int as v -> v <> 0
-        | :? int64 as v -> v <> 0L
+        | :? int as v -> integral (v = 0) (v = 1)
+        | :? int64 as v -> integral (v = 0L) (v = 1L)
+        | :? uint32 as v -> integral (v = 0u) (v = 1u)
+        | :? uint64 as v -> integral (v = 0UL) (v = 1UL)
         | :? double as v -> v <> 0.0
         | :? float32 as v -> v <> 0.0f
         | :? decimal as v -> v <> 0m
-        | :? uint32 as v -> v <> 0u
-        | :? uint64 as v -> v <> 0UL
         | _ -> false
     | _ -> false
 
@@ -201,7 +218,7 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
             Guards.isBuiltinOperator model b
             && not (b.IsKind SyntaxKind.CoalesceExpression)
             && ((not (b.IsKind SyntaxKind.DivideExpression || b.IsKind SyntaxKind.ModuloExpression))
-                || nonZeroLiteral b.Right)
+                || safeDivisor b.Right)
             // under `checked`, an overflow that threw per iteration (or not at
             // all, for an empty loop) would throw once, above the loop
             && not (arithmetic && not isString && checkedContext)

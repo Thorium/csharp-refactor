@@ -21,10 +21,16 @@
 /// reader may see a half-published one. `LazyInitializer.EnsureInitialized
 /// (ref _x, () => new X())` publishes exactly one. Guards: the field is
 /// static, not `volatile`/`readonly`/`[ThreadStatic]`; the assignment is
-/// the whole `if` body, or the shape is `_x ??= expr`; the expression is
-/// provably non-null (`EnsureInitialized` throws on a null factory
+/// the whole `if` body, or the shape is `_x ??= expr`; `EnsureInitialized`
+/// only for an expression provably non-null (it throws on a null factory
 /// result): a `new`, an array or collection expression, a string, a `??`
-/// with such a right side, or a not-null flow state under `#nullable`;
+/// with such a right side, or a not-null flow state under `#nullable`. Any
+/// other expression takes the null-exact `Interlocked.CompareExchange(ref
+/// _x, expr, null)` — a null result leaves `_x` null and the next call
+/// loads again, as before: the `if` body's assignment becomes the exchange;
+/// a `_x ??= expr;` statement (in a block only: a new `if` could capture an
+/// `else`) becomes `if (_x is null) …exchange…;`; a `??=` value becomes
+/// `_x ?? …exchange… ?? _x`;
 /// the expression does not mention the field; no enclosing `lock` and not
 /// a static constructor (both already serialise); `LazyInitializer`
 /// resolves. Instance fields are not reported.
@@ -334,9 +340,37 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
     let call (fieldText: string) (expr: ExpressionSyntax) =
         $"LazyInitializer.EnsureInitialized(ref {fieldText}, () => {expr})"
 
+    // the null-exact spelling for a factory that may answer null (where
+    // `EnsureInitialized` would throw): a null result leaves the field null
+    // and the next call loads again, as the check-then-assign did
+    let exchange (fieldText: string) (expr: ExpressionSyntax) =
+        $"Interlocked.CompareExchange(ref {fieldText}, {expr}, null)"
+
     // the `using System.Threading;` the bare name needs, or nothing to add
-    let imports (position: int) =
-        Usings.importEdit model tree position "System.Threading" "LazyInitializer"
+    let imports (position: int) (typeName: string) =
+        Usings.importEdit model tree position "System.Threading" typeName
+
+    let suggestion (fieldText: string) (span: TextSpan) (viaExchange: bool) (position: int) (edits: TextEdit list) =
+        let typeName, how =
+            if viaExchange then
+                "Interlocked", "Interlocked.CompareExchange"
+            else
+                "LazyInitializer", "LazyInitializer.EnsureInitialized"
+
+        {
+            Code = LazyStaticCode
+            Message =
+                $"'{fieldText}' is filled by check-then-assign on a static field: two threads can build two values and a reader can see a half-published one — {how} publishes exactly one"
+            Span = span
+            Fixes =
+                [
+                    Suggestion.fix
+                        $"Initialise with {how}"
+                        LazyStaticCode
+                        ((defaultArg (imports position typeName) []) @ edits)
+                ]
+        }
+        |> Guards.verified model
 
     let nullTest (cond: ExpressionSyntax) : ExpressionSyntax option =
         match cond with
@@ -379,7 +413,24 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                 a.IsKind SyntaxKind.SimpleAssignmentExpression
                                 && Guards.sameReference model a.Left target
                                 && not (Text.mentionsName field.Name a.Right)
-                                && provablyNonNull model a.Right
+                                && not (provablyNonNull model a.Right)
+                                ->
+                                // the assignment alone becomes the exchange; the test
+                                // and a following `return field;` stay as they are
+                                let fieldText = target.ToString()
+
+                                Some(
+                                    suggestion
+                                        fieldText
+                                        s.Span
+                                        true
+                                        s.SpanStart
+                                        [ Suggestion.replace a.Span (exchange fieldText a.Right) ]
+                                )
+                            | :? AssignmentExpressionSyntax as a when
+                                a.IsKind SyntaxKind.SimpleAssignmentExpression
+                                && Guards.sameReference model a.Left target
+                                && not (Text.mentionsName field.Name a.Right)
                                 ->
                                 let fieldText = target.ToString()
                                 let callText = call fieldText a.Right
@@ -412,24 +463,7 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                         ]
                                     | None -> [ Suggestion.replace s.Span $"{callText};" ]
 
-                                let edits = (defaultArg (imports s.SpanStart) []) @ edits
-
-                                Some(
-                                    {
-                                        Code = LazyStaticCode
-                                        Message =
-                                            $"'{fieldText}' is filled by check-then-assign on a static field: two threads can build two values and a reader can see a half-published one — LazyInitializer.EnsureInitialized publishes exactly one"
-                                        Span = s.Span
-                                        Fixes =
-                                            [
-                                                Suggestion.fix
-                                                    "Initialise with LazyInitializer.EnsureInitialized"
-                                                    LazyStaticCode
-                                                    edits
-                                            ]
-                                    }
-                                    |> Guards.verified model
-                                )
+                                Some(suggestion fieldText s.Span false s.SpanStart edits)
                             | _ -> None
                         | _ -> None
             | :? AssignmentExpressionSyntax as a when
@@ -438,30 +472,54 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                 match staticCacheField model a.Left with
                 | Some field when
                     not (Text.mentionsName field.Name a.Right)
-                    && provablyNonNull model a.Right
                     && (a.Parent :? ExpressionStatementSyntax
                         || a.Parent :? ReturnStatementSyntax
                         || a.Parent :? ArrowExpressionClauseSyntax)
                     ->
                     let fieldText = a.Left.ToString()
-                    let callText = call fieldText a.Right
 
-                    Some(
-                        {
-                            Code = LazyStaticCode
-                            Message =
-                                $"'{fieldText}' is filled by check-then-assign on a static field: two threads can build two values and a reader can see a half-published one — LazyInitializer.EnsureInitialized publishes exactly one"
-                            Span = a.Span
-                            Fixes =
-                                [
-                                    Suggestion.fix
-                                        "Initialise with LazyInitializer.EnsureInitialized"
-                                        LazyStaticCode
-                                        ((defaultArg (imports a.SpanStart) []) @ [ Suggestion.replace a.Span callText ])
-                                ]
-                        }
-                        |> Guards.verified model
-                    )
+                    if provablyNonNull model a.Right then
+                        Some(
+                            suggestion
+                                fieldText
+                                a.Span
+                                false
+                                a.SpanStart
+                                [ Suggestion.replace a.Span (call fieldText a.Right) ]
+                        )
+                    else
+                        match a.Parent with
+                        // a statement: the test first, so the factory runs only on a miss;
+                        // only in a block, where the new `if` cannot capture an `else`
+                        | :? ExpressionStatementSyntax as es when (es.Parent :? BlockSyntax) ->
+                            Some(
+                                suggestion
+                                    fieldText
+                                    a.Span
+                                    true
+                                    a.SpanStart
+                                    [
+                                        Suggestion.replace
+                                            es.Span
+                                            $"if ({fieldText} is null) {exchange fieldText a.Right};"
+                                    ]
+                            )
+                        | :? ExpressionStatementSyntax -> None
+                        // a value: the field when set, else the exchange's answer — null
+                        // when this call won (then the field is what it stored)
+                        | _ ->
+                            Some(
+                                suggestion
+                                    fieldText
+                                    a.Span
+                                    true
+                                    a.SpanStart
+                                    [
+                                        Suggestion.replace
+                                            a.Span
+                                            $"{fieldText} ?? {exchange fieldText a.Right} ?? {fieldText}"
+                                    ]
+                            )
                 | _ -> None
             | _ -> None)
         |> List.ofSeq

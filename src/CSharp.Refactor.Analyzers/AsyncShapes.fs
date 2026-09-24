@@ -64,7 +64,9 @@
 /// collection matches. The direct form changes the result type
 /// (`Task<T[]>` → `Task<T>`), so the editor offers it and the sweep does
 /// not (for `WaitAll` the element alone would drop the wait: `t.Wait()`).
-/// Yields to CA1842/CA1843.
+/// `WhenAny`/`WaitAny` of one task are left: `WhenAny`'s task never
+/// faults and `WaitAny` returns an index, where `t`/`t.Wait()` would
+/// throw on a faulted `t`. Yields to CA1842/CA1843.
 ///
 /// CR0055 (correctness, fix): `Foo(x, CancellationToken.None)` or
 /// `Foo(x, default)` while a token parameter is in scope hands the callee
@@ -864,12 +866,10 @@ let private singleTasks (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
     |> Seq.choose (fun n ->
         match n with
         | :? InvocationExpressionSyntax as inv when
+            // never WhenAny/WaitAny: WhenAny's task never faults and WaitAny
+            // returns an index — the task itself would throw where they did not
             (let e = inv.Expression.ToString()
-
-             e = "Task.WhenAll"
-             || e = "Task.WhenAny"
-             || e = "Task.WaitAll"
-             || e = "Task.WaitAny")
+             e = "Task.WhenAll" || e = "Task.WaitAll")
             && inv.ArgumentList.Arguments.Count = 1
             ->
             let arg = inv.ArgumentList.Arguments.[0].Expression

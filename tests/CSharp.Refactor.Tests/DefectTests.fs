@@ -332,6 +332,54 @@ class C
     Assert.Contains("static string Name => LazyInitializer.EnsureInitialized(ref _name, () => \"x\");", fixedSource)
     Assert.Contains("using System.Threading;", fixedSource)
 
+[<Fact>]
+let ``CR0164 fills a settings cache whose loader may answer null by CompareExchange: a missing file is retried as before``
+    ()
+    =
+    let source =
+        """
+using System.Collections.Generic;
+interface ISettingsStore { Dictionary<string, string>? Load(); }
+static class Settings
+{
+    public static ISettingsStore Store = null!;
+    static Dictionary<string, string>? _values;
+    static Dictionary<string, string>? _warm;
+    static List<string>? _names;
+    public static Dictionary<string, string>? Values()
+    {
+        if (_values == null) _values = Store.Load();
+        return _values;
+    }
+    public static void Warm() { _warm ??= Store.Load(); }
+    public static List<string>? Names => _names ??= LoadNames();
+    static List<string>? LoadNames() => null;
+}
+"""
+
+    let fired = suggestCode "CR0164" source
+    Assert.Equal(3, fired.Length)
+    Assert.All(fired, (fun s -> Assert.NotEmpty s.Fixes))
+    let fixedSource = fixAll "CR0164" source
+
+    Assert.Contains(
+        "if (_values == null) Interlocked.CompareExchange(ref _values, Store.Load(), null);\n        return _values;",
+        fixedSource
+    )
+
+    Assert.Contains(
+        "public static void Warm() { if (_warm is null) Interlocked.CompareExchange(ref _warm, Store.Load(), null); }",
+        fixedSource
+    )
+
+    Assert.Contains(
+        "public static List<string>? Names => _names ?? Interlocked.CompareExchange(ref _names, LoadNames(), null) ?? _names;",
+        fixedSource
+    )
+
+    Assert.DoesNotContain("EnsureInitialized", fixedSource)
+    Assert.Contains("using System.Threading;", fixedSource)
+
 // ---- CR0165 ----
 
 [<Fact>]
@@ -521,6 +569,99 @@ class C
     Assert.Equal<string list>([ "try" ], firedText source (suggestCode "CR0166" source))
 
     Assert.Contains("if (!int.TryParse(s, CultureInfo.InvariantCulture, out v)) { v = 0; }", fixAll "CR0166" source)
+
+[<Fact>]
+let ``CR0166 keeps the configured default port when the setting is bad: the parse goes through a fresh variable`` () =
+    let source =
+        """
+using System;
+class ServerConfig
+{
+    int retries = 3;
+    public int Port(string s)
+    {
+        int port = 8080;
+        try { port = int.Parse(s); } catch { }
+        return port;
+    }
+    public void Retries(string s)
+    {
+        try { retries = int.Parse(s); } catch (Exception) { Console.WriteLine("bad retries, keeping " + retries); }
+    }
+    public int Timeout(string s, int parsed)
+    {
+        int timeout = 30;
+        try
+        {
+            timeout = int.Parse(s);
+        }
+        catch (Exception)
+        {
+            Console.WriteLine("bad timeout");
+        }
+        return timeout + parsed;
+    }
+}
+"""
+
+    let fired = suggestCode "CR0166" source
+    Assert.Equal(3, fired.Length)
+    Assert.All(fired, (fun s -> Assert.NotEmpty s.Fixes))
+    let fixedSource = fixAll "CR0166" source
+    Assert.Contains("int port = 8080;\n        if (int.TryParse(s, out var parsed)) port = parsed;\n", fixedSource)
+
+    Assert.Contains(
+        "if (int.TryParse(s, out var parsed)) retries = parsed; else { Console.WriteLine(\"bad retries, keeping \" + retries); }",
+        fixedSource
+    )
+
+    Assert.Contains(
+        "        if (int.TryParse(s, out var parsed2)) timeout = parsed2;\n        else\n        {\n            Console.WriteLine(\"bad timeout\");\n        }\n        return timeout + parsed;",
+        fixedSource
+    )
+
+[<Fact>]
+let ``CR0166 under an if with an else keeps that else for the outer if`` () =
+    // a bare `if (int.TryParse(…)) port = parsed;` as the `if`'s body would
+    // take `else port = 9090;` for its own: a bad setting would then fall
+    // back to 9090, and no setting at all would keep 8080
+    let source =
+        """
+using System;
+class ServerConfig
+{
+    public int Port(bool useSetting, string s)
+    {
+        int port = 8080;
+        if (useSetting)
+            try { port = int.Parse(s); } catch (Exception) { }
+        else
+            port = 9090;
+        return port;
+    }
+    public int Retries(bool useSetting, string s)
+    {
+        int retries = 3;
+        if (useSetting)
+            try { retries = int.Parse(s); } catch (Exception) { Console.WriteLine("bad retries"); }
+        else
+            retries = 5;
+        return retries;
+    }
+}
+"""
+
+    let fixedSource = fixAll "CR0166" source
+
+    Assert.Contains(
+        "        if (useSetting)\n            { if (int.TryParse(s, out var parsed)) port = parsed; }\n        else\n            port = 9090;",
+        fixedSource
+    )
+
+    Assert.Contains(
+        "            { if (int.TryParse(s, out var parsed)) retries = parsed; else { Console.WriteLine(\"bad retries\"); } }\n        else\n            retries = 5;",
+        fixedSource
+    )
 
 // ---- CR0167 / CR0168 ----
 

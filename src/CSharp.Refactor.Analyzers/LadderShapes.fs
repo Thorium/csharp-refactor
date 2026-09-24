@@ -207,8 +207,7 @@ let private listPatterns (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCon
                             // a binder's other reads of the same index stay as reads of the binder? no: keep it simple,
                             // the remaining reads stay `xs[i]` (the subject is still in scope)
                             let positions =
-                                [ 0 .. length - 1 ]
-                                |> List.map (fun i ->
+                                List.init (max 0 length) (fun i ->
                                     match binders |> List.tryFind (fun (_, bi, _) -> bi = i) with
                                     | Some(_, _, name) -> "var " + name
                                     | None -> "_")

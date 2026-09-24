@@ -17,7 +17,9 @@
 /// or `cd.AddOrUpdate(k, v, (_, _) => v);` — with the same key text; the
 /// key is a pure atom (or a tuple of atoms); the value type is not
 /// `Lazy<T>` (CR0050's subject) nor a delegate (the lambda would be
-/// ambiguous with the value overload) nor `Task` (the note alone); the
+/// ambiguous with the value overload); a `Task` value is fixed too — the
+/// original store kept a faulting task for good already, `GetOrAdd`
+/// changes only the race (CR0050 notes the failure caching on it); the
 /// factory captures no `ref struct`, `ref`/`out` parameter; the message
 /// carries the `Lazy<T>` hint when the factory calls something (two
 /// racing factories still both run; only the stored value is one).
@@ -182,14 +184,9 @@ let private checkThenStore (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                             || Text.mentionsName binder factory
                         then
                             None
-                        elif kind = "Task" then
-                            Some(
-                                Suggestion.note
-                                    GetOrAddCode
-                                    "A check-then-store on a ConcurrentDictionary races: two threads miss and both store. GetOrAdd would close it, but with a Task value the first failure would be cached for good (CR0050) — consider a Lazy<Task<T>> with retry"
-                                    ifs.Condition.Span
-                            )
                         else
+                            // a Task value takes the fix as well: `cd[k] = v` kept a
+                            // faulting task for good already; only the race changes
                             let callsSomething =
                                 factory.DescendantNodesAndSelf()
                                 |> Seq.exists (fun x ->

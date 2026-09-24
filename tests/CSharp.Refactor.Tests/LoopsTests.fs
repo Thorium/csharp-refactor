@@ -367,3 +367,30 @@ class C
 """
 
     Assert.Equal<string list>([ "var label = tag + \":\";" ], suggestCode "CR0177" concat |> firedText concat)
+
+[<Fact>]
+let ``CR0177 keeps a division by -1 in the loop: the lowest balance would throw once for an empty ledger`` () =
+    let source =
+        """
+using System;
+class Ledger
+{
+    void Report(int[] days, int balance, double rate)
+    {
+        foreach (var d in days)
+        {
+            var inverted = balance / -1;
+            var remainder = balance % -1;
+            var quarter = balance / 4;
+            var flipped = rate / -1.0;
+            Console.WriteLine(inverted + remainder + quarter + flipped + d);
+        }
+    }
+}
+"""
+
+    // int.MinValue / -1 throws even unchecked; a floating divisor never does
+    Assert.Equal<string list>(
+        [ "var quarter = balance / 4;"; "var flipped = rate / -1.0;" ],
+        suggestCode "CR0177" source |> firedText source
+    )

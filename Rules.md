@@ -126,7 +126,7 @@ a section, and its category and default state match the code.
 | CR0161 | Correctness | v | | v | | `_readonlyCounter.Bump();`, `Prop.Bump();`, `list[0].Bump();`, a `foreach` variable or an `in` parameter — a mutating struct method on a receiver the compiler copies first | note: the call changes the copy, the original stays |
 | CR0162 | Correctness | v | | v | | `new Timer(cb, null, 0, 1000);` as a statement, or a local timer that never leaves the method | note: nothing references the timer once the method returns, the collector takes it and its callbacks stop |
 | CR0163 | Correctness | v | | v | | `await _gate.WaitAsync(); … _gate.Release();` (`Semaphore`/`Mutex.WaitOne`, `ReaderWriterLockSlim.Enter*Lock`) with statements between them and no `try` | `try { … } finally { _gate.Release(); }` |
-| CR0164 | Correctness | v | | | | `if (_cache == null) _cache = new X(); return _cache;`, `_cache ??= new X()` on a `static` reference-typed field outside a `lock` | `return LazyInitializer.EnsureInitialized(ref _cache, () => new X());` |
+| CR0164 | Correctness | v | | | | `if (_cache == null) _cache = new X(); return _cache;`, `_cache ??= new X()` on a `static` reference-typed field outside a `lock` | `return LazyInitializer.EnsureInitialized(ref _cache, () => new X());`; a factory that may answer null: `Interlocked.CompareExchange(ref _cache, Load(), null)` |
 | CR0165 | Correctness | v | | v | CA2200 | `catch (Exception ex) { throw new SyncException("failed"); }` — the wrapper has a `(…, Exception)` constructor and the caught exception is dropped | `throw new SyncException("failed", ex);` (an unnamed catch gains `ex`) |
 | CR0166 | Performance | v | | | | `try { v = int.Parse(s); } catch (FormatException) { v = -1; }`, `try { return int.Parse(s); } catch { return 0; }` | `if (!int.TryParse(s, out v)) { v = -1; }`, `return int.TryParse(s, out var parsed) ? parsed : 0;` |
 | CR0167 | Correctness | v | | | | `a == b`, `a != b` on `float`/`double`/`Half` operands, neither a literal, a constant or a rounded value | note: compare against a tolerance |
@@ -695,7 +695,9 @@ the store — `cd[k] = v;`, `cd.TryAdd(k, v);` or `cd.AddOrUpdate(k, v, (_,
 _) => v);` — with the same key text; the key is a pure atom or a tuple of
 atoms; the value type is not `Lazy<T>` (CR0050's subject) nor a delegate
 (the lambda would be ambiguous with the value overload); a `Task` value
-gets the note alone (the first failure would be cached, CR0050); the
+takes the fix too — the store kept a faulting task for good already, and
+`GetOrAdd` changes only the race (CR0050 then notes the cached failure on
+the result); the
 factory mentions neither the binder nor a `ref`/`out` parameter or a `ref
 struct` local (a lambda cannot capture them); the message carries the
 `Lazy<T>` hint when the factory calls something — two racing factories
@@ -759,7 +761,10 @@ t })` combine one task; only a literal one-element collection matches (a
 variable holding one task is out of scope). The direct form changes the
 result type (`Task<T[]>` → `Task<T>`), so the editor offers it and the
 sweep does not; for `WaitAll` the element alone would drop the wait, so
-the editor's form is `t.Wait()`. F# twin: FR0079. Yields to CA1842/CA1843.
+the editor's form is `t.Wait()`. `Task.WhenAny`/`Task.WaitAny` of one
+task are not reported: `WhenAny`'s task never faults and `WaitAny` returns
+an index, where `await t` and `t.Wait()` would throw on a faulted task.
+F# twin: FR0079. Yields to CA1842/CA1843.
 
 ### CR0055 — correctness
 
@@ -2119,14 +2124,23 @@ see the reference before the object behind it is complete.
 exactly one, and a following `return _cache;` folds in: `return
 LazyInitializer.EnsureInitialized(ref _cache, () => new X());`. Guards:
 the field is `static`, not `volatile`, `readonly` or `[ThreadStatic]`;
-the assignment is the whole `if` body; the initialising expression is
-provably non-null (`EnsureInitialized` throws on a null factory result)
-— a `new`, an array, collection or interpolated string, a string literal,
-a `??` with such a right side, or an expression whose flow state is
-not-null under `#nullable enable`; the expression does not mention the
-field; not inside a `lock` or a static constructor (both already
-serialise); `System.Threading.LazyInitializer` resolves (its `using` is
-added). Instance fields are not reported: a per-instance cache is usually
+the assignment is the whole `if` body; `EnsureInitialized` only for an
+initialising expression provably non-null (it throws on a null factory
+result) — a `new`, an array, collection or interpolated string, a string
+literal, a `??` with such a right side, or an expression whose flow state
+is not-null under `#nullable enable`. Any other expression (`_settings =
+Store.Load()`, a loader that may answer null) takes the null-exact
+spelling: `if (_settings == null) Interlocked.CompareExchange(ref
+_settings, Store.Load(), null); return _settings;` — a null result leaves
+the field null and the next call loads again, as the original did. A
+`_x ??= Load();` statement becomes `if (_x is null)
+Interlocked.CompareExchange(ref _x, Load(), null);` (only directly in a
+block, where the new `if` cannot capture an `else`), and a `??=` whose
+value is used becomes `_x ?? Interlocked.CompareExchange(ref _x, Load(),
+null) ?? _x`. The expression does not mention the field; not inside a
+`lock` or a static constructor (both already serialise);
+`System.Threading.LazyInitializer` resolves (the `using System.Threading;`
+is added). Instance fields are not reported: a per-instance cache is usually
 confined to one thread. F#'s `lazy` is the twin.
 
 ### CR0165 — correctness
@@ -2175,10 +2189,19 @@ int.Parse(parts[1]); } catch { v = 0; }` also caught the index out of
 range that `TryParse` would let escape;
 the catch variable, if named, is not read (the message would be lost). On
 the failure path `TryParse` sets the target to `default` where `Parse`
-left it untouched, so a local keeps the fix only when it was declared
-without a value (or with `default`/`0`/`null`), the catch assigns it, or
-the catch leaves (`return`/`throw`/`continue`); a field only when the
-catch assigns it; for the `return` form the catch is exactly `return
+left it untouched, so a local keeps the `out v` form only when it was
+declared without a value (or with `default`/`0`/`null`), the catch assigns
+it, or the catch leaves (`return`/`throw`/`continue`); a field only when
+the catch assigns it. Otherwise — `int port = 8080; try { port =
+int.Parse(s); } catch { }`, or a field the catch does not assign — the
+parse goes through a fresh local and the target is written only on
+success: `if (int.TryParse(s, out var parsed)) port = parsed;`, with `else
+{ …catch body… }` for a catch that does something; the name is the first
+of `parsed`, `parsed2`, … that nothing in scope or in the member spells,
+skipping one per earlier `try` of the member (two `out var` in one block
+would clash). A `try` that is the unbraced body of an `if` with an
+`else` gets its replacement in braces, `{ if (…) …; }`, so the `else`
+stays the outer `if`'s. For the `return` form the catch is exactly `return
 expr;` with `expr` pure. Any other `try` whose catch names
 `FormatException` around a `Parse` call is a note. A candidate for the F#
 side too.
@@ -2406,8 +2429,11 @@ line, a statement of the loop body reached through blocks, `if`/`else`,
 lambda, a local function or a nested loop (the innermost loop is the
 target); the initializer is literals, `nameof`, reads of locals,
 parameters, `const` and `readonly` fields (outside a constructor),
-built-in operators over those (`/` and `%` by a non-zero literal only: an
-empty loop never divided), `?:`, and an interpolated string whose holes
+built-in operators over those (`/` and `%` by a non-zero literal, negated
+or not, only: an empty loop never divided; never by an integral `-1`,
+since `int.MinValue / -1` and `int.MinValue % -1` throw OverflowException
+even unchecked — a floating or `decimal` divisor may be any non-zero
+literal), `?:`, and an interpolated string whose holes
 are such reads of primitives or strings; every local or parameter it reads
 is assigned nowhere in the member but its own declaration, and declared
 outside the loop; the hoisted name is spelled nowhere in the member
@@ -2433,12 +2459,18 @@ parameter, a `const` or an enum member; a `Select` of a column or an
 anonymous object of columns; a column an instance auto-property of the
 lambda's parameter, not `[NotMapped]`. The first stage that does not
 qualify stays in memory after the copy. A sweep moves only comparisons
-SQL answers as C# does — integers, `bool`, enums, `Guid`, not nullable,
-and `== null`/`!= null` on any column. A string compares under the
+SQL answers as C# does — integers, `bool`, enums, `Guid`, and `== null`/`!=
+null` on any column. Such a column nullable counts too when `==`, `<`,
+`<=`, `>` or `>=` compares it with a value that cannot be null (a
+non-nullable literal, `const`, local, parameter or enum member) under no
+`!`: `o.ParentId == parentId` is false in C# and unknown in SQL on the NULL
+row, which both drop. A string compares under the
 column's collation (case-insensitive on SQL Server's default), a
 `decimal` or `DateTime` value is rounded to the column's scale, a floating
 value is the server's, a nullable column is NULL-unknown under `!=` or `!`
-where C# says true: those the editor offers and a sweep leaves as a note.
+where C# says true, and may be NULL on both sides of a comparison with
+another column or a nullable value: those the editor offers and a sweep
+leaves as a note.
 Guards: the captured locals and parameters are written nowhere after
 their declaration (the in-memory stage read them when the result was
 enumerated, the query reads them when it runs); no comment or directive

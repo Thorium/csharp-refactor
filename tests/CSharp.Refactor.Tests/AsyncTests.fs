@@ -216,6 +216,36 @@ class ExportJob
     Assert.Equal(normalize source, fixAll "CR0054" source)
 
 [<Fact>]
+let ``CR0054 leaves WhenAny and WaitAny of one upload: a failed upload must not start throwing at the caller`` () =
+    let source =
+        """
+using System.Threading.Tasks;
+interface IUploader { Task UploadAsync(string path); }
+class BackupJob
+{
+    readonly IUploader uploader;
+    public BackupJob(IUploader uploader) { this.uploader = uploader; }
+    public async Task<bool> FinishedAsync(string path)
+    {
+        var upload = uploader.UploadAsync(path);
+        var first = await Task.WhenAny(new[] { upload });
+        return first == upload;
+    }
+    public int WaitFor(string path)
+    {
+        var upload = uploader.UploadAsync(path);
+        return Task.WaitAny(new[] { upload });
+    }
+    public Task WaitAllFor(string path) => Task.WhenAll(new[] { uploader.UploadAsync(path) });
+}
+"""
+
+    Assert.Equal<string list>(
+        [ "Task.WhenAll(new[] { uploader.UploadAsync(path) })" ],
+        firedText source (suggestCode "CR0054" source)
+    )
+
+[<Fact>]
 let ``CR0055 leaves CancellationToken.None in a catch block: a cancelled payment must still roll back`` () =
     let source =
         """
@@ -391,7 +421,7 @@ class C
     )
 
     Assert.Contains("plain[k] = v;", fixedSource)
-    Assert.Contains("tasks[k] = t;", fixedSource)
+    Assert.Contains("t = tasks.GetOrAdd(k, _ => Task.FromResult(1));", fixedSource)
     Assert.Contains("Lazy", (fired |> List.find (fun s -> s.Message.Contains "both factories")).Message)
 
     Assert.Equal<string list>(
@@ -400,7 +430,9 @@ class C
     )
 
 [<Fact>]
-let ``CR0049 only notes a check-then-store of token tasks: GetOrAdd would cache a failed token fetch for good`` () =
+let ``CR0049 closes the race on a token-task cache: the store kept a failed fetch already, and CR0050 still says so``
+    ()
+    =
     let source =
         """
 using System.Collections.Concurrent;
@@ -425,8 +457,14 @@ class TokenCache
 
     let fired = suggestCode "CR0049" source
     Assert.Single fired |> ignore
-    Assert.Empty(fired.Head.Fixes)
-    Assert.Equal(normalize source, fixAll "CR0049" source)
+    Assert.NotEmpty(fired.Head.Fixes)
+    let fixedSource = fixAll "CR0049" source
+    Assert.Contains("token = tokens.GetOrAdd(tenant, _ => client.FetchTokenAsync(tenant));", fixedSource)
+
+    Assert.Equal<string list>(
+        [ "tokens.GetOrAdd(tenant, _ => client.FetchTokenAsync(tenant))" ],
+        firedText fixedSource (suggestCode "CR0050" fixedSource)
+    )
 
 [<Fact>]
 let ``CR0050 leaves a GetOrAdd whose factory only throws: an unknown country caches no failed gateway`` () =

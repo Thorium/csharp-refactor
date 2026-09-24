@@ -19,11 +19,16 @@
 /// - a column is an instance auto-property of the lambda's parameter, not
 ///   `[NotMapped]` — a computed property has no column to translate to.
 /// A sweep moves only comparisons SQL answers as C# does: integers, `bool`,
-/// enums and `Guid`, not nullable, and `== null`/`!= null` on any column.
+/// enums and `Guid`, and `== null`/`!= null` on any column. Such a column
+/// nullable counts too when `==`, `<`, `<=`, `>` or `>=` compares it with a
+/// value that cannot be null (a non-nullable literal, `const`, local,
+/// parameter or enum member) and no `!` is above it: the NULL row is false
+/// in C# and unknown in SQL, dropped by both.
 /// A string compares under the column's collation (case-insensitive on SQL
 /// Server's default), a `decimal` or `DateTime` literal is rounded to the
 /// column's scale, a floating value is the server's, and a nullable column
-/// is NULL-unknown under `!=` or `!` where C# says true: those the editor
+/// is NULL-unknown under `!=` or `!` where C# says true, and NULL on both
+/// sides of a column-to-column or nullable-value comparison: those the editor
 /// offers and a sweep leaves as a note. The captured locals and parameters
 /// are written nowhere after their declaration — the in-memory stage read
 /// them when the result was enumerated, the query reads them when it runs.
@@ -193,7 +198,34 @@ let private builtinOperator (model: SemanticModel) (b: BinaryExpressionSyntax) =
 let private isNullLiteral (e: ExpressionSyntax) =
     e.IsKind SyntaxKind.NullLiteralExpression
 
-let private comparison (model: SemanticModel) (param: IParameterSymbol) (b: BinaryExpressionSyntax) =
+/// A nullable column of an exact type against a value that cannot be null:
+/// on the NULL row C# answers false and SQL unknown, and a `Where` drops the
+/// row either way — unless `!=` (C#'s true) or a `!` above (C#'s false
+/// turned true, SQL's unknown kept) tells them apart.
+let private columnAgainstValue
+    (model: SemanticModel)
+    (negated: bool)
+    (b: BinaryExpressionSyntax)
+    (c: IPropertySymbol)
+    (v: ExpressionSyntax)
+    =
+    let nonNullValue =
+        not (isNullLiteral v)
+        && (match model.GetTypeInfo(v).Type with
+            | null -> false
+            | t -> t.IsValueType && (nullableInner t).IsNone)
+
+    match nullableInner c.Type with
+    | ValueSome inner when
+        exactType inner
+        && nonNullValue
+        && not negated
+        && not (b.IsKind SyntaxKind.NotEqualsExpression)
+        ->
+        Some Exact
+    | _ -> columnFidelity c.Type
+
+let private comparison (model: SemanticModel) (param: IParameterSymbol) (negated: bool) (b: BinaryExpressionSyntax) =
     let left = column model param b.Left
     let right = column model param b.Right
 
@@ -203,24 +235,25 @@ let private comparison (model: SemanticModel) (param: IParameterSymbol) (b: Bina
     | None, Some c when isNullLiteral b.Left && scalar c.Type -> Some Exact
     | _ when not (builtinOperator model b) -> None
     | Some l, Some r -> combine (columnFidelity l.Type) (columnFidelity r.Type)
-    | Some c, None when value model param b.Right -> columnFidelity c.Type
-    | None, Some c when value model param b.Left -> columnFidelity c.Type
+    | Some c, None when value model param b.Right -> columnAgainstValue model negated b c b.Right
+    | None, Some c when value model param b.Left -> columnAgainstValue model negated b c b.Left
     | _ -> None
 
 /// A `Where` body: comparisons and `bool` columns under `&&`, `||`, `!`.
 /// Under a `!`, a nullable column's NULL turns unknown into true in C# and
-/// stays unknown in SQL: `Near` is as far as it goes.
-let rec private predicate (model: SemanticModel) (param: IParameterSymbol) (e: ExpressionSyntax) =
+/// stays unknown in SQL: `Near` is as far as it goes, so `negated` rides
+/// down from the first `!`.
+let rec private predicate (model: SemanticModel) (param: IParameterSymbol) (negated: bool) (e: ExpressionSyntax) =
     match e with
-    | :? ParenthesizedExpressionSyntax as p -> predicate model param p.Expression
+    | :? ParenthesizedExpressionSyntax as p -> predicate model param negated p.Expression
     | :? PrefixUnaryExpressionSyntax as u when u.IsKind SyntaxKind.LogicalNotExpression ->
-        predicate model param u.Operand
+        predicate model param true u.Operand
     | :? BinaryExpressionSyntax as b when
         b.IsKind SyntaxKind.LogicalAndExpression
         || b.IsKind SyntaxKind.LogicalOrExpression
         ->
-        combine (predicate model param b.Left) (predicate model param b.Right)
-    | :? BinaryExpressionSyntax as b when comparisons.Contains(b.Kind()) -> comparison model param b
+        combine (predicate model param negated b.Left) (predicate model param negated b.Right)
+    | :? BinaryExpressionSyntax as b when comparisons.Contains(b.Kind()) -> comparison model param negated b
     | e ->
         match column model param e with
         | Some c when c.Type.SpecialType = SpecialType.System_Boolean -> Some Exact
@@ -270,7 +303,7 @@ let private stageFidelity (model: SemanticModel) (stage: InvocationExpressionSyn
     match Linq.enumerableCall model stage, lambdaOf model stage with
     | Some _, Some(param, body) ->
         match Linq.nameOf stage with
-        | "Where" -> predicate model param body
+        | "Where" -> predicate model param false body
         | "Select" -> projection model param body
         | _ -> None
     | _ -> None

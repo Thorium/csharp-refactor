@@ -146,3 +146,32 @@ class C
         Assert.Contains("collation", s.Message)
 
     Assert.Equal(normalize source, normalize (fixAll "CR0178" source))
+
+[<Fact>]
+let ``the child orders of one parent are filtered in the query: a nullable id compared with a value drops the NULL row in both``
+    ()
+    =
+    let source =
+        prelude
+        + """
+class C
+{
+    IQueryable<Order> Orders => new List<Order>().AsQueryable();
+    IEnumerable<Order> A(int parentId) => Orders.ToList().Where(o => o.Parent == parentId);
+    IEnumerable<Order> B() => Orders.ToList().Where(o => o.Parent >= 3 && o.Open);
+    IEnumerable<Order> D() => Orders.ToList().Where(o => !(o.Parent > 3));
+    IEnumerable<Order> E(int? parentId) => Orders.ToList().Where(o => o.Parent == parentId);
+    IEnumerable<Order> F() => Orders.ToList().Where(o => o.Parent != 3);
+    IEnumerable<Order> G() => Orders.ToList().Where(o => o.Parent == o.Id);
+}
+"""
+
+    let fixedSource = fixAll "CR0178" source
+    Assert.Contains("Orders.Where(o => o.Parent == parentId).ToList();", fixedSource)
+    Assert.Contains("Orders.Where(o => o.Parent >= 3 && o.Open).ToList();", fixedSource)
+    // under `!` the NULL row is C#'s true and SQL's unknown; a nullable value may be null;
+    // `!=` keeps the NULL row in C#; a column on both sides may be NULL on both
+    Assert.Contains("Orders.ToList().Where(o => !(o.Parent > 3));", fixedSource)
+    Assert.Contains("Orders.ToList().Where(o => o.Parent == parentId);", fixedSource)
+    Assert.Contains("Orders.ToList().Where(o => o.Parent != 3);", fixedSource)
+    Assert.Contains("Orders.ToList().Where(o => o.Parent == o.Id);", fixedSource)
