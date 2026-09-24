@@ -523,7 +523,7 @@ let private frozenCollections (tree: SyntaxTree) (model: SemanticModel) (ctx: Ru
                                             field
                                         )
                                         ->
-                                        Some id
+                                        Some(id :> SyntaxNode)
                                     | _ -> None)
                                 |> List.ofSeq
 
@@ -563,7 +563,7 @@ let private frozenCollections (tree: SyntaxTree) (model: SemanticModel) (ctx: Ru
                             | ValueSome uses -> uses |> List.forall (fun (id, _) -> isRead id)
 
                         let allReads =
-                            reads |> List.forall (fun id -> isRead id)
+                            reads |> List.forall isRead
                             && (effective field = Accessibility.Private || elsewhereReads ())
 
                         if not allReads || reads.IsEmpty then
@@ -657,7 +657,7 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                                 id.Identifier.ValueText = field.Name
                                 && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, field)
                                 ->
-                                Some id
+                                Some(id :> SyntaxNode)
                             | _ -> None)
                         |> List.ofSeq
 
@@ -677,7 +677,7 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                     // the other parts of a partial type see the field too
                     let onlyLocked =
                         not uses.IsEmpty
-                        && uses |> List.forall (fun id -> lockOperand id)
+                        && uses |> List.forall lockOperand
                         && (field.ContainingType.DeclaringSyntaxReferences.Length <= 1
                             || (match usesElsewhere tree model ctx field with
                                 | ValueSome elsewhere -> elsewhere |> List.forall (fun (id, _) -> lockOperand id)
