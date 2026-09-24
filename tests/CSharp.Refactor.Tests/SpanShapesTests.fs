@@ -69,6 +69,31 @@ class C
     Assert.Contains("string.Concat(s.AsSpan(0, 2), \"x\")", fixedSource)
     Assert.Contains("using System;", fixedSource)
 
+[<Fact>]
+let ``CR0174 keeps a Substring handed to a domain type's Parse, whose string overload normalises the SKU`` () =
+    // a user type's string and span overloads are its author's; here only the string one trims and upper-cases
+    let source =
+        """
+using System;
+namespace Catalog
+{
+    sealed class Sku
+    {
+        public string Code { get; }
+        Sku(string code) { Code = code; }
+        public static Sku Parse(string s) => new Sku(s.Trim().ToUpperInvariant());
+        public static Sku Parse(ReadOnlySpan<char> s) => new Sku(s.ToString());
+    }
+
+    class OrderLineReader
+    {
+        Sku ReadSku(string line) => Sku.Parse(line.Substring(0, 8));
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0174" source)
+
 // ---- CR0175 ----
 
 [<Fact>]

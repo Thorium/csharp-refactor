@@ -164,6 +164,90 @@ class C
     Assert.Contains("Task K(CancellationToken ct) => SaveAsync(ct);", fixedSource)
     Assert.Contains("Task L(CancellationToken ct) => SaveAsync(ct);", fixedSource)
 
+[<Fact>]
+let ``CR0044 leaves a background receipt mail whose started body catches its own failure: the fault is logged, not lost``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Threading.Tasks;
+interface IMailer { Task SendReceiptAsync(string email, string orderId); }
+interface IErrorLog { void Write(Exception ex); }
+class CheckoutService
+{
+    readonly IMailer mailer;
+    readonly IErrorLog errors;
+    public CheckoutService(IMailer mailer, IErrorLog errors) { this.mailer = mailer; this.errors = errors; }
+    public void CompleteOrder(string orderId, string email)
+    {
+        Task.Run(async () =>
+        {
+            try { await mailer.SendReceiptAsync(email, orderId); }
+            catch (Exception ex) { errors.Write(ex); }
+        });
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0044" source)
+
+[<Fact>]
+let ``CR0054 never sweeps WhenAll of one download: the array's Length would silently become the text's`` () =
+    let source =
+        """
+using System.Threading.Tasks;
+interface IDocumentStore { Task<string> DownloadAsync(string id); }
+class ExportJob
+{
+    readonly IDocumentStore store;
+    public ExportJob(IDocumentStore store) { this.store = store; }
+    public async Task<int> CountExportedAsync(string id)
+    {
+        var documents = await Task.WhenAll(new[] { store.DownloadAsync(id) });
+        return documents.Length;
+    }
+}
+"""
+
+    let fired = suggestCode "CR0054" source
+    Assert.Single fired |> ignore
+    Assert.All(fired.Head.Fixes, (fun f -> Assert.True f.EditorOnly))
+    Assert.Equal(normalize source, fixAll "CR0054" source)
+
+[<Fact>]
+let ``CR0055 leaves CancellationToken.None in a catch block: a cancelled payment must still roll back`` () =
+    let source =
+        """
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+interface ILedger
+{
+    Task PostAsync(Guid batch, decimal amount, CancellationToken ct);
+    Task RollbackAsync(Guid batch, CancellationToken ct);
+}
+class PaymentBatch
+{
+    readonly ILedger ledger;
+    public PaymentBatch(ILedger ledger) { this.ledger = ledger; }
+    public async Task CommitAsync(Guid batch, decimal amount, CancellationToken ct)
+    {
+        try
+        {
+            await ledger.PostAsync(batch, amount, ct);
+        }
+        catch (Exception)
+        {
+            await ledger.RollbackAsync(batch, CancellationToken.None);
+            throw;
+        }
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0055" source)
+
 // ---- CR0046 ----
 
 [<Fact>]
@@ -315,6 +399,55 @@ class C
         firedText source (suggestCode "CR0050" source)
     )
 
+[<Fact>]
+let ``CR0049 only notes a check-then-store of token tasks: GetOrAdd would cache a failed token fetch for good`` () =
+    let source =
+        """
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
+interface ITokenClient { Task<string> FetchTokenAsync(string tenant); }
+class TokenCache
+{
+    readonly ConcurrentDictionary<string, Task<string>> tokens = new();
+    readonly ITokenClient client;
+    public TokenCache(ITokenClient client) { this.client = client; }
+    public Task<string> GetTokenAsync(string tenant)
+    {
+        if (!tokens.TryGetValue(tenant, out var token))
+        {
+            token = client.FetchTokenAsync(tenant);
+            tokens[tenant] = token;
+        }
+        return token;
+    }
+}
+"""
+
+    let fired = suggestCode "CR0049" source
+    Assert.Single fired |> ignore
+    Assert.Empty(fired.Head.Fixes)
+    Assert.Equal(normalize source, fixAll "CR0049" source)
+
+[<Fact>]
+let ``CR0050 leaves a GetOrAdd whose factory only throws: an unknown country caches no failed gateway`` () =
+    let source =
+        """
+using System;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
+interface IPaymentGateway { Task ChargeAsync(decimal amount); }
+class GatewayRegistry
+{
+    readonly ConcurrentDictionary<string, Lazy<IPaymentGateway>> gateways = new();
+    public void Register(string country, Func<IPaymentGateway> create) =>
+        gateways[country] = new Lazy<IPaymentGateway>(create);
+    public IPaymentGateway For(string country) =>
+        gateways.GetOrAdd(country, c => throw new NotSupportedException("No payment gateway registered for " + c)).Value;
+}
+"""
+
+    Assert.Empty(suggestCode "CR0050" source)
+
 // ---- CR0051 / CR0052 ----
 
 [<Fact>]
@@ -365,6 +498,45 @@ class C
         ],
         firedText source (suggestCode "CR0052" source)
     )
+
+[<Fact>]
+let ``CR0051 leaves a using that returns Task.FromResult: the template is read before the file closes`` () =
+    let source =
+        """
+using System.IO;
+using System.Threading.Tasks;
+interface ITemplateSource { Task<string> LoadAsync(string path); }
+class FileTemplateSource : ITemplateSource
+{
+    public Task<string> LoadAsync(string path)
+    {
+        using var reader = File.OpenText(path);
+        return Task.FromResult(reader.ReadToEnd());
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0051" source)
+
+[<Fact>]
+let ``CR0052 leaves a static flush handler on ProcessExit: it pins no audit trail instance`` () =
+    let source =
+        """
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+class AuditTrail
+{
+    static readonly ConcurrentQueue<string> pending = new();
+    readonly string user;
+    static AuditTrail() { AppDomain.CurrentDomain.ProcessExit += FlushPending; }
+    public AuditTrail(string user) { this.user = user; }
+    public void Record(string action) => pending.Enqueue(user + ": " + action);
+    static void FlushPending(object sender, EventArgs e) => File.AppendAllLines("audit.log", pending);
+}
+"""
+
+    Assert.Empty(suggestCode "CR0052" source)
 
 // ---- CR0041 ----
 

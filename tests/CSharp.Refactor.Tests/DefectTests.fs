@@ -369,6 +369,29 @@ class C
     Assert.Contains("throw new InvalidOperationException(\"no inner overload here?\", ex);", fixedSource)
     Assert.Contains("throw new SyncException(\"failed: \" + ex.Message); }", fixedSource)
 
+[<Fact>]
+let ``CR0165 leaves a domain exception without an inner-exception constructor alone`` () =
+    let source =
+        """
+using System;
+class PaymentDeclinedException : Exception
+{
+    public PaymentDeclinedException(string reason) : base(reason) { }
+}
+class PaymentGateway
+{
+    public void Charge(string cardToken, decimal amount)
+    {
+        try { Send(cardToken, amount); }
+        catch (TimeoutException) { throw new PaymentDeclinedException("gateway did not answer"); }
+    }
+    void Send(string cardToken, decimal amount) { }
+}
+"""
+
+    // no (string, Exception) constructor: there is nowhere to put the caught one
+    Assert.Empty(suggestCode "CR0165" source)
+
 // ---- CR0166 ----
 
 [<Fact>]
@@ -529,6 +552,53 @@ class C
     )
 
     Assert.Contains("(double)sum / count", applyFix source division.Head.Fixes.Head)
+
+[<Fact>]
+let ``CR0167 leaves a computed charge compared against a named zero constant alone`` () =
+    let source =
+        """
+class ShippingQuote
+{
+    const double FreeShipping = 0.0;
+    public bool IsFree(double weightKg, double ratePerKg) => weightKg * ratePerKg == FreeShipping;
+}
+"""
+
+    // a product is exactly zero when a factor is: the constant is the sentinel
+    Assert.Empty(suggestCode "CR0167" source)
+
+[<Fact>]
+let ``CR0168 never casts a pallet count in a sweep, the whole-number division may be meant`` () =
+    let source =
+        """
+class PalletPlanner
+{
+    public double FullPallets(int cartons, int cartonsPerPallet)
+    {
+        double full = cartons / cartonsPerPallet;
+        return full;
+    }
+}
+"""
+
+    Assert.Single(suggestCode "CR0168" source) |> ignore
+    Assert.Equal(normalize source, fixAll "CR0168" source)
+
+[<Fact>]
+let ``CR0168 notes a page count rounded up after the integer division already truncated it`` () =
+    // 21 items at 10 per page: Ceiling(21 / 10) is Ceiling(2) = 2 pages, not 3.
+    // Floor and Truncate agree with the truncation; Ceiling and Round do not
+    let source =
+        """
+using System;
+class Pager
+{
+    public int Pages(int items, int pageSize) => (int)MathF.Ceiling(items / pageSize);
+    public int Whole(int items, int pageSize) => (int)Math.Floor((double)(items / pageSize));
+}
+"""
+
+    Assert.Equal<string list>([ "items / pageSize" ], firedText source (suggestCode "CR0168" source))
 
 // ---- CR0169 ----
 

@@ -204,6 +204,28 @@ class C
         texts
     )
 
+[<Fact>]
+let ``CR0025 leaves an audit trail grown with ImmutableList.Add alone: a persistent list shares structure`` () =
+    // only ImmutableArray<T>.Add copies the whole array; ImmutableList<T>.Add is O(log n)
+    let source =
+        """
+using System.Collections.Generic;
+using System.Collections.Immutable;
+class AuditTrail
+{
+    ImmutableList<string> Record(ImmutableList<string> trail, IEnumerable<string> events)
+    {
+        foreach (var e in events)
+        {
+            trail = trail.Add(e);
+        }
+        return trail;
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0025" source)
+
 // ---- CR0023 ----
 
 [<Fact>]

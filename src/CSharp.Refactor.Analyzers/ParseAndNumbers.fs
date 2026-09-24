@@ -505,7 +505,12 @@ let private integerDivisions (tree: SyntaxTree) (model: SemanticModel) : Suggest
                     match a.Parent.Parent with
                     | :? InvocationExpressionSyntax as inv ->
                         match inv.Expression with
-                        | :? MemberAccessExpressionSyntax as ma -> roundingCalls.Contains ma.Name.Identifier.ValueText
+                        // only a call that truncates agrees with the integer division:
+                        // `Ceiling(items / pageSize)` is the page-count bug, `Round` rounds
+                        // a quotient already truncated
+                        | :? MemberAccessExpressionSyntax as ma ->
+                            ma.Name.Identifier.ValueText = "Floor"
+                            || ma.Name.Identifier.ValueText = "Truncate"
                         | _ -> false
                     | _ -> false
                 | _ -> false

@@ -32,6 +32,25 @@ let ``an empty attribute argument list goes`` () =
     Assert.Contains("[Serializable]\n", fixAll "CR0141" source)
 
 [<Fact>]
+let ``CR0141 keeps an attribute's parentheses when they hold the arguments of a build flavour`` () =
+    // without STRICT_API the argument list is empty, but dropping it would drop the #if
+    let source =
+        """
+using System;
+class OrderService
+{
+    [Obsolete(
+#if STRICT_API
+        "Use SubmitOrderAsync", true
+#endif
+    )]
+    public void SubmitOrder() { }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0141" source)
+
+[<Fact>]
 let ``a verbatim identifier keeps its at-sign on keywords, contextual keywords and the discard`` () =
     let source =
         "class C\n{\n    int @plain = 1;\n    int @class = 2;\n    int @var = 3;\n    int @_ = 4;\n    int M() => @plain + @class + @var + @_;\n}\n"

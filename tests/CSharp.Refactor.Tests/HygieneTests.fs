@@ -17,6 +17,14 @@ let ``a hidden character in a literal is escaped, in a comment or identifier not
     Assert.Contains("\"ab\\u200Bc\"", fixedSource)
     Assert.Contains("@\"x\u200By\"", fixedSource)
 
+[<Fact>]
+let ``CR0112 keeps the zero-width joiners of a family emoji in an interpolated greeting`` () =
+    // U+1F468 ZWJ U+1F469 ZWJ U+1F467 is one "family" glyph: the joiners are the text
+    let source =
+        "\nclass WelcomeMail\n{\n    string Subject(string customer) => $\"Welcome to the \U0001F468\u200D\U0001F469\u200D\U0001F467 Family plan, {customer}!\";\n}\n"
+
+    Assert.Empty(suggestCode "CR0112" source)
+
 // ---- CR0113 ----
 
 [<Fact>]

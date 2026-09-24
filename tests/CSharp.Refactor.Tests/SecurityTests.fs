@@ -44,6 +44,23 @@ class C
     Assert.Equal(1, (suggestCode "CR0121" source).Length)
 
 [<Fact>]
+let ``CR0121 accepts a PostgreSQL debit whose values arrive as positional $1 and $2 parameters`` () =
+    // Npgsql's positional markers are parameters as much as SQL Server's @name
+    let source =
+        """
+using System.Data.Common;
+class LedgerRepository
+{
+    void PrepareDebit(DbCommand cmd)
+    {
+        cmd.CommandText = "UPDATE accounts SET balance = balance - $1 WHERE account_id = $2";
+    }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0121" source)
+
+[<Fact>]
 let ``a hole filled from a constant is not a value; a var local or a parameter is`` () =
     let source =
         """

@@ -75,6 +75,20 @@ class C
     Assert.Contains("(a + b).Contains(\"x\")", fixedSource)
     Assert.Contains("(s ?? \"\").Split(\",\")", fixedSource)
 
+[<Fact>]
+let ``CR0108 keeps Regex.Replace when the replacement's $$ escape means one dollar sign`` () =
+    // Regex.Replace("99 USD", "USD", "$$") is "99 $"; string.Replace would write "99 $$"
+    let source =
+        """
+using System.Text.RegularExpressions;
+class PriceLabel
+{
+    string ToDollarSign(string label) => Regex.Replace(label, "USD", "$$");
+}
+"""
+
+    Assert.Empty(suggestCode "CR0108" source)
+
 // ---- CR0109 ----
 
 [<Fact>]
@@ -163,6 +177,25 @@ class C
 """
 
     Assert.Equal<string list>([ "new HttpClient()"; "MD5.Create()" ], firedText source (suggestCode "CR0110" source))
+
+[<Fact>]
+let ``CR0110 leaves the payment gateway's HttpClient alone when a Lazy builds it once`` () =
+    // the lambda is a factory Lazy<T> runs a single time, not a per-call construction
+    let source =
+        """
+using System;
+using System.Net.Http;
+using System.Threading.Tasks;
+class PaymentGateway
+{
+    static readonly Lazy<HttpClient> Client =
+        new Lazy<HttpClient>(() => new HttpClient { BaseAddress = new Uri("https://payments.example.com/") });
+
+    public Task<HttpResponseMessage> Charge(HttpContent payment) => Client.Value.PostAsync("charges", payment);
+}
+"""
+
+    Assert.Empty(suggestCode "CR0110" source)
 
 // ---- CR0111 ----
 

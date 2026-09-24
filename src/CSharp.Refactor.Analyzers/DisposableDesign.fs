@@ -372,8 +372,11 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                 [
                     // CR0063: a Dispose on a type that is not disposable
                     for md in disposeMethods do
+                        // a ref struct is `using`-able by its public Dispose alone:
+                        // the pattern C# reads, since it can implement no interface
                         if
                             not implementsDisposable
+                            && not self.IsRefLikeType
                             && md.ParameterList.Parameters.Count = 0
                             && md.Modifiers |> Seq.exists (fun m -> m.IsKind SyntaxKind.PublicKeyword)
                         then

@@ -239,3 +239,30 @@ class C
 
     let fired = suggestCode "CR0034" source
     Assert.Equal(2, fired.Length)
+
+[<Fact>]
+let ``CR0034 leaves one query per pre-split id batch alone`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+class Order { public int CustomerId; public decimal Total; }
+class Db { public IQueryable<Order> Orders; }
+class InvoiceRun
+{
+    public decimal Bill(Db db, List<int[]> customerIdGroups)
+    {
+        decimal billed = 0m;
+        foreach (var group in customerIdGroups)
+        {
+            var orders = db.Orders.Where(o => group.Contains(o.CustomerId)).ToList();
+            billed += orders.Sum(o => o.Total);
+        }
+        return billed;
+    }
+}
+"""
+
+    // `group.Contains(...)` sends the whole batch in one statement: a batch loop, not an N+1
+    Assert.Empty(suggestCode "CR0034" source)

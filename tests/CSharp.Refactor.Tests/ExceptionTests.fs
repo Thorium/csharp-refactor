@@ -150,6 +150,79 @@ class C : IDisposable
         firedText source (suggestCode "CR0068" source)
     )
 
+[<Fact>]
+let ``CR0066 leaves a throw the finally's own cleanup catch handles alone`` () =
+    let source =
+        """
+using System;
+using System.IO;
+class ReportExport
+{
+    public void Export(string tempPath, string target)
+    {
+        try
+        {
+            File.WriteAllText(tempPath, "report");
+            File.Copy(tempPath, target, true);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(tempPath);
+                if (File.Exists(tempPath)) throw new IOException($"temp file {tempPath} is still locked");
+            }
+            catch (IOException ex) { Console.Error.WriteLine(ex.Message); }
+        }
+    }
+}
+"""
+
+    // the throw never leaves the finally: the export's own failure still propagates
+    Assert.Empty(suggestCode "CR0066" source)
+
+[<Fact>]
+let ``CR0067 lets an explicit conversion reject an out-of-range percentage`` () =
+    let source =
+        """
+using System;
+readonly struct Percentage
+{
+    public decimal Value { get; }
+    Percentage(decimal value) => Value = value;
+    public static explicit operator Percentage(decimal value) =>
+        value is >= 0m and <= 100m
+            ? new Percentage(value)
+            : throw new ArgumentOutOfRangeException(nameof(value), value, "a percentage is 0..100");
+    public static implicit operator decimal(Percentage p) => p.Value;
+}
+"""
+
+    // an explicit cast is the caller asking for a checked conversion; only implicit ones must not throw
+    Assert.Empty(suggestCode "CR0067" source)
+
+[<Fact>]
+let ``CR0068 leaves a chaos-testing switch that injects runtime faults alone`` () =
+    let source =
+        """
+using System;
+enum Fault { None, NullReference, OutOfMemory, IndexRange }
+class ChaosInjector
+{
+    public void Inject(Fault fault) =>
+        _ = fault switch
+        {
+            Fault.NullReference => throw new NullReferenceException("chaos: injected"),
+            Fault.OutOfMemory => throw new OutOfMemoryException("chaos: injected"),
+            Fault.IndexRange => throw new IndexOutOfRangeException("chaos: injected"),
+            _ => 0,
+        };
+}
+"""
+
+    // three distinct runtime exceptions from one switch: a fault-injection table
+    Assert.Empty(suggestCode "CR0068" source)
+
 // ---- CR0069 ----
 
 [<Fact>]
@@ -260,6 +333,52 @@ class Buffer { readonly MemoryStream ms = new MemoryStream(); }
     Assert.Equal(2, unreleased.Length)
     Assert.True(unreleased |> List.exists (fun s -> s.Message.Contains "Cancel frees nothing"))
     Assert.Equal<string list>([ "Dispose" ], firedText source (suggestCode "CR0063" source))
+
+[<Fact>]
+let ``CR0063 leaves a Dispose override on a type disposable through its base class alone`` () =
+    let source =
+        """
+using System;
+abstract class ConnectionScope : IDisposable
+{
+    public virtual void Dispose() { }
+}
+sealed class TransactionGuard : ConnectionScope
+{
+    bool _committed;
+    public void Complete() => _committed = true;
+    public override void Dispose()
+    {
+        if (!_committed) Rollback();
+        base.Dispose();
+    }
+    void Rollback() { }
+}
+"""
+
+    // `using (var tx = new TransactionGuard())` finds IDisposable on the base
+    Assert.Empty(suggestCode "CR0063" source)
+
+[<Fact>]
+let ``CR0063 leaves a ref struct's pooled buffer: using takes its public Dispose without IDisposable`` () =
+    let source =
+        """
+using System;
+using System.Buffers;
+ref struct PooledBuffer
+{
+    private byte[] _array;
+    public PooledBuffer(int size) { _array = ArrayPool<byte>.Shared.Rent(size); }
+    public Span<byte> Span => _array;
+    public void Dispose() { ArrayPool<byte>.Shared.Return(_array); _array = null; }
+}
+class Reader
+{
+    int Read() { using var buffer = new PooledBuffer(64); return buffer.Span.Length; }
+}
+"""
+
+    Assert.Empty(suggestCode "CR0063" source)
 
 [<Fact>]
 let ``CR0061 and CR0062 offer the interface and the release in the editor, never in a sweep`` () =
