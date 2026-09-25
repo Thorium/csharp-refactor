@@ -45,28 +45,6 @@ It refuses a compilation that does not already build, recompiles in memory
 after every pass, and builds the project for real at the end, putting the
 fixes back if that fails.
 
-**Warnings as errors.** The project's own build settings decide, and the
-tool never overrides them: its verification build is the one your CI runs,
-so `TreatWarningsAsErrors`, a `WarningsAsErrors` list and a
-`dotnet_diagnostic.X.severity = error` all count. Where the project turns
-warnings into errors, the in-memory check also runs the project's own
-analyzers (CA, IDE, third-party) whose diagnostics would fail the build,
-and a file whose fixes raise one is held back with the analyzer and the
-rule named; a real build that still fails puts back only the files its
-errors name, with the files their fixes are tied to. The run then says
-what to change if you want such fixes anyway:
-
-```text
-(CA1860 is an error in this project's build (...), so the fixes that raise it stay out: the project's
-settings decide. To take them, keep CA1860 from failing the build — <WarningsNotAsErrors>CA1860</WarningsNotAsErrors>
-in the project, or dotnet_diagnostic.CA1860.severity = suggestion in .editorconfig; to stop CR0011 offering
-such fixes, dotnet_diagnostic.CR0011.severity = none.)
-```
-
-Adding the analyzer to `<NoWarn>` works too, but silences it for everyone;
-`<WarningsNotAsErrors>` keeps the warning visible and only stops it failing
-the build.
-
 #### For light bulbs while you type, see [VS Code / Ionide](#vs-code) and [Visual Studio](#visual-studio-2022--2026) IDE-plugin instructions below.
 
 <img width="1044" height="297" alt="image" src="https://github.com/user-attachments/assets/762ff17d-2c58-4c8a-ae27-569117b88d4e" />
@@ -230,6 +208,13 @@ A rule that shadows a Microsoft analyzer rule (CA2213, CA1031, CA2000 …)
 stands down for that rule's shapes wherever the Microsoft rule is enabled in
 the file's effective config, so nothing is reported twice and nothing
 oscillates. [Rules.md](Rules.md) names each rule's twins.
+
+**Warnings as errors@** The tool uses the same settings as your CI build 
+(TreatWarningsAsErrors, WarningsAsErrors, .editorconfig severities). 
+If a fix would trigger an analyzer error, the tool leaves that file alone, 
+names the analyzer and the rule, and tells you what to change. 
+Use <WarningsNotAsErrors> to take those fixes anyway (the warning stays visible), 
+or <NoWarn> to silence the analyzer for everyone.
 
 ---
 
