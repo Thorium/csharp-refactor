@@ -209,7 +209,7 @@ stands down for that rule's shapes wherever the Microsoft rule is enabled in
 the file's effective config, so nothing is reported twice and nothing
 oscillates. [Rules.md](Rules.md) names each rule's twins.
 
-**Warnings as errors@** The tool uses the same settings as your CI build 
+**Warnings as errors**: The tool uses the same settings as your CI build 
 (TreatWarningsAsErrors, WarningsAsErrors, .editorconfig severities). 
 If a fix would trigger an analyzer error, the tool leaves that file alone, 
 names the analyzer and the rule, and tells you what to change. 
