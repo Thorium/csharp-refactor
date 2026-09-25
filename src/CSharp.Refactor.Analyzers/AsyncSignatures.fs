@@ -62,6 +62,7 @@ open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.CSharp.Syntax
 open Microsoft.CodeAnalysis.Text
+open System.Collections.Generic
 
 [<Literal>]
 let TaskifyCode = "CR0041"
@@ -75,19 +76,114 @@ let TestTaskCode = "CR0045"
 let private hasModifier (mods: SyntaxTokenList) (kind: SyntaxKind) =
     mods |> Seq.exists (fun t -> t.IsKind kind)
 
+/// Per tree, once: the nodes the reference scans below bind, under every
+/// identifier name each spells, in document order. A reference to a method
+/// binds through an identifier spelling its name - `M`, `x.M`, `M<T>`,
+/// `?.M`, `@M` - so a node spelling no identifier of that name cannot refer
+/// to it: each scan binds the nodes under the method's own name only, where
+/// it walked every node of every tree and bound most of them, once per
+/// method (a large file paid minutes for CR0043).
+type private NameIndex =
+    {
+        /// Invocations, by the names their callee expression spells.
+        Invocations: Dictionary<string, InvocationExpressionSyntax[]>
+        /// What a subscription or a delegate construction binds - the right
+        /// side of `+=`/`-=`, the argument of a one-argument `new`, a name or
+        /// member access handed as an argument - by the names each spells.
+        Subscriptions: Dictionary<string, ExpressionSyntax[]>
+        /// Every simple name, by its own name.
+        Names: Dictionary<string, SimpleNameSyntax[]>
+    }
+
+let private nameIndexes =
+    System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, NameIndex>()
+
+let private nameIndexOf (tree: SyntaxTree) =
+    nameIndexes.GetValue(
+        tree,
+        fun tree ->
+            let invocations = Dictionary<string, ResizeArray<InvocationExpressionSyntax>>()
+
+            let subscriptions = Dictionary<string, ResizeArray<ExpressionSyntax>>()
+
+            let names = Dictionary<string, ResizeArray<SimpleNameSyntax>>()
+
+            let add (d: Dictionary<string, ResizeArray<'T>>) (name: string) (item: 'T) =
+                match d.TryGetValue name with
+                | true, l -> l.Add item
+                | false, _ -> d.[name] <- ResizeArray [ item ]
+
+            let spelled (node: SyntaxNode) =
+                node.DescendantTokens()
+                |> Seq.filter (fun t -> t.IsKind SyntaxKind.IdentifierToken)
+                |> Seq.map (fun t -> t.ValueText)
+                |> Seq.distinct
+
+            for n in tree.GetRoot().DescendantNodes() do
+                match n with
+                | :? InvocationExpressionSyntax as inv ->
+                    for name in spelled inv.Expression do
+                        add invocations name inv
+                | _ -> ()
+
+                let subscription: ExpressionSyntax option =
+                    match n with
+                    | :? AssignmentExpressionSyntax as a when
+                        a.IsKind SyntaxKind.AddAssignmentExpression
+                        || a.IsKind SyntaxKind.SubtractAssignmentExpression
+                        ->
+                        Some a.Right
+                    | :? ObjectCreationExpressionSyntax as c when
+                        not (isNull c.ArgumentList) && c.ArgumentList.Arguments.Count = 1
+                        ->
+                        Some c.ArgumentList.Arguments.[0].Expression
+                    | :? ArgumentSyntax as arg ->
+                        match arg.Expression with
+                        | :? IdentifierNameSyntax
+                        | :? MemberAccessExpressionSyntax -> Some arg.Expression
+                        | _ -> None
+                    | _ -> None
+
+                match subscription with
+                | Some e ->
+                    for name in spelled e do
+                        add subscriptions name e
+                | None -> ()
+
+                match n with
+                | :? SimpleNameSyntax as id -> add names id.Identifier.ValueText id
+                | _ -> ()
+
+            let frozen (d: Dictionary<string, ResizeArray<'T>>) =
+                let result = Dictionary<string, 'T[]>()
+
+                for KeyValue(name, l) in d do
+                    result.[name] <- l.ToArray()
+
+                result
+
+            {
+                Invocations = frozen invocations
+                Subscriptions = frozen subscriptions
+                Names = frozen names
+            }
+    )
+
+let private lookup (d: Dictionary<string, 'T[]>) (name: string) =
+    match d.TryGetValue name with
+    | true, found -> found
+    | false, _ -> [||]
+
 /// The call sites of a method symbol in this tree, each with its statement
 /// context and the function it sits in.
 let private callSites (model: SemanticModel) (tree: SyntaxTree) (target: IMethodSymbol) =
-    tree.GetRoot().DescendantNodes()
-    |> Seq.choose (fun n ->
-        match n with
-        | :? InvocationExpressionSyntax as inv ->
-            match model.GetSymbolInfo(inv).Symbol with
-            | :? IMethodSymbol as m when
-                SymbolEqualityComparer.Default.Equals(m.OriginalDefinition, target.OriginalDefinition)
-                ->
-                Some inv
-            | _ -> None
+    lookup (nameIndexOf tree).Invocations target.Name
+    |> Seq.choose (fun inv ->
+        match model.GetSymbolInfo(inv).Symbol with
+        | :? IMethodSymbol as m when
+            SymbolEqualityComparer.Default.Equals(m.OriginalDefinition, target.OriginalDefinition)
+            ->
+            Some inv
         | _ -> None)
     |> List.ofSeq
 
@@ -143,35 +239,22 @@ let private isEventShaped (m: IMethodSymbol) =
 
 /// Is the method subscribed to any event, or wrapped in a delegate, anywhere?
 let private subscribed (model: SemanticModel) (target: IMethodSymbol) =
+    // the right side of `+=`/`-=`, the argument of a one-argument `new`, a
+    // method group handed to anything (a delegate somewhere): the index holds
+    // them under the names they spell
     model.Compilation.SyntaxTrees
     |> Seq.exists (fun t ->
-        let m = model.Compilation.GetSemanticModel t
+        match lookup (nameIndexOf t).Subscriptions target.Name with
+        | [||] -> false
+        | candidates ->
+            let m = model.Compilation.GetSemanticModel t
 
-        t.GetRoot().DescendantNodes()
-        |> Seq.exists (fun n ->
-            let refersTo (e: ExpressionSyntax) =
+            candidates
+            |> Array.exists (fun e ->
                 let info = m.GetSymbolInfo e
 
                 Seq.append (Option.toList (Option.ofObj info.Symbol)) info.CandidateSymbols
-                |> Seq.exists (fun s -> SymbolEqualityComparer.Default.Equals(s, target))
-
-            match n with
-            | :? AssignmentExpressionSyntax as a when
-                a.IsKind SyntaxKind.AddAssignmentExpression
-                || a.IsKind SyntaxKind.SubtractAssignmentExpression
-                ->
-                refersTo a.Right
-            | :? ObjectCreationExpressionSyntax as c when
-                not (isNull c.ArgumentList) && c.ArgumentList.Arguments.Count = 1
-                ->
-                refersTo c.ArgumentList.Arguments.[0].Expression
-            | :? ArgumentSyntax as arg ->
-                // a method group handed to anything is a delegate somewhere
-                match arg.Expression with
-                | :? IdentifierNameSyntax
-                | :? MemberAccessExpressionSyntax -> refersTo arg.Expression
-                | _ -> false
-            | _ -> false))
+                |> Seq.exists (fun s -> SymbolEqualityComparer.Default.Equals(s, target))))
 
 /// Is the method named anywhere other than as the callee of an invocation —
 /// a method group handed on, a delegate built from it, `nameof`? A changed
@@ -181,29 +264,26 @@ let private mentionedAsGroup (model: SemanticModel) (target: IMethodSymbol) =
     |> Seq.exists (fun t ->
         let m = model.Compilation.GetSemanticModel t
 
-        t.GetRoot().DescendantNodes()
-        |> Seq.exists (fun n ->
-            match n with
-            | :? SimpleNameSyntax as id when id.Identifier.ValueText = target.Name ->
-                let info = m.GetSymbolInfo id
+        lookup (nameIndexOf t).Names target.Name
+        |> Seq.exists (fun id ->
+            let info = m.GetSymbolInfo id
 
-                let refers =
-                    Seq.append (Option.toList (Option.ofObj info.Symbol)) info.CandidateSymbols
-                    |> Seq.exists (fun s ->
-                        SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, target.OriginalDefinition))
+            let refers =
+                Seq.append (Option.toList (Option.ofObj info.Symbol)) info.CandidateSymbols
+                |> Seq.exists (fun s ->
+                    SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, target.OriginalDefinition))
 
-                refers
-                && (let callee =
-                        match id.Parent with
-                        | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = id.Span
-                        | :? MemberAccessExpressionSyntax as ma when ma.Name.Span = id.Span ->
-                            match ma.Parent with
-                            | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = ma.Span
-                            | _ -> false
+            refers
+            && (let callee =
+                    match id.Parent with
+                    | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = id.Span
+                    | :? MemberAccessExpressionSyntax as ma when ma.Name.Span = id.Span ->
+                        match ma.Parent with
+                        | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = ma.Span
                         | _ -> false
+                    | _ -> false
 
-                    not callee)
-            | _ -> false))
+                not callee)))
 
 let private returnTypeText (m: MethodDeclarationSyntax) (model: SemanticModel) =
     let t = model.GetTypeInfo(m.ReturnType).Type
@@ -315,10 +395,10 @@ let private taskify (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext)
                                 let calls = callSites m t self
 
                                 let mentions =
-                                    t.GetRoot().DescendantNodes()
+                                    lookup (nameIndexOf t).Names self.Name
                                     |> Seq.filter (fun n ->
                                         match n with
-                                        | :? IdentifierNameSyntax as id when id.Identifier.ValueText = self.Name ->
+                                        | :? IdentifierNameSyntax as id ->
                                             SymbolEqualityComparer.Default.Equals(m.GetSymbolInfo(id).Symbol, self)
                                         | _ -> false)
                                     |> Seq.length

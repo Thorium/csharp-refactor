@@ -24,6 +24,10 @@ open CSharp.Refactor.Tool.Options
 open CSharp.Refactor.Tool.Reports
 open CSharp.Refactor.Tool.Targets
 
+/// The catalog's rule count, for the per-project header: a list's length
+/// walks it, so it is read once, not once per project of a run.
+let private ruleCount = RuleCatalog.rules.Length
+
 // ---- run-scoped state, reset per executeRun (a resident --mcp host runs many) ----
 
 let mutable private baselineFingerprints: Set<string> = Set.empty
@@ -258,7 +262,7 @@ let private frameworkOf (project: Project) =
 
     let i = name.LastIndexOf '('
 
-    if i > 0 && name.EndsWith ")" then
+    if i > 0 && name.EndsWith ')' then
         name.Substring(i + 1, name.Length - i - 2)
     else
         ""
@@ -309,7 +313,7 @@ let private escalatedAnalyzers (project: Project) (compilation: Compilation) : I
         || (try
                 a.SupportedDiagnostics
                 |> Seq.exists (fun d -> specific.Contains d.Id || configuredError d.Id)
-            with _ ->
+            with _ -> // an analyzer whose descriptors throw is not escalated; fsharpanalyzer: ignore-line FR0055
                 false)
 
     if project.AnalyzerReferences |> Seq.isEmpty then
@@ -320,7 +324,7 @@ let private escalatedAnalyzers (project: Project) (compilation: Compilation) : I
             // a reference that does not load is the build's to report
             try
                 r.GetAnalyzers project.Language :> DiagnosticAnalyzer seq
-            with _ ->
+            with _ -> // a reference that does not load is the build's to report; fsharpanalyzer: ignore-line FR0055
                 Seq.empty)
         |> Seq.filter (fun a -> not (a :? CSharpRefactorAnalyzer) && escalates a)
         |> ImmutableArray.CreateRange
@@ -1403,7 +1407,7 @@ let executeRun (opts: Options) : int =
                 try
                     let _, flavors = loadProject workspace (Path.GetFullPath(projectOf target))
                     not flavors.IsEmpty
-                with _ ->
+                with _ -> // a project that does not load is not loaded; fsharpanalyzer: ignore-line FR0055
                     false
 
             flushWorkspace loaded
@@ -1510,7 +1514,7 @@ let executeRun (opts: Options) : int =
                         Out.dim
                             $"  ({baselineErrors.Length} error(s) before any fix, expected without the build tree; the in-memory check holds the count)"
 
-                    printfn $"{RuleCatalog.rules.Length} rules, {Seq.length project.Documents} files"
+                    printfn $"{ruleCount} rules, {Seq.length project.Documents} files"
                     let mutable pass = 1
                     let mutable go = true
                     let mutable solution = projectWorkspace.CurrentSolution

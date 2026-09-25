@@ -2,6 +2,13 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.8
+
+The speculative check behind most fixes binds only the members an edit touches when every edit sits inside member bodies: a body declares nothing another member binds against, so every other member's errors are the same before and after the edit, and comparing the touched members answers exactly as comparing the file did. A syntax error, a preprocessor directive, an edit outside a body, or a touched member not found again with every declaration around it at its shifted span keeps the whole-file check. One check on a 21k-line file went from 1.1 s to 14 ms, and a pass of every rule over that file from 1,298 s to 43 s (5.3k lines: 87 s to 6 s). CR0041/CR0043 find a method's call sites and subscriptions through a per-file index of the names each node spells instead of binding every node of every tree once per method; CR0023, CR0150 and CR0152 search a private field's uses inside its type's own declarations; CR0069 reads each tree's text once. Every suggestion and fix is unchanged - byte-identical on synthetic files and in the reports of real projects - and CSR_SPEC_VERIFY runs both checks side by side: they agreed on every one of the test suite's six thousand.
+
+The tool's own code takes the notes FSharp.Refactor raises on it: the char overload of `EndsWith`, `IsNullOrWhiteSpace` for two trims compared with empty, one pass over a report's findings, the rule count read once per run, and a reference search that no longer copies its visited list per level. The sixteen deliberate fail-safes FR0055 notes carry their reason and an ignore-line, as FSharp.Refactor labels its own.
+
+
 ## 0.1.7
 
 CR0166 puts its replacement in braces when the `try` is the unbraced body of an `if` with an `else`: `if (useSetting) try { port = int.Parse(s); } catch (Exception) { } else port = 9090;` became `if (useSetting) if (int.TryParse(s, out var parsed)) port = parsed; else port = 9090;`, the `else` changing hands - a bad setting fell back to 9090 and no setting at all kept 8080.

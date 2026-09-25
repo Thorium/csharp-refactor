@@ -289,7 +289,7 @@ let rec load (workspace: AdhocWorkspace) (projectPath: string) : Project =
             |> Seq.choose (fun p ->
                 try
                     Some(ProjectReference((load workspace p).Id))
-                with _ ->
+                with _ -> // a reference that does not load is the build's to report; fsharpanalyzer: ignore-line FR0055
                     None)
             |> List.ofSeq
 

@@ -354,6 +354,18 @@ let insideExpressionTree (model: SemanticModel) (node: SyntaxNode) =
 let insideAttribute (node: SyntaxNode) =
     node.Ancestors() |> Seq.exists (fun a -> a :? AttributeArgumentSyntax)
 
+/// Where a PRIVATE member can be named in a tree: its containing type's
+/// declarations there (each partial part, with the types nested in it), in
+/// document order. C# lets nothing outside those spans reach a private
+/// member, so walking them finds every use a walk of the whole tree finds,
+/// in the same order - at the cost of the type, not of the file.
+let privateMemberScope (tree: SyntaxTree) (s: ISymbol) : SyntaxNode list =
+    s.ContainingType.DeclaringSyntaxReferences
+    |> Seq.filter (fun r -> r.SyntaxTree = tree)
+    |> Seq.map (fun r -> r.GetSyntax())
+    |> Seq.sortBy (fun n -> n.SpanStart)
+    |> List.ofSeq
+
 /// Errors the tree holds today, by their message and line, so a patched
 /// tree can be judged on NEW errors only.
 let private errorKeys (model: SemanticModel) =
@@ -371,6 +383,195 @@ let private errorKeys (model: SemanticModel) =
 /// The check with a list of error ids the patched tree may carry — an
 /// error a source generator will resolve once it runs (a partial method
 /// under `[GeneratedRegex]` has no body until then).
+/// The whole file's error counts of an original model, once per model:
+/// every check of a file compares against the same counts.
+let private fileErrorKeys =
+    System.Runtime.CompilerServices.ConditionalWeakTable<SemanticModel, Map<string, int>>()
+
+/// Errors inside the given spans only, by id.
+let private spanErrorKeys (model: SemanticModel) (spans: TextSpan list) =
+    spans
+    |> Seq.collect (fun span -> model.GetDiagnostics(Nullable span))
+    |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error)
+    |> Seq.map (fun d -> d.Id)
+    |> Seq.countBy id
+    |> Map.ofSeq
+
+/// The member whose BODY strictly holds `span`: inside a method's,
+/// constructor's, operator's or accessor's braces, or inside the
+/// expression of an expression body. None for a signature, an initializer,
+/// an attribute, a top-level statement, a type, or the braces themselves.
+let private bodyMemberOf (root: SyntaxNode) (span: TextSpan) : MemberDeclarationSyntax option =
+    let insideBlock (b: BlockSyntax) =
+        not (isNull b)
+        && span.Start > b.OpenBraceToken.SpanStart
+        && span.End <= b.CloseBraceToken.SpanStart
+
+    let insideArrow (a: ArrowExpressionClauseSyntax) =
+        not (isNull a) && a.Expression.Span.Contains span
+
+    if span.End > root.FullSpan.End then
+        None
+    else
+        root.FindToken(span.Start).Parent.AncestorsAndSelf()
+        |> Seq.tryPick (fun n ->
+            match n with
+            | :? BaseMethodDeclarationSyntax as m ->
+                Some(
+                    if insideBlock m.Body || insideArrow m.ExpressionBody then
+                        Some(m :> MemberDeclarationSyntax)
+                    else
+                        None
+                )
+            | :? AccessorDeclarationSyntax as a ->
+                match a.Parent with
+                | :? AccessorListSyntax as list when (list.Parent :? BasePropertyDeclarationSyntax) ->
+                    Some(
+                        if insideBlock a.Body || insideArrow a.ExpressionBody then
+                            Some(list.Parent :?> MemberDeclarationSyntax)
+                        else
+                            None
+                    )
+                | _ -> Some None
+            | :? PropertyDeclarationSyntax as p ->
+                Some(
+                    if insideArrow p.ExpressionBody then
+                        Some(p :> MemberDeclarationSyntax)
+                    else
+                        None
+                )
+            | :? IndexerDeclarationSyntax as i ->
+                Some(
+                    if insideArrow i.ExpressionBody then
+                        Some(i :> MemberDeclarationSyntax)
+                    else
+                        None
+                )
+            | :? MemberDeclarationSyntax
+            | :? GlobalStatementSyntax -> Some None
+            | _ -> None)
+        |> Option.flatten
+
+let private hasErrors (diagnostics: Diagnostic seq) =
+    diagnostics |> Seq.exists (fun d -> d.Severity = DiagnosticSeverity.Error)
+
+/// The speculative check confined to the members an edit set touches -
+/// None where that is not known to answer as the whole file would.
+///
+/// An edit inside a member's BODY cannot change a diagnostic anywhere
+/// else: a body declares nothing another member binds against, so every
+/// other member's errors are the same before and after, and "no error id
+/// counts more in the patched file" is "no error id counts more inside the
+/// touched members". Binding those members instead of the whole file is
+/// what turns a check per candidate from the file's cost into the
+/// member's. The conditions that make the locality hold, each checked,
+/// else the whole-file check answers: every edit strictly inside a body
+/// (never its braces, a signature or an initializer); no preprocessor text
+/// in or around an edit; no syntax error in the original or the patched
+/// tree (a recovery could re-parse what follows); and each touched member
+/// found again at its span shifted by the edits before it, every
+/// declaration around it too - an inserted `} void X() {` ends the member
+/// early, and is caught there.
+let private memberLocalCheck
+    (allowed: string list)
+    (model: SemanticModel)
+    (tree: SyntaxTree)
+    (patched: SyntaxTree)
+    (own: TextEdit list)
+    : bool option =
+    let root = tree.GetRoot()
+    let text = tree.GetText()
+
+    let noDirective =
+        own
+        |> List.forall (fun e ->
+            not (e.Replacement.Contains "#")
+            && e.Span.End <= text.Length
+            && not (text.ToString(e.Span).Contains "#"))
+
+    if own.IsEmpty || not noDirective then
+        None
+    else
+        let members = own |> List.map (fun e -> bodyMemberOf root e.Span)
+
+        if members |> List.exists Option.isNone then
+            None
+        elif hasErrors (tree.GetDiagnostics()) || hasErrors (patched.GetDiagnostics()) then
+            None
+        else
+            let patchedRoot = patched.GetRoot()
+
+            (
+             // where an original position lands once the edits before it apply
+             let shifted (position: int) =
+                 position
+                 + (own
+                    |> List.sumBy (fun e ->
+                        if e.Span.End <= position then
+                            e.Replacement.Length - e.Span.Length
+                        else
+                            0))
+
+             let shiftedSpan (s: TextSpan) =
+                 TextSpan.FromBounds(shifted s.Start, shifted s.End)
+
+             let touched = members |> List.choose id |> List.distinctBy (fun m -> m.Span)
+
+             // the member found again, and every declaration around it with
+             // it: each of the same kind at its own span shifted. The text
+             // outside the member is unchanged, and a parser that closes the
+             // member and every enclosing construct where it did before goes
+             // on exactly as it went, so the rest of the tree is the same -
+             // where an inserted `} void X() {` ends the member early, and
+             // fails here
+             let sameShape (m: SyntaxNode) (again: SyntaxNode) =
+                 let before = m.AncestorsAndSelf() |> List.ofSeq
+                 let after = again.AncestorsAndSelf() |> List.ofSeq
+
+                 before.Length = after.Length
+                 && List.forall2
+                     (fun (b: SyntaxNode) (a: SyntaxNode) -> b.RawKind = a.RawKind && shiftedSpan b.Span = a.Span)
+                     before
+                     after
+
+             let found =
+                 touched
+                 |> List.map (fun m ->
+                     let span = shiftedSpan m.Span
+
+                     let again =
+                         if span.End > patchedRoot.FullSpan.End then
+                             None
+                         else
+                             patchedRoot.FindNode(span).AncestorsAndSelf()
+                             |> Seq.tryFind (fun n -> n.Span = span && n.RawKind = m.RawKind)
+                             |> Option.filter (sameShape m)
+
+                     m.Span, again |> Option.map (fun n -> n.Span))
+
+             if found |> List.exists (fun (_, again) -> again.IsNone) then
+                 None
+             else
+                 let compilation = model.Compilation.ReplaceSyntaxTree(tree, patched)
+                 let newModel = compilation.GetSemanticModel(patched, false)
+                 let before = spanErrorKeys model (found |> List.map fst)
+                 let after = spanErrorKeys newModel (found |> List.choose snd)
+
+                 Some(
+                     after
+                     |> Map.forall (fun id n ->
+                         List.contains id allowed
+                         || (match Map.tryFind id before with
+                             | Some m -> n <= m
+                             | None -> false))
+                 ))
+
+/// Set CSR_SPEC_VERIFY to a file path and every check runs both ways: a
+/// member-local answer that differs from the whole file's is written there
+/// (and the whole file's answer is used), so a test run proves the two agree.
+let private verifyLog =
+    lazy (Environment.GetEnvironmentVariable "CSR_SPEC_VERIFY" |> Option.ofObj)
+
 let speculativeCheckAllowing (allowed: string list) (model: SemanticModel) (edits: TextEdit list) : bool =
     try
         let tree = model.SyntaxTree
@@ -392,18 +593,53 @@ let speculativeCheckAllowing (allowed: string list) (model: SemanticModel) (edit
             |> List.map (fun e -> TextChange(e.Span, e.Replacement))
 
         let patched = tree.WithChangedText(text.WithChanges changes)
-        let compilation = model.Compilation.ReplaceSyntaxTree(tree, patched)
-        let newModel = compilation.GetSemanticModel(patched, false)
-        let before = errorKeys model
-        let after = errorKeys newModel
 
-        after
-        |> Map.forall (fun id n ->
-            List.contains id allowed
-            || (match Map.tryFind id before with
-                | Some m -> n <= m
-                | None -> false))
-    with _ ->
+        let wholeFile () =
+            let compilation = model.Compilation.ReplaceSyntaxTree(tree, patched)
+            let newModel = compilation.GetSemanticModel(patched, false)
+            let before = fileErrorKeys.GetValue(model, errorKeys)
+            let after = errorKeys newModel
+
+            after
+            |> Map.forall (fun id n ->
+                List.contains id allowed
+                || (match Map.tryFind id before with
+                    | Some m -> n <= m
+                    | None -> false))
+
+        let local =
+            try
+                memberLocalCheck allowed model tree patched own
+            with _ -> // an unexpected shape answers the whole-file way; fsharpanalyzer: ignore-line FR0055
+                None
+
+        match local, verifyLog.Value with
+        | Some answer, None -> answer
+        | None, _ -> wholeFile ()
+        | Some answer, Some log ->
+            let full = wholeFile ()
+
+            // every comparison is a line: "same" ones prove the local path
+            // ran, a "DIFF" one that it answered otherwise
+            let line =
+                if answer = full then
+                    $"same {answer}\n"
+                else
+                    let edited =
+                        own |> List.map (fun e -> $"{e.Span}={e.Replacement}") |> String.concat " | "
+
+                    $"DIFF {tree.FilePath}: local {answer}, whole file {full}: {edited}\n"
+
+            // one file per process (test projects run side by side), and a
+            // failed write never turns into the check's answer
+            lock verifyLog (fun () ->
+                try
+                    IO.File.AppendAllText($"{log}.{Diagnostics.Process.GetCurrentProcess().Id}", line)
+                with _ -> // the log is a test instrument; fsharpanalyzer: ignore-line FR0055
+                    ())
+
+            full
+    with _ -> // a check that cannot run offers no fix; fsharpanalyzer: ignore-line FR0055
         false
 
 let speculativeCheck (model: SemanticModel) (edits: TextEdit list) : bool = speculativeCheckAllowing [] model edits
@@ -490,7 +726,7 @@ let speculativeCheckAcross (model: SemanticModel) (sites: ReferenceSite list) (e
             match Map.tryFind id before with
             | Some m -> n <= m
             | None -> false)
-    with _ ->
+    with _ -> // a cross-file check that cannot run offers no fix; fsharpanalyzer: ignore-line FR0055
         false
 
 /// Does the call an edited argument sits in still bind to the same member
@@ -534,7 +770,7 @@ let bindingKept (model: SemanticModel) (edits: TextEdit list) (call: SyntaxNode)
             match twin with
             | None -> false
             | Some t -> spelled (model.GetSymbolInfo(call).Symbol) = spelled (newModel.GetSymbolInfo(t).Symbol)
-    with _ ->
+    with _ -> // a binding that cannot be compared counts as changed; fsharpanalyzer: ignore-line FR0055
         false
 
 /// The call an expression is an argument of, through parentheses: an
@@ -672,5 +908,5 @@ let armsConvertAlike (model: SemanticModel) (edit: TextEdit) (arms: ExpressionSy
                     arms
                     newArms
             | _ -> false
-        with _ ->
+        with _ -> // arms that cannot be compared are not alike; fsharpanalyzer: ignore-line FR0055
             false)

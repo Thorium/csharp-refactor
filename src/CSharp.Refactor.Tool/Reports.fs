@@ -177,6 +177,8 @@ let plainMessage (f: ReportedFinding) =
 /// `%SRCROOT%` base id, an artifact table, an automation id per target,
 /// and an invocation record with times and the command line.
 let private writeSarifReport (path: string) (target: string) (findings: ReportedFinding seq) =
+    // read more than once below: a caller's lazy seq is walked here, once
+    let findings = List.ofSeq findings
     let root = sourceRootOf target
 
     let fileUri (dir: string) =

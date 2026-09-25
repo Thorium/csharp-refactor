@@ -137,6 +137,65 @@ let ``the speculative check refuses an edit that breaks binding and accepts one 
     Assert.False(Guards.speculativeCheck model bad)
 
 [<Fact>]
+let ``under warnings as errors an edit that leaves a field unread is answered as the whole file answers it`` () =
+    // removing the last read of a private field raises CS0414 at the FIELD,
+    // outside the edited member. It is a compilation-level warning a file's
+    // own diagnostics do not carry today, escalated or not, so both checks
+    // answer alike; should Roslyn ever report it per file, the member-local
+    // check must still answer as the whole file does
+    let source =
+        "class C\n{\n    private int _x;\n    public void Set() { _x = 1; }\n    public int M() { return _x; }\n}\n"
+
+    let compilation, tree = compileClean source
+
+    let escalated =
+        compilation.WithOptions(compilation.Options.WithGeneralDiagnosticOption ReportDiagnostic.Error)
+
+    let model = escalated.GetSemanticModel(tree, false)
+    let at = source.IndexOf "return _x;" + "return ".Length
+    let unread = [ Suggestion.replace (TextSpan(at, 2)) "0" ]
+
+    // what the whole file says: the patched file's error counts rise
+    let patched = tree.WithChangedText(tree.GetText().Replace(TextSpan(at, 2), "0"))
+
+    let errors (m: SemanticModel) =
+        m.GetDiagnostics()
+        |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error)
+        |> Seq.length
+
+    let wholeFile =
+        errors (escalated.ReplaceSyntaxTree(tree, patched).GetSemanticModel(patched, false))
+        <= errors model
+
+    Assert.Equal(wholeFile, Guards.speculativeCheck model unread)
+
+[<Fact>]
+let ``an edit inside a body that splits the member is judged on the whole file`` () =
+    // the check binds only the touched member when every edit sits inside a
+    // body - sound because a body declares nothing else can bind to. An edit
+    // that closes the method and opens others declares members: here a second
+    // `Other`, whose duplicate error (CS0111) lands on the original `Other`
+    // outside the edited member. The member-local path must give way to the
+    // whole file, which sees the new error
+    let source =
+        "class C\n{\n    void M()\n    {\n        int x = 1;\n    }\n\n    void Other() { }\n}\n"
+
+    let compilation, tree = compileClean source
+    let model = compilation.GetSemanticModel(tree, false)
+    let at = source.IndexOf "int x = 1;" + "int x = 1;".Length
+
+    let split =
+        [
+            Suggestion.insert at "\n    }\n\n    void Other() { }\n\n    void M2()\n    {"
+        ]
+
+    Assert.False(Guards.speculativeCheck model split)
+
+    // an edit that stays inside the body is still judged, and passes
+    let inside = [ Suggestion.insert at " x = x + 1;" ]
+    Assert.True(Guards.speculativeCheck model inside)
+
+[<Fact>]
 let ``the yields-to gate stands down only when the shadowed rule is enabled`` () =
     let ctxWith (pairs: (string * string) list) =
         { RuleContext.editor with

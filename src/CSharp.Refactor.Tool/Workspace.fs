@@ -225,21 +225,26 @@ let workspaceOf (runTarget: string) (project: string) : string list option =
 let referencersOf (workspace: string list) (project: string) : string list =
     let references = workspace |> List.map (fun p -> p, projectReferenceShapesOf p)
 
-    let mutable reached = [ project ]
+    // the levels reached, newest first: joined once at the end, where
+    // appending each level to the whole copied everything reached so far
+    let mutable levels = [ [ project ] ]
     let mutable frontier = [ project ]
 
     while not frontier.IsEmpty do
         let next =
             references
             |> List.filter (fun (p, refs) ->
-                not (reached |> List.exists (samePath p))
+                not (levels |> List.exists (List.exists (samePath p)))
                 && refs |> List.exists (fun r -> frontier |> List.exists (namesProject r)))
             |> List.map fst
 
-        reached <- reached @ next
+        levels <- next :: levels
         frontier <- next
 
-    reached |> List.filter (fun p -> not (samePath p project))
+    levels
+    |> List.rev
+    |> List.concat
+    |> List.filter (fun p -> not (samePath p project))
 
 /// A source file as MSBuildWorkspace's own loader reads it: a byte order
 /// mark decides, else UTF-8 where the bytes are valid UTF-8, else the

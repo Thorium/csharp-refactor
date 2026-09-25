@@ -839,6 +839,27 @@ let private prints (t: ITypeSymbol) =
 
 let private az09Regex = Regex @"[^a-z0-9_]+"
 
+/// A tree's root text (`ToString`: trivia around the root left out, as
+/// the literal search has always read it), once per tree, where every
+/// candidate literal rebuilt every tree's text.
+let private rootTexts =
+    System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, string>()
+
+let private rootTextOf (t: SyntaxTree) =
+    rootTexts.GetValue(t, fun t -> t.GetRoot().ToString())
+
+/// Non-overlapping ordinal occurrences of `literal`, left to right: what
+/// `Regex.Matches(text, Regex.Escape literal).Count` counts, without a
+/// regex per candidate.
+let private occurrences (text: string) (literal: string) =
+    let rec count (from: int) (found: int) =
+        match text.IndexOf(literal, from, System.StringComparison.Ordinal) with
+        | -1 -> found
+        | at -> count (at + literal.Length) (found + 1)
+
+    // an empty pattern matches at every position, as Regex counts it
+    if literal.Length = 0 then text.Length + 1 else count 0 0
+
 let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     if Text.isTestFile tree then
         []
@@ -917,7 +938,7 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                             || printable.Length > 4
                             || message.Contains "{"
                             || message.Contains "}"
-                            || message.Trim() = ""
+                            || System.String.IsNullOrWhiteSpace message
                             || mentionsParameter
                             || lower.Contains(m.Identifier.ValueText.ToLowerInvariant())
                             || invariants |> List.exists lower.Contains
@@ -930,8 +951,7 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                             let elsewhere =
                                 model.Compilation.SyntaxTrees
                                 |> Seq.exists (fun t ->
-                                    let count =
-                                        Regex.Matches(t.GetRoot().ToString(), Regex.Escape(lit.Token.Text)).Count
+                                    let count = occurrences (rootTextOf t) lit.Token.Text
 
                                     if t = tree then count > 1 else count > 0)
 

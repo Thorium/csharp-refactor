@@ -149,7 +149,7 @@ let private invalidPatterns (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                     )
                 // anything else (`NotSupportedException`: a backreference under
                 // `NonBacktracking`) proves nothing about the pattern
-                | _ -> None
+                | _ -> None // proves nothing, as said above; fsharpanalyzer: ignore-line FR0055
             | _ -> None
         | None -> None)
     |> List.ofSeq

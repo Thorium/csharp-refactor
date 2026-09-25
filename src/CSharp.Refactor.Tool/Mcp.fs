@@ -191,7 +191,7 @@ let run () =
                         | _ -> None
 
                     id, m, p
-                with _ ->
+                with _ -> // an unparsable request answers as a request without an id; fsharpanalyzer: ignore-line FR0055
                     "null", "", None
 
             match method_ with

@@ -513,7 +513,12 @@ let private frozenCollections (tree: SyntaxTree) (model: SemanticModel) (ctx: Ru
                             if spread then
                                 []
                             else
-                                tree.GetRoot().DescendantNodes()
+                                // a private field is named inside its type only
+                                (if field.DeclaredAccessibility = Accessibility.Private then
+                                     Guards.privateMemberScope tree field
+                                 else
+                                     [ tree.GetRoot() ])
+                                |> Seq.collect (fun root -> root.DescendantNodes())
                                 |> Seq.choose (fun x ->
                                     match x with
                                     | :? IdentifierNameSyntax as id when
@@ -649,8 +654,10 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
 
                 match model.GetDeclaredSymbol v with
                 | :? IFieldSymbol as field when initOk ->
+                    // the field is private: named inside its type only
                     let uses =
-                        tree.GetRoot().DescendantNodes()
+                        Guards.privateMemberScope tree field
+                        |> Seq.collect (fun root -> root.DescendantNodes())
                         |> Seq.choose (fun x ->
                             match x with
                             | :? IdentifierNameSyntax as id when

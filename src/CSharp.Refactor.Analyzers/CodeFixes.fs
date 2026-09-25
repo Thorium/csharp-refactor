@@ -68,7 +68,7 @@ type CSharpRefactorCodeFixProvider() =
                 let options =
                     try
                         Some(document.Project.AnalyzerOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
-                    with _ ->
+                    with _ -> // no .editorconfig options readable: the rules run on their defaults; fsharpanalyzer: ignore-line FR0055
                         None
 
                 let suggestions =

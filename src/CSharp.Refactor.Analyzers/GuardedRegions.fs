@@ -249,7 +249,11 @@ let private releases (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
 
                                     let reindented =
                                         text.ToString(region).Split [| '\n' |]
-                                        |> Array.map (fun line -> if line.Trim() = "" then line else unit + line)
+                                        |> Array.map (fun line ->
+                                            if System.String.IsNullOrWhiteSpace line then
+                                                line
+                                            else
+                                                unit + line)
                                         |> String.concat "\n"
 
                                     let edits =

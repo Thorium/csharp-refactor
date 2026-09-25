@@ -51,7 +51,7 @@ let private frameworkReferences: Lazy<PortableExecutableReference list> =
                      Some(MetadataReference.CreateFromFile f)
                  else
                      None
-             with _ ->
+             with _ -> // a file that is no readable assembly is no reference; fsharpanalyzer: ignore-line FR0055
                  None)
          |> List.ofArray)
 

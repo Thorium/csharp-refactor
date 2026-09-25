@@ -79,7 +79,7 @@ let private hasExtension (s: string) =
 let private existsOnDisk (s: string) =
     try
         s.Length > 1 && (File.Exists s || Directory.Exists s)
-    with _ ->
+    with _ -> // a string no path API accepts is not on disk; fsharpanalyzer: ignore-line FR0055
         false
 
 let private pathNamed (e: ExpressionSyntax) =

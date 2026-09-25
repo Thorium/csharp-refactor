@@ -176,7 +176,7 @@ let private readHints (path: string) =
     let stamp =
         try
             File.GetLastWriteTimeUtc path
-        with _ ->
+        with _ -> // an unreadable stamp re-reads the hints next time; fsharpanalyzer: ignore-line FR0055
             DateTime.MinValue
 
     match hintFileCache.TryGetValue path with
@@ -189,7 +189,7 @@ let private readHints (path: string) =
                 |> List.map (fun l -> l.Trim())
                 |> List.filter (fun l -> l <> "" && not (l.StartsWith "#"))
                 |> List.choose (fun l -> parse l [] [] false)
-            with _ ->
+            with _ -> // an unreadable hints file adds no hints; fsharpanalyzer: ignore-line FR0055
                 []
 
         hintFileCache.[path] <- (stamp, hints)

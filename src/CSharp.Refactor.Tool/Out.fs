@@ -48,7 +48,7 @@ let private coloured (stream: IO.TextWriter) (redirected: bool) (color: ConsoleC
             | Some previous ->
                 try
                     Console.ForegroundColor <- previous
-                with _ ->
+                with _ -> // a redirected console has no colour to restore; fsharpanalyzer: ignore-line FR0055
                     ()
             | None -> ())
 

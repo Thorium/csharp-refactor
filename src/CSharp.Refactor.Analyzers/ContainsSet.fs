@@ -153,7 +153,15 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         |> Seq.collect (fun t ->
                             let m = if t = tree then model else compilation.GetSemanticModel t
 
-                            t.GetRoot().DescendantNodes()
+                            // a private field is named inside its type only
+                            let scope =
+                                if field.DeclaredAccessibility = Accessibility.Private then
+                                    Guards.privateMemberScope t field
+                                else
+                                    [ t.GetRoot() ]
+
+                            scope
+                            |> Seq.collect (fun root -> root.DescendantNodes())
                             |> Seq.choose (fun n ->
                                 match n with
                                 | :? IdentifierNameSyntax as id when
