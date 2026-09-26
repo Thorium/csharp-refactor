@@ -312,6 +312,42 @@ class C
 // ---- CR0047 / CR0048 ----
 
 [<Fact>]
+let ``CR0047 notes a top-level lock on a literal or a Type without a gate offer, and nothing throws`` () =
+    let run (source: string) =
+        let compilation, tree =
+            compileRaw Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest source
+
+        let model = compilation.GetSemanticModel(tree, false)
+
+        CSharp.Refactor.Roslyn.Rules.allWithFailures
+            tree
+            model
+            (CSharp.Refactor.Roslyn.Context.forTree None compilation tree false)
+
+    for body in
+        [
+            "lock (\"gate\") { Console.Write(\"x\"); }\n"
+            "lock (typeof(string)) { Console.Write(\"x\"); }\n"
+            "Run();\nvoid Run() { lock (\"gate\") { Console.Write(\"x\"); } }\n"
+            "lock (\"gate\") { Console.Write(\"x\"); }\nvar _gate = 1;\nConsole.Write(_gate);\n"
+        ] do
+        let suggestions, failures = run ("using System;\n" + body)
+        Assert.Empty failures
+        let weak = suggestions |> List.filter (fun s -> s.Code = "CR0047")
+        Assert.Equal(1, weak.Length)
+        // a field cannot be declared among top-level statements: a note
+        Assert.Empty weak.Head.Fixes
+
+    // a class member keeps the editor's gate
+    let suggestions, failures =
+        run "using System;\nclass C { void M() { lock (\"gate\") { Console.Write(\"x\"); } } }\n"
+
+    Assert.Empty failures
+    let weak = suggestions |> List.filter (fun s -> s.Code = "CR0047")
+    Assert.Equal(1, weak.Length)
+    Assert.NotEmpty weak.Head.Fixes
+
+[<Fact>]
 let ``weak locks are noted with a gate offer, Monitor.Enter with try/finally becomes lock`` () =
     let source =
         """

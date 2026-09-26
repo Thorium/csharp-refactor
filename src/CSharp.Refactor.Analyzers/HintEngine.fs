@@ -32,7 +32,14 @@
 /// literal identities, non-floating operands for an ordering flip or a
 /// `CompareTo` collapse (`!(x < 0)` is true for NaN, `x >= 0` is not),
 /// a `StringComparison` for `string.Compare` → `string.Equals`, C# 9 for
-/// `is not`.
+/// `is not`; and for `Count` → `Any`, a total predicate and an eager source
+/// (`Count` ran both to the end, `Any` stops at the first match): the hint
+/// is a note only where a throw or an effect after the first match is
+/// positively detected — `x.Value` on a `Nullable<T>`, an indexer, a
+/// `Substring`, a `seen++`, a visible iterator or `File.ReadLines` as the
+/// source (`Guards.isTotalPredicate`, `Guards.isEagerSource`). Accepted
+/// residual: a user method or getter in the predicate, or a user iterator
+/// behind an interface, that throws after the first match.
 module CSharp.Refactor.HintEngine
 
 open System
@@ -68,6 +75,14 @@ type Proof =
     /// `Any()` this rule would write is what CA1860 forbids — an error
     /// under TreatWarningsAsErrors.
     | Unsized of string list
+    /// These metavariables are lambdas whose body cannot throw or act
+    /// (`Guards.isTotalPredicate`): `Count(p)` ran them on every element,
+    /// `Any(p)` stops at the first match. Unproven, the hint is a note.
+    | TotalFunction of string list
+    /// These metavariables are sources whose enumeration neither acts nor
+    /// throws part-way (`Guards.isEagerSource`): `Count` walked them to the
+    /// end, `Any` stops at the first element. Unproven, the hint is a note.
+    | Eager of string list
 
 type Hint =
     {
@@ -152,17 +167,19 @@ let builtinHints: Hint list =
         h "x.Where(p).LastOrDefault() ===> x.LastOrDefault(p)" [] [ "IDE0120" ]
         h "x.Where(p).Single() ===> x.Single(p)" [] [ "IDE0120" ]
         h "x.Where(p).SingleOrDefault() ===> x.SingleOrDefault(p)" [] [ "IDE0120" ]
-        h "x.Where(p).Count() > 0 ===> x.Any(p)" [] [ "CA1827" ]
-        h "x.Where(p).Count() != 0 ===> x.Any(p)" [] [ "CA1827" ]
-        h "x.Where(p).Count() == 0 ===> !x.Any(p)" [] [ "CA1827" ]
-        h "x.Count() > 0 ===> x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
-        h "x.Count() != 0 ===> x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
-        h "x.Count() >= 1 ===> x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
-        h "x.Count() == 0 ===> !x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
-        h "x.Count() < 1 ===> !x.Any()" [ Unsized [ "x" ] ] [ "CA1827" ]
-        h "x.Count(p) > 0 ===> x.Any(p)" [] [ "CA1827" ]
-        h "x.Count(p) != 0 ===> x.Any(p)" [] [ "CA1827" ]
-        h "x.Count(p) == 0 ===> !x.Any(p)" [] [ "CA1827" ]
+        // Count runs the source (and the predicate) to the end, Any stops at
+        // the first match: exact only when neither can act or throw after it
+        h "x.Where(p).Count() > 0 ===> x.Any(p)" [ Eager [ "x" ]; TotalFunction [ "p" ] ] [ "CA1827" ]
+        h "x.Where(p).Count() != 0 ===> x.Any(p)" [ Eager [ "x" ]; TotalFunction [ "p" ] ] [ "CA1827" ]
+        h "x.Where(p).Count() == 0 ===> !x.Any(p)" [ Eager [ "x" ]; TotalFunction [ "p" ] ] [ "CA1827" ]
+        h "x.Count() > 0 ===> x.Any()" [ Unsized [ "x" ]; Eager [ "x" ] ] [ "CA1827" ]
+        h "x.Count() != 0 ===> x.Any()" [ Unsized [ "x" ]; Eager [ "x" ] ] [ "CA1827" ]
+        h "x.Count() >= 1 ===> x.Any()" [ Unsized [ "x" ]; Eager [ "x" ] ] [ "CA1827" ]
+        h "x.Count() == 0 ===> !x.Any()" [ Unsized [ "x" ]; Eager [ "x" ] ] [ "CA1827" ]
+        h "x.Count() < 1 ===> !x.Any()" [ Unsized [ "x" ]; Eager [ "x" ] ] [ "CA1827" ]
+        h "x.Count(p) > 0 ===> x.Any(p)" [ Eager [ "x" ]; TotalFunction [ "p" ] ] [ "CA1827" ]
+        h "x.Count(p) != 0 ===> x.Any(p)" [ Eager [ "x" ]; TotalFunction [ "p" ] ] [ "CA1827" ]
+        h "x.Count(p) == 0 ===> !x.Any(p)" [ Eager [ "x" ]; TotalFunction [ "p" ] ] [ "CA1827" ]
         h "!(x is T) ===> x is not T" [ Language 9 ] [ "IDE0083" ]
     ]
     |> List.choose id
@@ -521,6 +538,18 @@ let private proven (model: SemanticModel) (ctx: RuleContext) (env: Map<string, B
     | StringComparison names -> all names (fun t -> not (isNull t) && t.ToDisplayString() = "System.StringComparison")
     | Language major -> RuleContext.languageAtLeast ctx major
     | Unsized names -> all names (fun t -> not (isNull t || Linq.isCollection t))
+    | TotalFunction names ->
+        names
+        |> List.forall (fun n ->
+            match bound n with
+            | Some e -> Guards.isTotalPredicate model e
+            | None -> false)
+    | Eager names ->
+        names
+        |> List.forall (fun n ->
+            match bound n with
+            | Some e -> Guards.isEagerSource model e
+            | None -> false)
     | Atomic names ->
         names
         |> List.forall (fun n ->
@@ -637,10 +666,21 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         || (spelledAreBcl model spelled
                             && rhsNamesAreBcl model target.SpanStart hint.Rhs env)
 
+                    // a shape proof failing means the hint does not apply; an
+                    // exactness proof (Count's full walk against Any's early
+                    // stop) failing leaves the advice as a note
+                    let exactness, shape =
+                        hint.Proofs
+                        |> List.partition (fun p ->
+                            match p with
+                            | TotalFunction _
+                            | Eager _ -> true
+                            | _ -> false)
+
                     if
                         not pureEnough
                         || not bclOk
-                        || not (hint.Proofs |> List.forall (proven model ctx env))
+                        || not (shape |> List.forall (proven model ctx env))
                         || insideAttributeOrTree model target
                     then
                         None
@@ -665,13 +705,21 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         if Guards.speculativeCheck model [ edit ] then
                             matched.Add target.Span |> ignore
 
-                            Some
-                                {
-                                    Code = Code
-                                    Message = $"'{text.ToString target.Span}' is '{replacement}' ({hint.Text})"
-                                    Span = target.Span
-                                    Fixes = [ Suggestion.fix ("Rewrite: " + hint.Text) Code [ edit ] ]
-                                }
+                            if exactness |> List.forall (proven model ctx env) then
+                                Some
+                                    {
+                                        Code = Code
+                                        Message = $"'{text.ToString target.Span}' is '{replacement}' ({hint.Text})"
+                                        Span = target.Span
+                                        Fixes = [ Suggestion.fix ("Rewrite: " + hint.Text) Code [ edit ] ]
+                                    }
+                            else
+                                Some(
+                                    Suggestion.note
+                                        Code
+                                        $"'{text.ToString target.Span}' is '{replacement}' ({hint.Text}) — no fix: Count runs the source and the predicate to the end, Any stops at the first match, and either may act or throw after it"
+                                        target.Span
+                                )
                         else
                             None)
         | _ -> None)

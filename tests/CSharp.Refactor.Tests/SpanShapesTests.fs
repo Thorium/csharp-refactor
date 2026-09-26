@@ -182,6 +182,232 @@ class C
     Assert.Contains("s = s.Trim(); return s.Substring(0, 6) == \"ORDER-\";", fixedSource)
     Assert.Contains("using System;", fixedSource)
 
+[<Fact>]
+let ``CR0175 sweeps only where the guard and the cut read the same string`` () =
+    let source =
+        """
+record Order(string Code);
+class C
+{
+    readonly string name = "ORDER-1";
+    string field = "ORDER-1";
+    string Label { get; } = "ORDER-1";
+    int calls;
+    string Computed => (calls++ % 2 == 0) ? "ORDER-1234" : "ab";
+    bool Reset() { field = "ab"; return true; }
+    void Clear() { field = "ab"; }
+    bool A(string s) => s.Length >= 6 && s.Substring(0, 6) == "ORDER-";
+    bool B(string s) { var t = s.Trim(); if (t.Length >= 6) return t.Substring(0, 6) == "ORDER-"; return false; }
+    bool D() => this.name.Length >= 6 && this.name.Substring(0, 6) == "ORDER-";
+    bool E(Order o) => o.Code.Length >= 6 && o.Code.Substring(0, 6) == "ORDER-";
+    bool F(string s) => s.Length >= 6 ? s.Substring(0, 6) == "ORDER-" : false;
+    bool G() => Label.Length >= 6 && Label.Substring(0, 6) == "ORDER-";
+    bool H() => field.Length >= 6 && field.Substring(0, 6) == "ORDER-";
+    bool F1() => Computed.Length >= 6 && Computed.Substring(0, 6) == "ORDER-";
+    bool F2() => this.field.Length >= 6 && Reset() && this.field.Substring(0, 6) == "ORDER-";
+    bool F3() { string s = "ORDER-1234"; return s.Length >= 6 && (s = "ab") != null && s.Substring(0, 6) == "ORDER-"; }
+    bool F4() { string s = "ORDER-1234"; void Shorten() { s = "ab"; } if (s.Length >= 6) { Shorten(); return s.Substring(0, 6) == "ORDER-"; } return false; }
+    bool F5() { if (field.Length >= 6) { Clear(); return field.Substring(0, 6) == "ORDER-"; } return false; }
+}
+"""
+
+    let fired = suggestCode "CR0175" source
+    Assert.Equal(12, fired.Length)
+
+    let swept =
+        fired
+        |> List.filter (fun s -> s.Fixes |> List.exists (fun f -> not f.EditorOnly))
+        |> List.length
+
+    Assert.Equal(7, swept)
+    let fixedSource = fixAll "CR0175" source
+
+    Assert.Contains(
+        "bool A(string s) => s.Length >= 6 && s.StartsWith(\"ORDER-\", StringComparison.Ordinal);",
+        fixedSource
+    )
+
+    Assert.Contains("return t.StartsWith(\"ORDER-\", StringComparison.Ordinal);", fixedSource)
+    Assert.Contains("this.name.Length >= 6 && this.name.StartsWith(\"ORDER-\", StringComparison.Ordinal);", fixedSource)
+    Assert.Contains("o.Code.Length >= 6 && o.Code.StartsWith(\"ORDER-\", StringComparison.Ordinal);", fixedSource)
+    Assert.Contains("s.Length >= 6 ? s.StartsWith(\"ORDER-\", StringComparison.Ordinal) : false;", fixedSource)
+    Assert.Contains("Label.Length >= 6 && Label.StartsWith(\"ORDER-\", StringComparison.Ordinal);", fixedSource)
+    Assert.Contains("field.Length >= 6 && field.StartsWith(\"ORDER-\", StringComparison.Ordinal);", fixedSource)
+    Assert.Contains("Computed.Length >= 6 && Computed.Substring(0, 6) == \"ORDER-\";", fixedSource)
+    Assert.Contains("Reset() && this.field.Substring(0, 6) == \"ORDER-\";", fixedSource)
+    Assert.Contains("(s = \"ab\") != null && s.Substring(0, 6) == \"ORDER-\";", fixedSource)
+    Assert.Contains("Shorten(); return s.Substring(0, 6) == \"ORDER-\";", fixedSource)
+    Assert.Contains("Clear(); return field.Substring(0, 6) == \"ORDER-\";", fixedSource)
+
+[<Fact>]
+let ``CR0175 under an if ends the window at the cut; closures and awaits hold it to the editor, an interface call does not``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Threading.Tasks;
+class C
+{
+    static string name = "abcdef";
+    string Name { get; set; } = "abcd";
+    static void Log(string m) { }
+    void Hit() { }
+    void S02(string raw) { var line = raw; line = line.Trim(); if (line.Length >= 3) { if (line.Substring(0, 3) == "abc") Log(line); } }
+    bool S03() { if (Name.Length >= 3) { if (Name.Substring(0, 3) == "abc") { Hit(); return true; } } return false; }
+    void S12(StringReader reader) { string? line; while ((line = reader.ReadLine()) != null) { if (line.Length >= 3) { if (line.Substring(0, 3) == "abc") Log(line); } } }
+    async Task<bool> S05(Task t) { if (name.Length >= 3) { await t; return name.Substring(0, 3) == "abc"; } return false; }
+    bool S06() { string s = "abcdef"; Action<int> reset = _ => s = ""; if (s.Length >= 3) { Array.ForEach(new[] { 1 }, reset); return s.Substring(0, 3) == "abc"; } return false; }
+    bool S07() { string s = "abcdef"; var lazy = new Lazy<int>(() => { s = ""; return 1; }); return s.Length >= 3 && lazy.Value == 1 && s.Substring(0, 3) == "abc"; }
+    bool S08(ICollection<int> sink) { if (name.Length >= 3) { sink.Add(1); return name.Substring(0, 3) == "abc"; } return false; }
+    bool S09() { string s = "abcdef"; Action reset = () => s = ""; if (s.Length >= 3) { Task.Run(reset).Wait(); return s.Substring(0, 3) == "abc"; } return false; }
+}
+"""
+
+    let fired = suggestCode "CR0175" source
+    Assert.Equal(8, fired.Length)
+
+    let swept =
+        fired
+        |> List.filter (fun s -> s.Fixes |> List.exists (fun f -> not f.EditorOnly))
+        |> firedText source
+
+    // S08's `sink.Add(1)` runs an implementation that cannot be seen: the
+    // accepted residual, swept
+    Assert.Equal<string list>(
+        [
+            "line.Substring(0, 3) == \"abc\""
+            "Name.Substring(0, 3) == \"abc\""
+            "line.Substring(0, 3) == \"abc\""
+            "name.Substring(0, 3) == \"abc\""
+        ],
+        swept
+    )
+
+[<Fact>]
+let ``CR0175 holds to the editor a user conversion, operator or Deconstruct between, and a cut deferred into a lambda``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Linq;
+public sealed class W
+{
+    public Rec? R;
+    public static implicit operator string(W w) { w.R!.Name = ""; return "x"; }
+    public static W operator +(W w, int i) { w.R!.Name = ""; return w; }
+    public static W operator ++(W w) { w.R!.Name = ""; return w; }
+    public void Deconstruct(out int a, out int b) { R!.Name = ""; a = b = 0; }
+}
+public sealed class Benign
+{
+    public static implicit operator string(Benign b) => "x";
+}
+public sealed class Rec
+{
+    public string Name = "abcd";
+    void Reset() { Name = ""; }
+    bool Fixed(Benign b) { if (Name.Length >= 3) { string t = b; if (Name.Substring(0, 3) == "abc") return true; } return false; }
+    bool V01(W w) { if (Name.Length >= 3) { string t = w; if (Name.Substring(0, 3) == "abc") return true; } return false; }
+    bool V02(W w) { if (Name.Length >= 3) { w += 1; if (Name.Substring(0, 3) == "abc") return true; } return false; }
+    bool V03(W w) { if (Name.Length >= 3) { w++; if (Name.Substring(0, 3) == "abc") return true; } return false; }
+    bool V06(W w) { if (Name.Length >= 3) { var (a, b) = w; if (Name.Substring(0, 3) == "abc") return true; } return false; }
+    bool W01() { if (Name.Length >= 3) { Func<bool> f = () => Name.Substring(0, 3) == "abc"; Reset(); return f(); } return false; }
+    bool W03() { if (Name.Length >= 3) { bool F() => Name.Substring(0, 3) == "abc"; Reset(); return F(); } return false; }
+    int W04() { if (Name.Length >= 3) { var q = new[] { 1 }.Where(i => Name.Substring(0, 3) == "abc"); Reset(); return q.Count(); } return 0; }
+    bool Kept(int n) { if (Name.Length >= 3) { n += 1; if (Name.Substring(0, 3) == "abc") return true; } return false; }
+}
+"""
+
+    let fired = suggestCode "CR0175" source
+    Assert.Equal(9, fired.Length)
+
+    // the operators, conversion and Deconstruct of `W` visibly assign `Name`;
+    // `Benign`'s conversion does not, and `n += 1` is the built-in operator
+    let swept =
+        fired
+        |> List.filter (fun s -> s.Fixes |> List.exists (fun f -> not f.EditorOnly))
+        |> List.length
+
+    Assert.Equal(2, swept)
+
+[<Fact>]
+let ``CR0175 in a top-level program sees a local reassigned in a neighbouring statement`` () =
+    let program (extra: string) =
+        "using System;\nstring s = Console.ReadLine() ?? \"\";\n"
+        + extra
+        + "if (s.Length >= 3)\n{\n    Console.WriteLine(s.Substring(0, 3) == \"abc\");\n}\n"
+
+    let run (source: string) =
+        let compilation, tree =
+            compileRaw Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest source
+
+        suggestRaw compilation tree |> List.filter (fun s -> s.Code = "CR0175")
+
+    let sweeps (found: CSharp.Refactor.Suggestion list) =
+        found
+        |> List.exists (fun f -> f.Fixes |> List.exists (fun x -> not x.EditorOnly))
+
+    // a lambda in another top-level statement writes the local: never proven
+    let reassigned = run (program "Action reset = () => s = \"\";\nreset();\n")
+    Assert.Equal(1, reassigned.Length)
+    Assert.False(sweeps reassigned)
+
+    let plain = run (program "")
+    Assert.Equal(1, plain.Length)
+    Assert.True(sweeps plain)
+
+[<Fact>]
+let ``CR0175 sees a deconstruction, a ref alias and a primary constructor parameter as writes of the receiver`` () =
+    let source =
+        """
+using System;
+public sealed class Node { public string Name { get; set; } = "abcdef"; }
+public sealed class Holder(string name)
+{
+    public void Reset() => name = "x";
+    public bool H07() { if (name.Length >= 3) { Reset(); return name.Substring(0, 3) == "abc"; } return false; }
+}
+public sealed class Lazy(string name)
+{
+    public Action Zap => () => name = "x";
+    public bool H08() { if (name.Length >= 3) { Zap(); return name.Substring(0, 3) == "abc"; } return false; }
+}
+public sealed class Still(string name)
+{
+    public void Touch() { }
+    public bool H09() { if (name.Length >= 3) { Touch(); return name.Substring(0, 3) == "abc"; } return false; }
+}
+public sealed class Rec
+{
+    string name = "abcdef";
+    public bool H04() { if (name.Length >= 3) { (name, _) = ("x", 1); return name.Substring(0, 3) == "abc"; } return false; }
+}
+static class C
+{
+    static bool H02(string s) { if (s.Length >= 3) { (s, _) = ("x", 1); return s.Substring(0, 3) == "abc"; } return false; }
+    static bool H03(string s, string other) { if (s.Length >= 3) { (s, other) = (other, s); return s.Substring(0, 3) == "abc"; } return false; }
+    static bool H05(Node n) { if (n.Name.Length >= 3) { (n.Name, _) = ("x", 1); return n.Name.Substring(0, 3) == "abc"; } return false; }
+    static bool J01(string s) { ref string r = ref s; if (s.Length >= 3) { r = "x"; return s.Substring(0, 3) == "abc"; } return false; }
+    static bool J02(string s) { ref string r = ref s; return s.Length >= 3 && (r = "x").Length > 0 && s.Substring(0, 3) == "abc"; }
+    static bool Kept(string s, string other) { if (s.Length >= 3) { (other, _) = ("x", 1); return s.Substring(0, 3) == "abc" && other == "x"; } return false; }
+}
+"""
+
+    let fired = suggestCode "CR0175" source
+    Assert.Equal(10, fired.Length)
+
+    let swept =
+        fired
+        |> List.filter (fun s -> s.Fixes |> List.exists (fun f -> not f.EditorOnly))
+        |> firedText source
+
+    // H09 (a primary parameter the type never writes) and Kept (another local deconstructed)
+    Assert.Equal<string list>([ "name.Substring(0, 3) == \"abc\""; "s.Substring(0, 3) == \"abc\"" ], swept)
+
 // ---- CR0176 ----
 
 [<Fact>]

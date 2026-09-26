@@ -80,9 +80,18 @@ let private weakLocks (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContex
                         | :? MemberDeclarationSyntax as m -> Some m
                         | _ -> None)
 
+                // `_gate` unused in the type — or, for a top-level statement, in
+                // the whole unit (its enclosing member is the unit itself)
+                let gateFree =
+                    let scope = Text.enclosingMember l
+                    let owner = if isNull scope.Parent then scope else scope.Parent
+                    not (Text.mentionsName "_gate" owner)
+
                 let fixes =
                     match member', ownsIt with
-                    | Some m, true when not (Text.mentionsName "_gate" (Text.enclosingMember l).Parent) ->
+                    // a field cannot be declared among top-level statements: a note
+                    | Some(:? GlobalStatementSyntax), _ -> []
+                    | Some m, true when gateFree ->
                         let isStatic =
                             (e :? TypeOfExpressionSyntax)
                             || m.Modifiers |> Seq.exists (fun t -> t.IsKind SyntaxKind.StaticKeyword)

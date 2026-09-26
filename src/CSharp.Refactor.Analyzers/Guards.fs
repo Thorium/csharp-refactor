@@ -15,6 +15,7 @@
 module CSharp.Refactor.Guards
 
 open System
+open System.Collections.Concurrent
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.CSharp.Syntax
@@ -115,6 +116,60 @@ let private isBclIndexerReceiver (t: ITypeSymbol) =
     | :? IArrayTypeSymbol -> true
     | :? INamedTypeSymbol as n -> (fullNameOf n.OriginalDefinition).StartsWith "System."
     | _ -> false
+
+/// Is the symbol the BCL's own: compiled (not declared in source) into a
+/// `System.*` namespace? Its body is no code of the user's.
+let isBclSymbol (s: ISymbol) =
+    not (isNull s)
+    && not (isNull s.ContainingNamespace)
+    && s.DeclaringSyntaxReferences.IsEmpty
+    && (let ns = s.ContainingNamespace.ToDisplayString()
+        ns = "System" || ns.StartsWith "System.")
+
+/// A type whose `Equals`, `GetHashCode` and `CompareTo` are the BCL's own:
+/// a string, a primitive, an enum, a BCL value type over such (`Guid`,
+/// `DateTime`, `KeyValuePair<string, int>`, `int?`) — never a user type or
+/// `object`, whose overrides may act or throw.
+let rec isBclElementType (t: ITypeSymbol) =
+    not (isNull t)
+    && (match t.SpecialType with
+        | SpecialType.System_Object -> false
+        | SpecialType.None ->
+            t.TypeKind = TypeKind.Enum
+            || (t.IsValueType
+                && isBclSymbol t.OriginalDefinition
+                && (match t with
+                    | :? INamedTypeSymbol as n -> n.TypeArguments |> Seq.forall isBclElementType
+                    | _ -> true))
+        | _ -> true)
+
+/// A property whose getter reads a field and nothing else: an auto-property
+/// (`{ get; }`, `{ get; set; }`, `{ get; init; }`) or a record's positional
+/// one, never virtual, abstract or an interface's (a derived type's getter
+/// may compute), nor a partial declaration (its implementation computes).
+let isAutoProperty (p: IPropertySymbol) =
+    not (isNull p)
+    && not (isNull p.GetMethod)
+    && not p.IsIndexer
+    && not (p.IsAbstract || p.IsVirtual || p.IsExtern || (p.IsOverride && not p.IsSealed))
+    && p.ContainingType.TypeKind <> TypeKind.Interface
+    && (match p.DeclaringSyntaxReferences |> Seq.tryHead with
+        | Some r ->
+            match r.GetSyntax() with
+            | :? PropertyDeclarationSyntax as d ->
+                isNull d.ExpressionBody
+                && not (d.Modifiers |> Seq.exists (fun m -> m.IsKind SyntaxKind.PartialKeyword))
+                && not (isNull d.AccessorList)
+                && d.AccessorList.Accessors
+                   |> Seq.forall (fun a -> isNull a.Body && isNull a.ExpressionBody)
+            // a record's positional parameter
+            | :? ParameterSyntax -> true
+            | _ -> false
+        | None ->
+            p.GetMethod.GetAttributes()
+            |> Seq.exists (fun a ->
+                not (isNull a.AttributeClass)
+                && a.AttributeClass.Name = "CompilerGeneratedAttribute"))
 
 let private symbolOf (model: SemanticModel) (node: SyntaxNode) =
     let info = model.GetSymbolInfo node
@@ -256,8 +311,9 @@ let private isStatementLike (node: SyntaxNode) =
 /// compute and nothing else — a pure type's method or property, a
 /// lambda of the same, a tuple or record construction — with no
 /// statement-shaped construct anywhere in it? A user function is opaque
-/// and fails the proof; so does a property of a user type (a getter runs
-/// its body) and `Lazy<T>.Value` (which forces); so does a `dynamic`
+/// and fails the proof; so does a computed property of a user type (a
+/// getter runs its body; an auto-property's only reads its field) and
+/// `Lazy<T>.Value` (which forces); so does a `dynamic`
 /// operand, whose call binds at run time.
 let rec callsOnlyCore (model: SemanticModel) (e: SyntaxNode) : bool =
     let self = e
@@ -284,6 +340,8 @@ let rec callsOnlyCore (model: SemanticModel) (e: SyntaxNode) : bool =
                     let owner = ownerName p
 
                     isPureProperty p
+                    // an auto-property's getter reads its field, as a field read does
+                    || isAutoProperty p
                     || (owner = "System.Collections.Generic.List" && p.Name = "Count")
                     || (owner = "System.Collections.Generic.Dictionary" && p.Name = "Count")
                     || (p.ContainingType.TypeKind = TypeKind.Array)
@@ -303,7 +361,7 @@ let rec callsOnlyCore (model: SemanticModel) (e: SyntaxNode) : bool =
                 && not (id.Parent :? InvocationExpressionSyntax)
                 ->
                 match symbolOf model id with
-                | ValueSome(:? IPropertySymbol as p) -> isPureProperty p
+                | ValueSome(:? IPropertySymbol as p) -> isPureProperty p || isAutoProperty p
                 | ValueSome(:? IFieldSymbol) -> true
                 | ValueSome(:? IDynamicTypeSymbol) -> false
                 | _ -> true
@@ -827,6 +885,581 @@ let sameReference (model: SemanticModel) (a: ExpressionSyntax) (b: ExpressionSyn
     && (let sa = model.GetSymbolInfo(a).Symbol
         let sb = model.GetSymbolInfo(b).Symbol
         (isNull sa && isNull sb) || SymbolEqualityComparer.Default.Equals(sa, sb))
+
+let private candidateVerdicts =
+    System.Runtime.CompilerServices.ConditionalWeakTable<SemanticModel, ConcurrentDictionary<string, bool>>()
+
+/// Is every method of this name callable on a receiver of this type at the
+/// position — its own members and the extension methods in scope — the
+/// BCL's? A fix that spells `xs.Any(…)` for `Enumerable.Any` would call a
+/// repository's own extension with a more specific receiver instead.
+let onlyBclCandidates (model: SemanticModel) (position: int) (receiver: ITypeSymbol) (name: string) =
+    not (isNull receiver)
+    && (
+        // the lookup walks every extension method in scope: once per receiver
+        // type, name and namespace scope (what `using`s see) of a file
+        let scope =
+            match model.SyntaxTree.GetRoot().FindToken(position).Parent with
+            | null -> -1
+            | parent ->
+                parent.AncestorsAndSelf()
+                |> Seq.tryPick (fun n ->
+                    match n with
+                    | :? BaseNamespaceDeclarationSyntax -> Some n.SpanStart
+                    | _ -> None)
+                |> Option.defaultValue -1
+
+        let key =
+            $"{receiver.ToDisplayString SymbolDisplayFormat.FullyQualifiedFormat}|{name}|{scope}"
+
+        candidateVerdicts
+            .GetValue(model, fun _ -> ConcurrentDictionary<string, bool>())
+            .GetOrAdd(key, fun _ -> model.LookupSymbols(position, receiver, name, true) |> Seq.forall isBclSymbol))
+
+/// The bodies a symbol declares in this compilation — a method's, a local
+/// function's, an accessor's, a constructor's, an operator's or a lambda's —
+/// each with the semantic model of its tree. None for metadata, an
+/// interface's or abstract member, a delegate's `Invoke`, a field or a
+/// parameter: what cannot be seen is not detected.
+let visibleBodies (model: SemanticModel) (s: ISymbol) : (SemanticModel * SyntaxNode) list =
+    if isNull s then
+        []
+    else
+        let s =
+            match s with
+            | :? IMethodSymbol as m when not (isNull m.ReducedFrom) -> m.ReducedFrom :> ISymbol
+            | _ -> s.OriginalDefinition
+
+        let accessors (list: AccessorListSyntax) : SyntaxNode list =
+            if isNull list then
+                []
+            else
+                list.Accessors
+                |> Seq.collect (fun a -> [ a.Body :> SyntaxNode; a.ExpressionBody :> SyntaxNode ])
+                |> List.ofSeq
+
+        s.DeclaringSyntaxReferences
+        |> Seq.collect (fun r ->
+            let node = r.GetSyntax()
+            let tree = node.SyntaxTree
+
+            if not (model.Compilation.ContainsSyntaxTree tree) then
+                []
+            else
+                let m =
+                    if obj.ReferenceEquals(tree, model.SyntaxTree) then
+                        model
+                    else
+                        model.Compilation.GetSemanticModel(tree, false)
+
+                let bodies: SyntaxNode list =
+                    match node with
+                    | :? BaseMethodDeclarationSyntax as d -> [ d.Body :> SyntaxNode; d.ExpressionBody :> SyntaxNode ]
+                    | :? LocalFunctionStatementSyntax as d -> [ d.Body :> SyntaxNode; d.ExpressionBody :> SyntaxNode ]
+                    | :? PropertyDeclarationSyntax as d -> (d.ExpressionBody :> SyntaxNode) :: accessors d.AccessorList
+                    | :? IndexerDeclarationSyntax as d -> (d.ExpressionBody :> SyntaxNode) :: accessors d.AccessorList
+                    | :? EventDeclarationSyntax as d -> accessors d.AccessorList
+                    | :? AccessorDeclarationSyntax as a -> [ a.Body :> SyntaxNode; a.ExpressionBody :> SyntaxNode ]
+                    // an expression-bodied property's getter declares itself as the arrow
+                    | :? ArrowExpressionClauseSyntax as a -> [ a ]
+                    | :? AnonymousFunctionExpressionSyntax as l -> [ l.Body ]
+                    | _ -> []
+
+                bodies |> List.filter (isNull >> not) |> List.map (fun b -> m, b))
+        |> List.ofSeq
+
+let private handlerCache =
+    System.Runtime.CompilerServices.ConditionalWeakTable<
+        Compilation,
+        ConcurrentDictionary<ISymbol, (SemanticModel * ExpressionSyntax) list>
+     >()
+
+/// Where a delegate, a lazy or a stored sequence came from: the value's
+/// initializer, the assignments to it in the member that reads it, and for
+/// an event every handler `+=`'d to it anywhere in the compilation — the
+/// expressions, each with its model, so that a caller may look at what they
+/// touch as well as at what they run.
+let originsOf (model: SemanticModel) (e: ExpressionSyntax) : (SemanticModel * ExpressionSyntax) list =
+    let modelFor (tree: SyntaxTree) =
+        if obj.ReferenceEquals(tree, model.SyntaxTree) then
+            model
+        else
+            model.Compilation.GetSemanticModel(tree, false)
+
+    match symbolOf model e with
+    | ValueSome(:? IEventSymbol as ev) ->
+        let cache =
+            handlerCache.GetValue(
+                model.Compilation,
+                fun _ ->
+                    ConcurrentDictionary<ISymbol, (SemanticModel * ExpressionSyntax) list>(
+                        SymbolEqualityComparer.Default
+                    )
+            )
+
+        cache.GetOrAdd(
+            ev,
+            fun _ ->
+                model.Compilation.SyntaxTrees
+                |> Seq.collect (fun tree ->
+                    let m = modelFor tree
+
+                    tree.GetRoot().DescendantNodes()
+                    |> Seq.choose (fun n ->
+                        match n with
+                        | :? AssignmentExpressionSyntax as a when
+                            a.IsKind SyntaxKind.AddAssignmentExpression
+                            && SymbolEqualityComparer.Default.Equals(m.GetSymbolInfo(a.Left).Symbol, ev)
+                            ->
+                            Some(m, a.Right)
+                        | _ -> None))
+                |> List.ofSeq
+        )
+    | ValueSome((:? ILocalSymbol | :? IFieldSymbol | :? IPropertySymbol | :? IParameterSymbol) as v) ->
+        let initializers =
+            v.DeclaringSyntaxReferences
+            |> Seq.choose (fun r ->
+                match r.GetSyntax() with
+                | :? VariableDeclaratorSyntax as d when not (isNull d.Initializer) ->
+                    Some(modelFor d.SyntaxTree, d.Initializer.Value)
+                | :? PropertyDeclarationSyntax as p when not (isNull p.Initializer) ->
+                    Some(modelFor p.SyntaxTree, p.Initializer.Value)
+                | _ -> None)
+            |> List.ofSeq
+
+        let assigned =
+            (Text.enclosingMember e).DescendantNodes()
+            |> Seq.choose (fun n ->
+                match n with
+                | :? AssignmentExpressionSyntax as a when
+                    a.IsKind SyntaxKind.SimpleAssignmentExpression
+                    && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, v)
+                    ->
+                    Some(model, a.Right)
+                | _ -> None)
+            |> List.ofSeq
+
+        initializers @ assigned
+    | _ -> []
+
+/// What an origin expression runs: a lambda's own symbol, a method group's
+/// method, a call's target, a constructor — and the lambdas or methods a
+/// constructor is handed (`new Lazy<T>(() => …)`, `new Thread(Run)`).
+let originSymbols (m: SemanticModel) (value: ExpressionSyntax) : ISymbol list =
+    match value with
+    | :? BaseObjectCreationExpressionSyntax as c ->
+        let handed =
+            if isNull c.ArgumentList then
+                []
+            else
+                c.ArgumentList.Arguments
+                |> Seq.collect (fun a -> symbolOf m a.Expression |> ValueOption.toList)
+                |> List.ofSeq
+
+        (symbolOf m value |> ValueOption.toList) @ handed
+    | _ -> symbolOf m value |> ValueOption.toList
+
+/// The delegate a `d(x)`, `d.Invoke(x)` or `d?.Invoke(x)` invokes.
+let delegateReceiver (inv: InvocationExpressionSyntax) : ExpressionSyntax =
+    match inv.Expression with
+    | :? MemberAccessExpressionSyntax as ma when ma.Name.Identifier.ValueText = "Invoke" -> ma.Expression
+    | :? MemberBindingExpressionSyntax ->
+        match inv.Parent with
+        | :? ConditionalAccessExpressionSyntax as ca -> ca.Expression
+        | _ -> inv.Expression
+    | e -> e
+
+/// The symbols a node itself runs (not its descendants'): the target of a
+/// call or a creation, a property's accessors, an indexer, a user operator,
+/// conversion or `Deconstruct`, a `foreach`'s enumerator members, a method
+/// group handed on — and for a delegate invoked, or a sequence enumerated,
+/// what it visibly came from.
+let calleesOfNode (m: SemanticModel) (n: SyntaxNode) : ISymbol list =
+    let symbols (x: SyntaxNode) = symbolOf m x |> ValueOption.toList
+
+    let originsRun (e: ExpressionSyntax) =
+        originsOf m e |> List.collect (fun (om, v) -> originSymbols om v)
+
+    let own =
+        match n with
+        | :? InvocationExpressionSyntax as inv ->
+            match symbolOf m inv with
+            | ValueSome(:? IMethodSymbol as meth) when meth.MethodKind = MethodKind.DelegateInvoke ->
+                originsRun (delegateReceiver inv)
+            | ValueSome s -> [ s ]
+            | ValueNone -> []
+        | :? BaseObjectCreationExpressionSyntax as c -> originSymbols m c
+        | :? ElementAccessExpressionSyntax
+        | :? IdentifierNameSyntax
+        | :? MemberAccessExpressionSyntax
+        | :? MemberBindingExpressionSyntax ->
+            match symbolOf m n with
+            | ValueSome(:? IPropertySymbol as p) -> [ p ]
+            // a method group handed on runs wherever it is called
+            | ValueSome(:? IMethodSymbol as meth) when not (n.Parent :? InvocationExpressionSyntax) -> [ meth ]
+            | _ -> []
+        | :? BinaryExpressionSyntax
+        | :? PrefixUnaryExpressionSyntax
+        | :? PostfixUnaryExpressionSyntax
+        | :? CastExpressionSyntax ->
+            match symbolOf m n with
+            | ValueSome(:? IMethodSymbol as meth) -> [ meth ]
+            | _ -> []
+        | :? AssignmentExpressionSyntax as a ->
+            let operator =
+                match symbolOf m a with
+                | ValueSome(:? IMethodSymbol as meth) -> [ meth :> ISymbol ]
+                | _ -> []
+
+            let deconstruct =
+                if (a.Left :? TupleExpressionSyntax) || (a.Left :? DeclarationExpressionSyntax) then
+                    match m.GetDeconstructionInfo(a).Method with
+                    | null -> []
+                    | d -> [ d :> ISymbol ]
+                else
+                    []
+
+            operator @ deconstruct
+        | :? CommonForEachStatementSyntax as f ->
+            let info = m.GetForEachStatementInfo f
+
+            let deconstruct =
+                match f with
+                | :? ForEachVariableStatementSyntax as v ->
+                    match m.GetDeconstructionInfo(v).Method with
+                    | null -> []
+                    | d -> [ d :> ISymbol ]
+                | _ -> []
+
+            ([
+                info.GetEnumeratorMethod :> ISymbol
+                info.MoveNextMethod
+                info.CurrentProperty
+                info.DisposeMethod
+             ]
+             |> List.filter (isNull >> not))
+            @ deconstruct
+            @ originsRun f.Expression
+        | _ -> []
+
+    // a user-defined conversion on the way to wherever the value goes
+    let converted =
+        match n with
+        | :? ExpressionSyntax as x ->
+            let c = m.GetConversion x
+
+            if c.IsUserDefined && not (isNull c.MethodSymbol) then
+                [ c.MethodSymbol :> ISymbol ]
+            else
+                []
+        | _ -> []
+
+    own @ converted
+
+/// The symbols a body runs, each once.
+let calleesOf (m: SemanticModel) (body: SyntaxNode) : ISymbol list =
+    let seen =
+        System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
+
+    body.DescendantNodesAndSelf()
+    |> Seq.collect (calleesOfNode m)
+    |> Seq.filter seen.Add
+    |> List.ofSeq
+
+/// Does anything `roots` run — followed through the bodies this
+/// compilation holds, `depth` calls deep — have a body `test` accepts? A
+/// body that cannot be seen (metadata, an interface's or abstract member,
+/// a delegate of unknown origin) satisfies nothing.
+let reachesThrough
+    (model: SemanticModel)
+    (depth: int)
+    (test: SemanticModel -> SyntaxNode -> bool)
+    (roots: ISymbol list)
+    : bool =
+    let visited =
+        System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
+
+    let rec go (depth: int) (s: ISymbol) =
+        not (isNull s)
+        && visited.Add s
+        && visibleBodies model s
+           |> List.exists (fun (m, body) ->
+               test m body || (depth > 0 && calleesOf m body |> List.exists (go (depth - 1))))
+
+    roots |> List.exists (go depth)
+
+/// A getter whose visible body answers each read differently: it assigns,
+/// counts (`calls++`), constructs or awaits. One that cannot be seen: no.
+let unstableGetter (model: SemanticModel) (p: IPropertySymbol) =
+    let getter: ISymbol = if isNull p.GetMethod then p else p.GetMethod
+
+    visibleBodies model getter
+    |> List.exists (fun (_, body) ->
+        body.DescendantNodesAndSelf()
+        |> Seq.exists (fun n ->
+            n :? AssignmentExpressionSyntax
+            || n.IsKind SyntaxKind.PostIncrementExpression
+            || n.IsKind SyntaxKind.PostDecrementExpression
+            || n.IsKind SyntaxKind.PreIncrementExpression
+            || n.IsKind SyntaxKind.PreDecrementExpression
+            || n :? BaseObjectCreationExpressionSyntax
+            || n :? ArrayCreationExpressionSyntax
+            || n :? ImplicitArrayCreationExpressionSyntax
+            || n :? CollectionExpressionSyntax
+            || n :? AwaitExpressionSyntax))
+
+/// Can the arithmetic overflow-check at this site: a `checked` block or
+/// expression around it, or a project compiled checked?
+let private checkedAt (model: SemanticModel) (node: SyntaxNode) =
+    (match model.Compilation.Options with
+     | :? CSharpCompilationOptions as o -> o.CheckOverflow
+     | _ -> true)
+    || node.Ancestors()
+       |> Seq.exists (fun a -> a.IsKind SyntaxKind.CheckedExpression || a.IsKind SyntaxKind.CheckedStatement)
+
+/// A BCL call known to throw on some input: a parse or a `Convert` (a
+/// `FormatException`), and — where every failure counts — `First`,
+/// `Single`, `ElementAt`, `Substring`, `Remove`, `Insert`.
+let private throwingCall (formatOnly: bool) (m: IMethodSymbol) =
+    let owner = ownerName m
+
+    m.Name = "Parse"
+    || m.Name = "ParseExact"
+    || (owner = "System.Convert"
+        && m.Name.StartsWith "To"
+        && m.Name <> "ToString"
+        && not (m.Name.StartsWith "ToBase64"))
+    || (not formatOnly
+        && isBclSymbol m
+        && List.contains m.Name [ "First"; "Last"; "Single"; "ElementAt"; "Substring"; "Remove"; "Insert" ])
+
+/// Does the expression hold a shape known to throw on some input? An
+/// element access or indexer, `Nullable<T>.Value`, a `Lazy<T>` or
+/// `ThreadLocal<T>` `Value` (the user's factory), an `Exception` member
+/// (routinely overridden) on a receiver not sealed, a parse, a `Convert`,
+/// `First`/`Single`/`ElementAt`/`Substring`/`Remove`/`Insert`, a
+/// user-defined conversion, `checked` arithmetic, a division or modulo by
+/// other than a constant, a `throw` or an `await`. `formatOnly` keeps to
+/// what throws a `FormatException` (what a `catch (FormatException)`
+/// absorbed): the parses, the converts, the user's conversions and
+/// factories. Anything else — a user method or getter, `string.Format`,
+/// `Trim`, `ToLower`, `x!` — is taken not to throw; the accepted residual
+/// is the user getter or method that does.
+let hasThrowingShape (model: SemanticModel) (formatOnly: bool) (node: SyntaxNode) : bool =
+    let integral (x: ExpressionSyntax) =
+        match model.GetTypeInfo(x).Type with
+        | null -> false
+        | t ->
+            t.IsValueType
+            && (match t.SpecialType with
+                | SpecialType.None
+                | SpecialType.System_Single
+                | SpecialType.System_Double -> false
+                | _ -> true)
+
+    // a division's constant divisor, by its own runtime type: a `char`
+    // (`x % 'a'`, legal through char→int) is no IConvertible decimal, and a
+    // throw here would silence every hint of the file
+    let safeDivisor (b: BinaryExpressionSyntax) =
+        match model.GetConstantValue b.Right with
+        | c when c.HasValue ->
+            match c.Value with
+            | :? char as ch -> ch <> '\000'
+            | :? sbyte as n -> n <> 0y && n <> -1y
+            | :? byte as n -> n <> 0uy
+            | :? int16 as n -> n <> 0s && n <> -1s
+            | :? uint16 as n -> n <> 0us
+            | :? int as n -> n <> 0 && n <> -1
+            | :? uint32 as n -> n <> 0u
+            | :? int64 as n -> n <> 0L && n <> -1L
+            | :? uint64 as n -> n <> 0UL
+            | :? nativeint as n -> n <> 0n && n <> -1n
+            | :? unativeint as n -> n <> 0un
+            | :? decimal as n -> n <> 0m && n <> -1m
+            | _ -> false
+        | _ -> false
+
+    let rec rootProperty (q: IPropertySymbol) =
+        if isNull q.OverriddenProperty then
+            q
+        else
+            rootProperty q.OverriddenProperty
+
+    let throwingProperty (p: IPropertySymbol) (receiver: ExpressionSyntax option) =
+        let owner = p.ContainingType.OriginalDefinition
+        let ownerName = owner.ToDisplayString()
+
+        if owner.SpecialType = SpecialType.System_Nullable_T then
+            p.Name = "Value" && not formatOnly
+        elif
+            ownerName.StartsWith "System.Lazy<"
+            || ownerName.StartsWith "System.Threading.ThreadLocal<"
+        then
+            p.Name = "Value"
+        elif (rootProperty p).ContainingType.ToDisplayString() = "System.Exception" then
+            match receiver |> Option.map (fun r -> model.GetTypeInfo(r).Type) with
+            | Some t when not (isNull t) && (t.IsSealed || t.IsValueType) -> false
+            | _ -> true
+        else
+            false
+
+    let userConverted (x: ExpressionSyntax) =
+        let c = model.GetConversion x
+        c.IsUserDefined && not (isBclSymbol c.MethodSymbol)
+
+    node.DescendantNodesAndSelf()
+    |> Seq.exists (fun n ->
+        match n with
+        | :? ElementAccessExpressionSyntax
+        | :? ElementBindingExpressionSyntax -> not formatOnly
+        | :? ThrowExpressionSyntax
+        | :? ThrowStatementSyntax
+        | :? AwaitExpressionSyntax -> true
+        | :? CheckedExpressionSyntax as c -> c.IsKind SyntaxKind.CheckedExpression && not formatOnly
+        | :? InvocationExpressionSyntax as inv ->
+            match symbolOf model inv with
+            | ValueSome(:? IMethodSymbol as m) -> throwingCall formatOnly m
+            | _ -> false
+        | :? MemberAccessExpressionSyntax as ma ->
+            match symbolOf model ma with
+            | ValueSome(:? IPropertySymbol as p) -> throwingProperty p (Some ma.Expression)
+            | _ -> false
+        | :? MemberBindingExpressionSyntax as mb ->
+            match symbolOf model mb with
+            | ValueSome(:? IPropertySymbol as p) -> throwingProperty p None
+            | _ -> false
+        | :? IdentifierNameSyntax as id when
+            not (
+                match id.Parent with
+                | :? MemberAccessExpressionSyntax as ma -> obj.ReferenceEquals(ma.Name, id)
+                | _ -> false
+            )
+            ->
+            match symbolOf model id with
+            | ValueSome(:? IPropertySymbol as p) -> throwingProperty p None
+            | _ -> false
+        | :? BinaryExpressionSyntax as b when not formatOnly ->
+            match b.Kind() with
+            | SyntaxKind.DivideExpression
+            | SyntaxKind.ModuloExpression -> isBuiltinOperator model b && integral b.Right && not (safeDivisor b)
+            | SyntaxKind.AddExpression
+            | SyntaxKind.SubtractExpression
+            | SyntaxKind.MultiplyExpression -> isBuiltinOperator model b && integral b.Left && checkedAt model b
+            | _ -> false
+        | :? PrefixUnaryExpressionSyntax as u when not formatOnly && u.IsKind SyntaxKind.UnaryMinusExpression ->
+            integral u.Operand && checkedAt model u
+        | _ -> false)
+    || node.DescendantNodesAndSelf()
+       |> Seq.exists (fun n ->
+           match n with
+           | :? ExpressionSyntax as x -> userConverted x
+           | _ -> false)
+
+/// Does the node assign, step or await — an effect that runs once per
+/// element under `Count` and stops at the first match under `Any`?
+let private hasEffect (node: SyntaxNode) =
+    node.DescendantNodesAndSelf()
+    |> Seq.exists (fun n ->
+        n :? AssignmentExpressionSyntax
+        || n.IsKind SyntaxKind.PostIncrementExpression
+        || n.IsKind SyntaxKind.PostDecrementExpression
+        || n.IsKind SyntaxKind.PreIncrementExpression
+        || n.IsKind SyntaxKind.PreDecrementExpression
+        || n :? AwaitExpressionSyntax)
+
+/// A condition evaluated on every element, or only up to the first match,
+/// alike: it holds no shape known to throw (`hasThrowingShape`) and no
+/// effect. A user method or getter in it is taken to be total — the
+/// accepted residual, with a member read on a null element after the first
+/// match, which threw under `Count` and does not under `Any`.
+let isTotalCondition (model: SemanticModel) (e: SyntaxNode) : bool =
+    not (hasThrowingShape model false e || hasEffect e)
+
+/// A lambda whose body is a total condition, or a method group not known
+/// to throw (`s.Count(char.IsDigit)`, `xs.Any(IsValid)`; not `int.Parse`).
+let isTotalPredicate (model: SemanticModel) (f: ExpressionSyntax) : bool =
+    match f with
+    | :? AnonymousFunctionExpressionSyntax as l ->
+        l.AsyncKeyword.IsKind SyntaxKind.None && isTotalCondition model l.Body
+    | :? IdentifierNameSyntax
+    | :? MemberAccessExpressionSyntax ->
+        match symbolOf model f with
+        | ValueSome(:? IMethodSymbol as m) -> not (throwingCall false m)
+        | _ -> true
+    | _ -> true
+
+/// A source enumerated to its end (`Count`) or to its first element
+/// (`Any`) alike: anything but a sequence positively known to run code
+/// after its first element — a call to a visible iterator (a body with
+/// `yield`), a user collection whose visible `GetEnumerator` is one, a lazy
+/// reader of the file system (`File.ReadLines`, `Directory.EnumerateFiles`),
+/// `Cast<T>()` (throws mid-way on a mismatch), or a LINQ operator over such
+/// a source or with a lambda that is not total. An `IEnumerable<T>` of
+/// unknown origin, a user method without `yield`, `Distinct` or `GroupBy`
+/// over user elements: eager — the accepted residual is the user code
+/// (an iterator behind an interface, a `GetHashCode`) that acts or throws
+/// after the first.
+let rec isEagerSource (model: SemanticModel) (e: ExpressionSyntax) : bool =
+    let iterator (s: ISymbol) =
+        visibleBodies model s
+        |> List.exists (fun (_, body) -> body.DescendantNodes() |> Seq.exists (fun n -> n :? YieldStatementSyntax))
+
+    let lazyReader (m: IMethodSymbol) =
+        let owner = ownerName m
+
+        (owner = "System.IO.File" && m.Name.StartsWith "ReadLines")
+        || ((owner = "System.IO.Directory" || owner = "System.IO.DirectoryInfo")
+            && m.Name.StartsWith "Enumerate")
+
+    let linqOwners =
+        set
+            [
+                "System.Linq.Enumerable"
+                "System.Linq.Queryable"
+                "System.Linq.ParallelEnumerable"
+            ]
+
+    match e with
+    | :? ParenthesizedExpressionSyntax as p -> isEagerSource model p.Expression
+    | :? InvocationExpressionSyntax as inv ->
+        match symbolOf model inv with
+        | ValueSome(:? IMethodSymbol as m) when linqOwners.Contains(ownerName m) ->
+            m.Name <> "Cast"
+            && (isNull m.ReducedFrom
+                || (match inv.Expression with
+                    | :? MemberAccessExpressionSyntax as ma -> isEagerSource model ma.Expression
+                    | _ -> true))
+            && inv.ArgumentList.Arguments
+               |> Seq.forall (fun a ->
+                   match a.Expression with
+                   | :? AnonymousFunctionExpressionSyntax as l -> isTotalPredicate model l
+                   | x ->
+                       match model.GetTypeInfo(x).Type with
+                       // a method group
+                       | null -> isTotalPredicate model x
+                       // a nested sequence (`Concat(ys)`)
+                       | t when
+                           t.SpecialType = SpecialType.None
+                           && t.TypeKind <> TypeKind.Delegate
+                           && t.AllInterfaces |> Seq.exists (fun i -> i.Name = "IEnumerable")
+                           ->
+                           isEagerSource model x
+                       | _ -> true)
+        | ValueSome(:? IMethodSymbol as m) -> not (lazyReader m || iterator m)
+        | _ -> true
+    | :? IdentifierNameSyntax
+    | :? MemberAccessExpressionSyntax ->
+        match model.GetTypeInfo(e).Type with
+        | :? INamedTypeSymbol as n when
+            (n.TypeKind = TypeKind.Class || n.TypeKind = TypeKind.Struct)
+            && not (isBclSymbol n.OriginalDefinition)
+            ->
+            not (n.GetMembers "GetEnumerator" |> Seq.exists iterator)
+        | _ -> true
+    | _ -> true
+
+
+
 
 /// The symbol an expression text would bind to at a position, as if it
 /// stood there — for a rewrite that must land on one particular overload

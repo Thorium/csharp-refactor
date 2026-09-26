@@ -42,6 +42,11 @@
 /// condition of the enclosing `if` whose then-branch holds it — with the
 /// string not assigned inside that `if`; the receiver a name or a chain
 /// of names, since a call may answer the guard and the cut differently.
+/// The guard and the cut must read the same string: every name of the
+/// chain a local or parameter never written in the member, a `readonly`
+/// field or a get/init-only auto-property — or, for a settable one, nothing
+/// between guard and cut assigns it or runs the user's code (`Reset()`
+/// reassigning the field); a computed property never is.
 /// An unguarded site is offered in the editor only, never by a sweep.
 ///
 /// CR0176 (performance, fix): `ToCharArray()` copies the whole string
@@ -329,8 +334,15 @@ let private lengthBound (receiver: string) (e: ExpressionSyntax) (whenTrue: bool
     | _ -> None
 
 /// Is the comparison guarded: does the string it cuts have at least `n`
-/// characters wherever it is evaluated?
-let private guarded (receiver: string) (n: int) (comparison: BinaryExpressionSyntax) =
+/// characters wherever it is evaluated? `sameString scope upTo` answers
+/// whether the guard and the cut read the same string when what runs
+/// between them is the part of `scope` ending by `upTo`.
+let private guarded
+    (receiver: string)
+    (n: int)
+    (comparison: BinaryExpressionSyntax)
+    (sameString: SyntaxNode -> int -> bool)
+    =
     let proves (e: ExpressionSyntax) (whenTrue: bool) =
         match lengthBound receiver e whenTrue with
         | Some k -> k >= n
@@ -369,29 +381,289 @@ let private guarded (receiver: string) (n: int) (comparison: BinaryExpressionSyn
         | e -> proves e whenTrue
 
     // the operand before the comparison in its own chain: evaluated true when
-    // an `&&` reaches the right side, false when an `||` does
+    // an `&&` reaches the right side, false when an `||` does; what runs
+    // between the guard and the cut is that chain up to the comparison
     let rec before (node: SyntaxNode) =
         match node.Parent with
         | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.LogicalAndExpression ->
-            (obj.ReferenceEquals(b.Right, node) && proveIn b.Left true) || before b
+            (obj.ReferenceEquals(b.Right, node)
+             && proveIn b.Left true
+             && sameString b comparison.SpanStart)
+            || before b
         | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.LogicalOrExpression ->
-            (obj.ReferenceEquals(b.Right, node) && proveIn b.Left false) || before b
+            (obj.ReferenceEquals(b.Right, node)
+             && proveIn b.Left false
+             && sameString b comparison.SpanStart)
+            || before b
         | :? ParenthesizedExpressionSyntax as p -> before p
         | _ -> false
+
+    // a cut inside a lambda, local function or query under the guard runs
+    // later — whenever it is called — against the string as it is then
+    let deferredUnder (guard: SyntaxNode) =
+        comparison.Ancestors()
+        |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, guard)))
+        |> Seq.exists (fun a ->
+            a :? AnonymousFunctionExpressionSyntax
+            || a :? LocalFunctionStatementSyntax
+            || a :? QueryExpressionSyntax)
 
     let underIf =
         comparison.Ancestors()
         |> Seq.exists (fun a ->
             match a with
+            | :? IfStatementSyntax as ifs when deferredUnder ifs -> false
+            | :? ConditionalExpressionSyntax as c when deferredUnder c -> false
             | :? IfStatementSyntax as ifs ->
+                // what runs between them: the `if` up to the cut — or, where a
+                // loop inside the `if` holds the cut, that whole loop, whose tail
+                // runs before the cut's next evaluation
+                let upTo =
+                    comparison.Ancestors()
+                    |> Seq.takeWhile (fun l -> not (obj.ReferenceEquals(l, ifs)))
+                    |> Seq.filter (fun l ->
+                        l :? CommonForEachStatementSyntax
+                        || l :? ForStatementSyntax
+                        || l :? WhileStatementSyntax
+                        || l :? DoStatementSyntax)
+                    |> Seq.tryLast
+                    |> Option.map (fun l -> l.Span.End)
+                    |> Option.defaultValue comparison.SpanStart
+
                 ifs.Statement.Span.Contains comparison.Span
                 && proveIn ifs.Condition true
                 && untouched ifs
+                && sameString ifs upTo
             | :? ConditionalExpressionSyntax as c ->
-                c.WhenTrue.Span.Contains comparison.Span && proveIn c.Condition true
+                c.WhenTrue.Span.Contains comparison.Span
+                && proveIn c.Condition true
+                && sameString c comparison.SpanStart
             | _ -> false)
 
     before comparison || underIf
+
+/// Do the guard and the cut read the SAME string through this receiver
+/// (a name or a chain of names)? Each segment is one of:
+///   - fixed: a local or a value parameter never assigned nor passed by
+///     reference in the member (a local function or lambda there included),
+///     a `readonly` field or a get/init-only auto-property read outside a
+///     constructor — nothing can make the second read differ;
+///   - settable: any other field, local, parameter or settable
+///     auto-property, a primary constructor's parameter the type writes, a
+///     computed property whose visible getter only reads mutables (those
+///     count as settable too) — the same string only if nothing between
+///     the guard and the cut visibly assigns it: not the window itself, and
+///     not a call, getter, setter, constructor, operator, conversion or
+///     `Deconstruct` it runs, followed three calls deep into the bodies
+///     this compilation holds (`Reset()` between them);
+///   - never: a computed property whose visible getter assigns, counts or
+///     constructs; a local, parameter or field a lambda or local function
+///     of the member writes (any call handed the delegate may run it:
+///     `Task.Run(reset)`, an event the BCL raises), or `ref`-aliased.
+/// Nor is anything inert across an `await` or a `yield`; and a cut inside a
+/// lambda, local function or query under an `if` or `?:` guard is never
+/// proven (it runs later). A call whose body cannot be seen (an interface's
+/// or abstract member, a delegate of unknown origin, metadata) is taken not
+/// to write the string: the accepted residual, with the BCL member that
+/// calls back into user code (`ToString`, `CompareTo`, an event it raises).
+/// None for a receiver with a `never` segment; else the proof for a scope
+/// (what runs between guard and cut: `scope`'s nodes ending by `upTo`).
+let private sameStringProof (model: SemanticModel) (receiver: ExpressionSyntax) : (SyntaxNode -> int -> bool) option =
+    let scope = Text.enclosingMember receiver
+
+    let inConstructor (s: ISymbol) =
+        receiver.Ancestors()
+        |> Seq.exists (fun a ->
+            match a with
+            | :? ConstructorDeclarationSyntax as c ->
+                match model.GetDeclaredSymbol c with
+                | null -> true
+                | ctor -> SymbolEqualityComparer.Default.Equals(ctor.ContainingType, s.ContainingType)
+            | _ -> false)
+
+    // the same symbol under this tree's model, or a callee's tree's
+    let refersWith (m: SemanticModel) (s: ISymbol) (e: ExpressionSyntax) =
+        match e with
+        | :? IdentifierNameSyntax
+        | :? MemberAccessExpressionSyntax -> SymbolEqualityComparer.Default.Equals(m.GetSymbolInfo(e).Symbol, s)
+        | _ -> false
+
+    let refersTo (s: ISymbol) (e: ExpressionSyntax) = refersWith model s e
+
+    // a deconstruction's targets: `(s, _) = …`, `(n.Name, (a, b)) = …`
+    let rec tupleTargets (e: ExpressionSyntax) : ExpressionSyntax list =
+        match e with
+        | :? TupleExpressionSyntax as t -> t.Arguments |> Seq.collect (fun a -> tupleTargets a.Expression) |> List.ofSeq
+        | :? ParenthesizedExpressionSyntax as p -> tupleTargets p.Expression
+        | e -> [ e ]
+
+    // an assignment (a deconstruction's included), a step, a `ref`/`out`
+    // argument or a `ref` alias of it
+    let writesWith (m: SemanticModel) (s: ISymbol) (d: SyntaxNode) =
+        match d with
+        | :? AssignmentExpressionSyntax as a -> tupleTargets a.Left |> List.exists (refersWith m s)
+        | :? PostfixUnaryExpressionSyntax as u -> refersWith m s u.Operand
+        | :? PrefixUnaryExpressionSyntax as u -> refersWith m s u.Operand
+        | :? ArgumentSyntax as arg when not (arg.RefKindKeyword.IsKind SyntaxKind.None) -> refersWith m s arg.Expression
+        | :? RefExpressionSyntax as r -> refersWith m s r.Expression
+        | _ -> false
+
+    let writes (s: ISymbol) (d: SyntaxNode) = writesWith model s d
+
+    let neverWritten (s: ISymbol) =
+        not (scope.DescendantNodes() |> Seq.exists (writes s))
+
+    // `ref string r = ref s;` anywhere in the member: every write to `r` is
+    // one to `s` under another name
+    let refAliased (s: ISymbol) =
+        scope.DescendantNodes()
+        |> Seq.exists (fun d ->
+            match d with
+            | :? RefExpressionSyntax as r -> refersTo s r.Expression
+            | _ -> false)
+
+    // a primary constructor's parameter used in a member body is a field
+    // in disguise, written wherever the type writes it
+    let primaryCaptured (p: IParameterSymbol) =
+        match p.ContainingSymbol with
+        | :? IMethodSymbol as ctor when ctor.MethodKind = MethodKind.Constructor ->
+            ctor.DeclaringSyntaxReferences
+            |> Seq.exists (fun r -> r.GetSyntax() :? TypeDeclarationSyntax)
+        | _ -> false
+
+    // a write inside a lambda, anonymous method or local function runs
+    // whenever anyone calls it — a BCL call handed the delegate included
+    // (`Array.ForEach(xs, reset)`, `Task.Run(reset)`, `new Lazy<T>(…)`)
+    let writtenByClosure (s: ISymbol) =
+        scope.DescendantNodes()
+        |> Seq.exists (fun d ->
+            writes s d
+            && d.Ancestors()
+               |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, scope)))
+               |> Seq.exists (fun a -> a :? AnonymousFunctionExpressionSyntax || a :? LocalFunctionStatementSyntax))
+
+    let local (s: ISymbol) (plain: bool) =
+        if writtenByClosure s || refAliased s then
+            None
+        else
+            Some(plain && neverWritten s)
+
+    // the type's every declaration: where a primary constructor's parameter
+    // may be written
+    let typeScope (s: ISymbol) =
+        s.ContainingType.DeclaringSyntaxReferences
+        |> Seq.filter (fun r -> r.SyntaxTree = receiver.SyntaxTree)
+        |> Seq.map (fun r -> r.GetSyntax())
+        |> List.ofSeq
+
+    // Some(fixed, the settable names the value also depends on); None: never
+    // the same string
+    let classify (s: ISymbol) : (bool * ISymbol list) option =
+        let plain (fixedOne: bool option) = fixedOne |> Option.map (fun f -> f, [])
+
+        match s with
+        | :? ILocalSymbol as l -> plain (local s (not l.IsRef))
+        | :? IParameterSymbol as p when primaryCaptured p ->
+            let writesIn =
+                typeScope p
+                |> Seq.collect (fun t -> t.DescendantNodes())
+                |> Seq.filter (writes s)
+                |> List.ofSeq
+
+            if writesIn.IsEmpty then
+                Some(true, [])
+            elif
+                writesIn
+                |> List.exists (fun d ->
+                    d.Ancestors()
+                    |> Seq.exists (fun a ->
+                        a :? AnonymousFunctionExpressionSyntax || a :? LocalFunctionStatementSyntax))
+            then
+                None
+            else
+                Some(false, [])
+        | :? IParameterSymbol as p -> plain (local s (p.RefKind = RefKind.None))
+        | :? IFieldSymbol as f when (writtenByClosure s || refAliased s) && not f.IsReadOnly -> None
+        | :? IFieldSymbol as f -> Some((f.IsConst || f.IsReadOnly) && not (inConstructor s), [])
+        | :? IPropertySymbol as p when Guards.isAutoProperty p ->
+            Some((isNull p.SetMethod || p.SetMethod.IsInitOnly) && not (inConstructor s), [])
+        // a computed getter: fixed where its body cannot be seen; never the
+        // same string where that body assigns, counts or constructs (`calls++`,
+        // `=> new string(…)`); else a read of the mutables it reads, each a
+        // settable name of its own for the window to check
+        | :? IPropertySymbol as p ->
+            if Guards.unstableGetter model p then
+                None
+            else
+                let getter: ISymbol = if isNull p.GetMethod then p else p.GetMethod
+
+                match Guards.visibleBodies model getter with
+                | [] -> Some(true, [])
+                | bodies ->
+                    let reads =
+                        bodies
+                        |> List.collect (fun (m, body) ->
+                            body.DescendantNodes()
+                            |> Seq.choose (fun n ->
+                                match n with
+                                | :? IdentifierNameSyntax
+                                | :? MemberAccessExpressionSyntax ->
+                                    match m.GetSymbolInfo(n).Symbol with
+                                    | (:? IFieldSymbol | :? IPropertySymbol) as r when not (Guards.isBclSymbol r) ->
+                                        Some r
+                                    | _ -> None
+                                | _ -> None)
+                            |> List.ofSeq)
+
+                    Some(false, reads)
+        | _ -> None
+
+    let rec segments (e: ExpressionSyntax) : (ISymbol * bool) list option =
+        match e with
+        | :? ThisExpressionSyntax -> Some []
+        | :? IdentifierNameSyntax
+        | :? MemberAccessExpressionSyntax ->
+            let qualifier =
+                match e with
+                | :? MemberAccessExpressionSyntax as m -> segments m.Expression
+                | _ -> Some []
+
+            match qualifier, model.GetSymbolInfo(e).Symbol with
+            | None, _
+            | _, null -> None
+            | Some q, (:? INamespaceOrTypeSymbol) -> Some q
+            | Some q, s ->
+                classify s
+                |> Option.map (fun (fixedOne, extras) -> q @ [ s, fixedOne ] @ (extras |> List.map (fun x -> x, false)))
+        | _ -> None
+
+    // nothing in the window visibly writes a settable name — itself, or
+    // through what it runs, followed three calls deep into the bodies this
+    // compilation holds — and nothing yields control (`await`, `yield`). A
+    // call whose body cannot be seen is taken not to write it: the accepted
+    // residual
+    let inert (settable: ISymbol list) (scope: SyntaxNode) (upTo: int) =
+        let window =
+            scope.DescendantNodesAndSelf()
+            |> Seq.filter (fun d -> d.Span.End <= upTo)
+            |> List.ofSeq
+
+        let assigns (m: SemanticModel) (body: SyntaxNode) =
+            body.DescendantNodesAndSelf()
+            |> Seq.exists (fun d -> settable |> List.exists (fun s -> writesWith m s d))
+
+        window
+        |> List.forall (fun d ->
+            not (settable |> List.exists (fun s -> writes s d))
+            && not (d :? AwaitExpressionSyntax)
+            && not (d :? YieldStatementSyntax))
+        && not (Guards.reachesThrough model 3 assigns (window |> List.collect (Guards.calleesOfNode model)))
+
+    segments receiver
+    |> Option.map (fun parts ->
+        let settable = parts |> List.filter (snd >> not) |> List.map fst
+
+        fun scope upTo -> settable.IsEmpty || inert settable scope upTo)
 
 let private prefixes (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     tree.GetRoot().DescendantNodes()
@@ -435,14 +707,22 @@ let private prefixes (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
 
                     let stable = chainOfNames cut.Receiver
 
+                    // the guard proves a length only for the string the cut reads: a
+                    // computed property, or a settable name something between them may
+                    // reassign, leaves the site unguarded
+                    let isGuarded (n: int) =
+                        match sameStringProof model cut.Receiver with
+                        | Some sameString -> guarded receiver n b sameString
+                        | None -> false
+
                     // the call, and whether the site is guarded: a guarded one is applied by
                     // a sweep; an unguarded one is offered in the editor only, where the
                     // author sees whether the string can be short (the F# side does the
                     // same for its `Substring` form)
                     let call =
                         match cut.PrefixLength, cut.SuffixLength with
-                        | Some n, _ when stable && n = value.Length -> Some("StartsWith", guarded receiver n b)
-                        | _, Some n when stable && n = value.Length -> Some("EndsWith", guarded receiver n b)
+                        | Some n, _ when stable && n = value.Length -> Some("StartsWith", isGuarded n)
+                        | _, Some n when stable && n = value.Length -> Some("EndsWith", isGuarded n)
                         | _ -> None
 
                     match call with

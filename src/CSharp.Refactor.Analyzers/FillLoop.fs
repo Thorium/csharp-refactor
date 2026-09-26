@@ -18,7 +18,9 @@
 /// `List<T>` — never added to, cleared, sorted, or passed by reference; no
 /// `await` or `yield`; the lambda captures no `ref struct`; no comment or
 /// directive in the loop. `Where` is spelled only where there is a
-/// condition, `Select` only where the projection is not the element.
+/// condition, `Select` only where the projection is not the element; a
+/// `Where`/`Select`/`ToList` of the repository's own in scope for the
+/// source or the sequence would take the call: a note.
 /// The design expects the pipeline to lose on time (delegate calls) and
 /// this rule to ship default-off (`dotnet_diagnostic.CR0028.severity` wakes it).
 module CSharp.Refactor.FillLoop
@@ -216,17 +218,60 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                                         (expression + ";")
                                 ]
 
-                            if Guards.speculativeCheck model edits then
+                            // every call the fix spells binds to `Enumerable`'s: a
+                            // repository's own `Where`/`Select`/`ToList` extension
+                            // with a more specific receiver would take it (and
+                            // still compile)
+                            let bindsToEnumerable =
+                                let sequence (element: ITypeSymbol) : ITypeSymbol =
+                                    match
+                                        model.Compilation.GetTypeByMetadataName
+                                            "System.Collections.Generic.IEnumerable`1"
+                                    with
+                                    | e when isNull e || isNull element -> null
+                                    | e -> e.Construct element
+
+                                let receivers =
+                                    [
+                                        model.GetTypeInfo(f.Expression).Type
+                                        sequence (model.GetForEachStatementInfo(f).ElementType)
+                                        sequence projectedType
+                                    ]
+
+                                [
+                                    if condition.IsSome then
+                                        "Where"
+                                    if selectText <> "" then
+                                        "Select"
+                                    "ToList"
+                                ]
+                                |> List.forall (fun name ->
+                                    receivers
+                                    |> List.forall (fun r -> Guards.onlyBclCandidates model f.SpanStart r name))
+
+                            let message = "A list filled by one loop and then only read is the pipeline"
+
+                            let span =
+                                TextSpan.FromBounds(f.ForEachKeyword.SpanStart, f.CloseParenToken.Span.End)
+
+                            if not (Guards.speculativeCheck model edits) then
+                                None
+                            elif bindsToEnumerable then
                                 Some
                                     {
                                         Code = Code
-                                        Message = "A list filled by one loop and then only read is the pipeline"
-                                        Span =
-                                            TextSpan.FromBounds(f.ForEachKeyword.SpanStart, f.CloseParenToken.Span.End)
+                                        Message = message
+                                        Span = span
                                         Fixes = [ Suggestion.fix "Build it as a pipeline" Code edits ]
                                     }
                             else
-                                None
+                                Some(
+                                    Suggestion.note
+                                        Code
+                                        (message
+                                         + " — no fix: an extension method of this repository would take a call")
+                                        span
+                                )
                 | _ -> None
         | _ -> None)
     |> List.ofSeq

@@ -12,8 +12,13 @@
 /// local or a field; one filter-less catch of `FormatException`/
 /// `OverflowException`/`ArgumentException`/`Exception`, no `finally`; the
 /// catch variable is unread; under a broad catch every argument and the
-/// target cannot throw when evaluated (no element access, invocation or
-/// member chain — `parts[1]` was caught too); on the failure path `TryParse` sets the
+/// target hold no shape known to throw when evaluated (an element access —
+/// `parts[1]` was caught too — a nested parse, a `Substring`, a
+/// `Nullable<T>.Value`, a user conversion, a `Lazy<T>` factory, an
+/// `Exception` member); under a `FormatException` catch no argument may
+/// hold one known to throw a format error (a nested parse or `Convert`, a
+/// user conversion, a factory). A user method or getter is taken not to
+/// throw: the accepted residual. On the failure path `TryParse` sets the
 /// target to default where `Parse` left it — so a local keeps the `out v`
 /// form only when it was declared without a value (or with `default`), the
 /// catch assigns it, or the catch leaves (`return`/`throw`/`continue`); a
@@ -128,27 +133,26 @@ let private caughtTypes =
 let private noOverflow =
     set [ "Boolean"; "Char"; "Guid"; "DateTime"; "DateTimeOffset"; "Enum" ]
 
-/// An expression whose evaluation cannot throw: a literal or constant, a
-/// local, a parameter, a field of `this` or a static field or property named
-/// through its type (`CultureInfo.InvariantCulture`) — never an element
-/// access, an invocation or a member chain on a value that may be null.
+/// An expression whose evaluation is not known to throw
+/// (`Guards.hasThrowingShape`): no element access or indexer, no nested
+/// parse or `Convert`, no `Substring`/`First`/`Single`, no
+/// `Nullable<T>.Value`, no `Lazy<T>` factory or `Exception` member, no user
+/// conversion, no `checked` arithmetic. A user method or getter,
+/// `string.Format`, `Trim`: taken not to throw — the accepted residual is
+/// the user getter that does (`Cfg.Raw => File.ReadAllText(…)`).
 let private nonThrowing (model: SemanticModel) (e: ExpressionSyntax) =
-    match e with
-    | _ when model.GetConstantValue(e).HasValue -> true
-    | :? LiteralExpressionSyntax -> true
-    | :? IdentifierNameSyntax ->
-        match symbolOf model e with
-        | :? ILocalSymbol
-        | :? IParameterSymbol
-        | :? IFieldSymbol -> true
-        | _ -> false
-    | :? MemberAccessExpressionSyntax as ma when ma.IsKind SyntaxKind.SimpleMemberAccessExpression ->
-        match symbolOf model ma, ma.Expression with
-        | (:? IFieldSymbol as f), (:? ThisExpressionSyntax) when not f.IsStatic -> true
-        | (:? IFieldSymbol as f), _ when f.IsStatic -> symbolOf model ma.Expression :? ITypeSymbol
-        | (:? IPropertySymbol as p), _ when p.IsStatic -> symbolOf model ma.Expression :? ITypeSymbol
-        | _ -> false
-    | _ -> false
+    not (Guards.hasThrowingShape model false e)
+
+/// Can evaluating the argument throw a `FormatException` of its own, which
+/// the catch absorbed and `TryParse` lets escape? Only where it holds a
+/// shape known to: a nested parse or `Convert`, a user conversion, a
+/// `Lazy<T>`/`ThreadLocal<T>` factory, an `Exception` member routinely
+/// overridden (`Guards.hasThrowingShape`, format only). An indexer or a
+/// `Substring` throws an index error the catch never absorbed, and a user
+/// method or getter (`Guid.Parse(Norm(s))`) or `string.Format` is taken not
+/// to throw one: the accepted residual.
+let private cannotThrowFormat (model: SemanticModel) (e: ExpressionSyntax) =
+    not (Guards.hasThrowingShape model true e)
 
 /// Does the catch cover every failure the `TryParse` twin would turn into
 /// `false`? Otherwise the rewrite swallows what used to propagate.
@@ -173,7 +177,11 @@ let private catchCovers (model: SemanticModel) (caughtType: string) (parse: Invo
             (model.GetNullableContext argument.SpanStart).HasFlag NullableContext.AnnotationsEnabled
             && model.GetTypeInfo(argument).Nullability.FlowState = NullableFlowState.NotNull
 
-        noOverflow.Contains owner && nonNull
+        noOverflow.Contains owner
+        && nonNull
+        // the catch also absorbed a FormatException the argument threw
+        && parse.ArgumentList.Arguments
+           |> Seq.forall (fun a -> cannotThrowFormat model a.Expression)
     | _ -> false
 
 /// A `T.Parse(args)` / `Enum.Parse<E>(args)` call whose `TryParse` twin

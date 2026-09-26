@@ -33,7 +33,15 @@
 /// without `else`, whose then-branch assigns the initializer's opposite,
 /// optionally followed by `break;`); the predicate is pure through
 /// `callsOnlyCore` (short-circuiting must not skip an effect) and fits
-/// one line. Measured: parity on arrays; the `List<T>` shape, whose
+/// one line. A loop without `break` tests every element and walks the
+/// whole source where `Any`/`All` stop at the first decider: it is a note
+/// only where a throw or an effect after the decider is positively
+/// detected — `x.Value` on a `Nullable<T>`, an indexer, a `Substring` in the
+/// condition (`Guards.isTotalCondition`), a visible iterator or
+/// `File.ReadLines` as the source (`Guards.isEagerSource`) — or where a
+/// `Any`/`All` of the repository's own in scope for the source would take
+/// the call. Accepted residual: a user method or getter in the condition,
+/// or a user iterator behind an interface, that throws after the decider. Measured: parity on arrays; the `List<T>` shape, whose
 /// `Enumerable.Any` boxes the struct enumerator, goes behind
 /// `csharp_refactor.CR0022.lists` if PerfClaims shows the allocation.
 ///
@@ -440,6 +448,15 @@ let private flags (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) :
                     | Some init, [ a; (:? BreakStatementSyntax) ] -> assignsOpposite a init
                     | _ -> false
 
+                // without a `break` the loop tests every element and walks the
+                // source to its end; `Any`/`All` stop at the first decider — the
+                // same only when neither the condition nor the source can act or
+                // throw after it (`x.Value > 0` on a null element, a user iterator)
+                let stopsAlike =
+                    thenStatements.Length = 2
+                    || (Guards.isTotalCondition model ifs.Condition
+                        && Guards.isEagerSource model f.Expression)
+
                 let sourceType = model.GetTypeInfo(f.Expression).Type
 
                 let isList =
@@ -483,20 +500,46 @@ let private flags (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) :
                                     (expression + ";")
                             ]
 
-                        if Guards.speculativeCheck model edits then
+                        let message =
+                            if init then
+                                "A flag cleared by a loop is All"
+                            else
+                                "A flag set by a loop is Any"
+
+                        let span =
+                            TextSpan.FromBounds(f.ForEachKeyword.SpanStart, f.CloseParenToken.Span.End)
+
+                        // a user extension `Any`/`All` with a more specific
+                        // receiver would take the call the fix spells
+                        let bindsToBcl =
+                            Guards.onlyBclCandidates model f.SpanStart sourceType (if init then "All" else "Any")
+
+                        if not (Guards.speculativeCheck model edits) then
+                            None
+                        elif stopsAlike && bindsToBcl then
                             Some
                                 {
                                     Code = FlagCode
-                                    Message =
-                                        (if init then
-                                             "A flag cleared by a loop is All"
-                                         else
-                                             "A flag set by a loop is Any")
-                                    Span = TextSpan.FromBounds(f.ForEachKeyword.SpanStart, f.CloseParenToken.Span.End)
+                                    Message = message
+                                    Span = span
                                     Fixes = [ Suggestion.fix (if init then "Use All" else "Use Any") FlagCode edits ]
                                 }
+                        elif not bindsToBcl then
+                            Some(
+                                Suggestion.note
+                                    FlagCode
+                                    (message
+                                     + " — no fix: an extension method of this repository would take the call")
+                                    span
+                            )
                         else
-                            None
+                            Some(
+                                Suggestion.note
+                                    FlagCode
+                                    (message
+                                     + " — no fix: the loop tests every element, and the condition or the source may act or throw after the first decider, where Any/All stop")
+                                    span
+                            )
                 else
                     None
             | _ -> None

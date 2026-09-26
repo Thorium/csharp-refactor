@@ -104,6 +104,324 @@ class C
 
     Assert.Contains("foreach (var (key, v) in d) Console.WriteLine(v + value);", fixedSource)
 
+[<Fact>]
+let ``CR0032 still enumerates the pairs when nothing before a lookup can write the dictionary`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Text;
+class C
+{
+    readonly Dictionary<string, int> map = new Dictionary<string, int>();
+    Dictionary<string, int> Table { get; } = new Dictionary<string, int>();
+    static void Use(string key, int n) { }
+    void A(Dictionary<string, int> d) { foreach (var k in d.Keys) Console.WriteLine($"{k}={d[k]}"); }
+    void B(Dictionary<string, int> d, StringBuilder sb) { foreach (var k in d.Keys) sb.Append(k).Append(d[k]); }
+    void D(Dictionary<string, int> d, Dictionary<string, int> result) { foreach (var k in d.Keys) result.Add(k, d[k]); }
+    int E(Dictionary<string, int> d) { var total = 0; foreach (var k in d.Keys) { var x = k.Length; total += d[k]; } return total; }
+    void F(Dictionary<string, int> d, List<string> list) { foreach (var k in d.Keys) { if (d[k] > 0) list.Add(k); } }
+    void G(Dictionary<string, int> d) { foreach (var k in d.Keys) { Console.WriteLine(k); Console.WriteLine(d[k]); } }
+    void H(Dictionary<string, int> d) { foreach (var k in d.Keys) { Console.WriteLine(d[k]); Use(k, 0); } }
+    void I(Dictionary<string, int> d) { foreach (var k in d.Keys) Use(k, d[k]); }
+    void J() { foreach (var k in this.map.Keys) Console.WriteLine(this.map[k]); }
+    void K() { foreach (var k in Table.Keys) Console.WriteLine(Table[k]); }
+    void L(Dictionary<string, int> d, Dictionary<string, int> acc) { foreach (var k in d.Keys) acc[k] = d[k]; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(11, fired.Length)
+    Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
+    let fixedSource = fixAll "CR0032" source
+    Assert.Contains("""foreach (var (k, value) in d) Console.WriteLine($"{k}={value}");""", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) sb.Append(k).Append(value);", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) result.Add(k, value);", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { var x = k.Length; total += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { if (value > 0) list.Add(k); }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { Console.WriteLine(k); Console.WriteLine(value); }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { Console.WriteLine(value); Use(k, 0); }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) Use(k, value);", fixedSource)
+    Assert.Contains("foreach (var (k, value) in this.map) Console.WriteLine(value);", fixedSource)
+    Assert.Contains("foreach (var (k, value) in Table) Console.WriteLine(value);", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) acc[k] = value;", fixedSource)
+
+[<Fact>]
+let ``CR0032 is a note when something before the lookup may write the dictionary`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+class C
+{
+    Dictionary<string, int> d = new Dictionary<string, int>();
+    int calls;
+    Dictionary<string, int> Computed => new Dictionary<string, int> { ["a"] = ++calls };
+    static void Bump(Dictionary<string, int> m, string key) { m[key] = 100; }
+    void Touch(string key) { d[key] = 99; }
+    string C0(Dictionary<string, int> d) { var r = ""; foreach (var k in d.Keys) { d["a"] = 100; r += d[k]; } return r; }
+    string C1(Dictionary<string, int> d) { var r = ""; foreach (var k in d.Keys) { Bump(d, k); r += d[k]; } return r; }
+    string C2(Dictionary<string, int> d) { var r = ""; foreach (var k in d.Keys) { d.Remove(k); r += d[k]; } return r; }
+    string C3(Dictionary<string, int> d) { var r = ""; foreach (var k in d.Keys) { var m = d; m[k] = 50; r += d[k]; } return r; }
+    string C4() { var r = ""; foreach (var k in this.Computed.Keys) { r += this.Computed[k]; } return r; }
+    string C5(Dictionary<string, int> d) { Action<string> bump = key => d[key] = 77; var r = ""; foreach (var k in d.Keys) { bump(k); r += d[k]; } return r; }
+    string C6() { var r = ""; foreach (var k in d.Keys) { this.d = new Dictionary<string, int>(); r += d[k]; } return r; }
+    string C7() { var r = ""; foreach (var k in d.Keys) { Touch(k); r += d[k]; } return r; }
+    string C8(Dictionary<string, int> d) { var r = ""; foreach (var k in d.Keys) { for (int i = 0; i < 2; i++) { r += d[k]; Touch(k); } } return r; }
+    string C9(Dictionary<string, int> d, List<Func<int>> later) { foreach (var k in d.Keys) later.Add(() => d[k]); return ""; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(10, fired.Length)
+    Assert.All(fired, fun s -> Assert.Empty s.Fixes)
+
+[<Fact>]
+let ``CR0032 lets any call run before the lookup of a dictionary no other code can reach`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Text;
+public interface ILog { void Info(string m); }
+class Report
+{
+    private readonly Dictionary<string, int> _counts = new() { ["a"] = 1 };
+    static bool ShouldSkip(string k) => k == "skip";
+    static string Norm(string k) => k.Trim();
+    public string D18() { var sb = new StringBuilder(); foreach (var k in _counts.Keys) { if (ShouldSkip(k)) continue; sb.Append(k).Append(_counts[k]); } return sb.ToString(); }
+    int D06(ILog logger) { var d = new Dictionary<string, int> { ["a"] = 1 }; int total = 0; foreach (var k in d.Keys) { logger.Info("key " + k); total += d[k]; } return total; }
+    string D14() { var d = new Dictionary<string, int>(); var sb = new StringBuilder(); foreach (var k in d.Keys) { var n = Norm(k); sb.Append(n + d[k]); } return sb.ToString(); }
+    int D19() { var d = new Dictionary<string, int>(); int total = 0; foreach (var k in d.Keys) { if (ShouldSkip(k)) continue; total += d[k]; } return total; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(4, fired.Length)
+    Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
+    let fixedSource = fixAll "CR0032" source
+
+    Assert.Contains(
+        "foreach (var (k, value) in _counts) { if (ShouldSkip(k)) continue; sb.Append(k).Append(value); }",
+        fixedSource
+    )
+
+    Assert.Contains("foreach (var (k, value) in d) { logger.Info(\"key \" + k); total += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { var n = Norm(k); sb.Append(n + value); }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { if (ShouldSkip(k)) continue; total += value; }", fixedSource)
+
+[<Fact>]
+let ``CR0032 is a note for a visible iterator, an alias store or a closure write; an interface call or an unknown Dispose is fixed``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Text;
+public sealed class Res : IDisposable { public static Dictionary<string, int> Map = new(); public void Dispose() { Map["a"] = 99; } }
+class C
+{
+    static Dictionary<string, int> shared = new();
+    static IEnumerable<int> Touch() { shared["a"] = 99; yield return 0; }
+    int H01() { IEnumerable<int> xs = Touch(); int t = 0; foreach (var k in shared.Keys) { foreach (var x in xs) { } t += shared[k]; } return t; }
+    int H03(ICollection<int> sink) { var d = Res.Map; int t = 0; foreach (var k in d.Keys) { sink.Add(1); t += d[k]; } return t; }
+    int H05(IDisposable r) { var d = Res.Map; int t = 0; foreach (var k in d.Keys) { using (r) { } t += d[k]; } return t; }
+    int H16() { var inner = new Dictionary<string, int>(); var d = new ReadOnlyDictionary<string, int>(inner); int t = 0; foreach (var k in d.Keys) { inner["a"] = 99; t += d[k]; } return t; }
+    int B01() { var d = new Dictionary<string, int>(); var seen = new ObservableCollection<string>(); seen.CollectionChanged += (s, e) => d["a"] = 99; int t = 0; foreach (var k in d.Keys) { seen.Add(k); t += d[k]; } return t; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(5, fired.Length)
+    // H03 and H05 call through interfaces whose implementations cannot be
+    // seen: the accepted residual, fixed
+    Assert.Equal(2, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0032" source
+    Assert.Contains("foreach (var (k, value) in d) { sink.Add(1); t += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { using (r) { } t += value; }", fixedSource)
+    Assert.Contains("foreach (var k in shared.Keys) { foreach (var x in xs) { } t += shared[k]; }", fixedSource)
+
+[<Fact>]
+let ``CR0032 sweeps past calls whose bodies cannot be seen or touch no dictionary`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+public interface ILogger { void Info(string m); void LogInformation(string m, params object[] args); }
+public static class Helper { public static string Format(string k) => k.ToUpperInvariant(); }
+public sealed class Item { public override string ToString() => "item"; }
+class C
+{
+    readonly ILogger _log;
+    public event EventHandler<string>? Changed;
+    public C(ILogger log) { _log = log; }
+    static void Note(string k) { }
+    int A(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { Note(k); total += d[k]; } return total; }
+    int B(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { _log.Info(k); total += d[k]; } return total; }
+    int D(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { Console.WriteLine(k); total += d[k]; } return total; }
+    int E(Dictionary<string, int> d, ILogger logger) { int total = 0; foreach (var k in d.Keys) { logger.LogInformation("key {0}", k); total += d[k]; } return total; }
+    int F(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { var f = Helper.Format(k); total += d[k] + f.Length; } return total; }
+    int G(Dictionary<string, int> d, Item item) { int total = 0; foreach (var k in d.Keys) { var s = item.ToString(); total += d[k] + s.Length; } return total; }
+    int H(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { Changed?.Invoke(this, k); total += d[k]; } return total; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(7, fired.Length)
+    Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
+    let fixedSource = fixAll "CR0032" source
+    Assert.Contains("foreach (var (k, value) in d) { Note(k); total += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { _log.Info(k); total += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { Changed?.Invoke(this, k); total += value; }", fixedSource)
+
+[<Fact>]
+let ``CR0032 looks three calls deep into visible bodies for a dictionary touched, and a handler an event visibly has``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+class C
+{
+    Dictionary<string, int> map = new();
+    public event EventHandler<string>? Changed;
+    void B3(string k) { map[k] = 0; }
+    void B2(string k) => B3(k);
+    void B1(string k) => B2(k);
+    void A5(string k) { map[k] = 0; }
+    void A4(string k) => A5(k);
+    void A3(string k) => A4(k);
+    void A2(string k) => A3(k);
+    void A1(string k) => A2(k);
+    void Wire() { Changed += (s, k) => map[k] = 0; }
+    int Three(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { B1(k); total += d[k]; } return total; }
+    int Five(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { A1(k); total += d[k]; } return total; }
+    int Handler(Dictionary<string, int> d) { int total = 0; foreach (var k in d.Keys) { Changed?.Invoke(this, k); total += d[k]; } return total; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(3, fired.Length)
+    // three deep is seen; five deep is beyond the look and the accepted residual
+    Assert.Empty fired.[0].Fixes
+    Assert.NotEmpty fired.[1].Fixes
+    Assert.Empty fired.[2].Fixes
+
+[<Fact>]
+let ``CR0032 counts a dictionary as confined only through its own members, BCL keys and a BCL comparer`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+public static class Sink
+{
+    public static IEnumerable<KeyValuePair<string, int>> S = new List<KeyValuePair<string, int>>();
+    public static Dictionary<string, int> D = new();
+    public static void Poke(string k) { ((Dictionary<string, int>)S)[k] = 99; D[k] = 99; }
+}
+public sealed class Key { public int Id; }
+public sealed class Cmp : IEqualityComparer<string>
+{
+    public bool Upper;
+    public bool Equals(string? a, string? b) => a == b;
+    public int GetHashCode(string s) => s.GetHashCode();
+}
+class Report
+{
+    private readonly Dictionary<string, int> _d = new();
+    static void Bump(Key k) => k.Id += 100;
+    int X01() { var d = new Dictionary<string, int>(); Sink.S = d.AsEnumerable(); int t = 0; foreach (var k in d.Keys) { Sink.Poke(k); t += d[k]; } return t; }
+    int X02() { var d = new Dictionary<string, int>(); Sink.S = d.Cast<KeyValuePair<string, int>>(); int t = 0; foreach (var k in d.Keys) { Sink.Poke(k); t += d[k]; } return t; }
+    int X03() { var d = new Dictionary<string, int>(); var lk = d.GetAlternateLookup<ReadOnlySpan<char>>(); Sink.D = lk.Dictionary; int t = 0; foreach (var k in d.Keys) { Sink.Poke(k); t += d[k]; } return t; }
+    int X05() { var d = new Dictionary<Key, int>(); int t = 0; foreach (var k in d.Keys) { Bump(k); t += d[k]; } return t; }
+    int X06() { var cmp = new Cmp(); var d = new Dictionary<string, int>(cmp); int t = 0; foreach (var k in d.Keys) { cmp.Upper = true; t += d[k]; } return t; }
+    int X16() { Sink.S = _d.AsEnumerable(); int t = 0; foreach (var k in _d.Keys) { Sink.Poke(k); t += _d[k]; } return t; }
+    int Kept() { var d = new Dictionary<string, int>(StringComparer.Ordinal); var n = d.Where(p => p.Value > 0).Count(); int t = n; foreach (var k in d.Keys) { Sink.Poke(k); t += d[k]; } return t; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(7, fired.Length)
+    Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    Assert.Contains("foreach (var (k, value) in d) { Sink.Poke(k); t += value; }", fixAll "CR0032" source)
+
+[<Fact>]
+let ``CR0032 in a top-level program sees a neighbouring statement that lets the dictionary escape`` () =
+    let program (extra: string) (bump: string) =
+        "using System;\nusing System.Collections.Generic;\nvar d = new Dictionary<string, int> { [\"a\"] = 1 };\n"
+        + extra
+        + "int total = 0;\nforeach (var k in d.Keys) { Bump(k); total += d[k]; }\nConsole.WriteLine(total);\n"
+        + bump
+
+    let run (source: string) =
+        let compilation, tree =
+            compileRaw Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest source
+
+        suggestRaw compilation tree |> List.filter (fun s -> s.Code = "CR0032")
+
+    // `var m = d;` in another top-level statement is an alias the local
+    // function visibly writes through: the local is not confined, and the
+    // call before the lookup touches a dictionary
+    let escaping = run (program "var m = d;\n" "void Bump(string k) => m[k] = 2;\n")
+
+    Assert.Equal(1, escaping.Length)
+    Assert.Empty escaping.Head.Fixes
+
+    let confined = run (program "" "static void Bump(string k) { }\n")
+    Assert.Equal(1, confined.Length)
+    Assert.NotEmpty confined.Head.Fixes
+
+[<Fact>]
+let ``CR0032 sees a method group of a writer as an escape and an unbound call as a hazard, not a tuple foreach or GetValueOrDefault``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+static class C
+{
+    static void Zap(Func<string, bool> f, string k) => f(k);
+    static int H11() { var d = new Dictionary<string, int>(); Func<string, bool> rm = d.Remove; int t = 0; foreach (var k in d.Keys) { Zap(rm, k); t += d[k]; } return t; }
+    static int H16() { var d = new Dictionary<string, int>(); Func<string, bool> rm = d.Remove; var runner = new List<string>(); int t = 0; foreach (var k in d.Keys) { runner.ForEach(x => rm(x)); t += d[k]; } return t; }
+    static int Tuples(Dictionary<string, int> d, List<(int, int)> ps) { int t = 0; foreach (var k in d.Keys) { foreach (var (a, b) in ps) t += a + b; t += d[k]; } return t; }
+    static int Default(Dictionary<string, int> d, string other) { int t = 0; foreach (var k in d.Keys) { t += d.GetValueOrDefault(other); t += d[k]; } return t; }
+    static int Invoked() { var d = new Dictionary<string, int>(); int t = 0; foreach (var k in d.Keys) { t += d[k]; d.Remove("z"); } return t; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(5, fired.Length)
+
+    let fixedNames =
+        fired
+        |> List.filter (fun s -> not s.Fixes.IsEmpty)
+        |> List.map (fun s -> s.Span.Start)
+        |> List.length
+
+    Assert.Equal(3, fixedNames)
+    let fixedSource = fixAll "CR0032" source
+    Assert.Contains("foreach (var (k, value) in d) { foreach (var (a, b) in ps) t += a + b; t += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { t += d.GetValueOrDefault(other); t += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { t += value; d.Remove(\"z\"); }", fixedSource)
+
+[<Fact>]
+let ``CR0032 sweeps past an unbound call: a baseline error is no detection`` () =
+    let source =
+        "using System.Collections.Generic;\nstatic class C\n{\n    static int K3(Dictionary<string, int> d) { int t = 0; foreach (var k in d.Keys) { Foo(k); t += d[k]; } return t; }\n    static int K4(Dictionary<string, int> d) { int t = 0; foreach (var k in d.Keys) { t += d[k]; Foo(k); } return t; }\n}\n"
+
+    let compilation, tree =
+        compileRaw Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest source
+
+    let fired = suggestRaw compilation tree |> List.filter (fun s -> s.Code = "CR0032")
+
+    Assert.Equal(2, fired.Length)
+    Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
+
 // ---- CR0033 ----
 
 [<Fact>]

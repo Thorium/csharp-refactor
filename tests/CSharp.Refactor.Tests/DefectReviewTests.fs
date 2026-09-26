@@ -127,6 +127,25 @@ class C
     Assert.Contains("foreach (var k in map.Keys.ToList())", fixAll "CR0171" source)
 
 [<Fact>]
+let ``CR0171 is a note where a repository ToList would take the snapshot call`` () =
+    let source =
+        """
+using System.Collections.Generic;
+using System.Linq;
+static class MyExt { public static List<T> ToList<T>(this List<T> xs) => xs; }
+class C
+{
+    void A(List<int> xs) { foreach (var x in xs) { xs.Add(0); if (xs.Count > 5) break; } }
+    void B(HashSet<int> set) { foreach (var x in set) { set.Add(x + 1); if (set.Count > 5) break; } }
+}
+"""
+
+    let fired = suggestCode "CR0171" source
+    Assert.Equal(2, fired.Length)
+    Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    Assert.Contains("foreach (var x in set.ToList())", fixAll "CR0171" source)
+
+[<Fact>]
 let ``CR0015 spells the element type where the collection enumerates something else than its indexer returns`` () =
     let source =
         """

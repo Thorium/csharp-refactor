@@ -37,16 +37,25 @@ let insideExpressionTree (model: SemanticModel) (node: SyntaxNode) : bool =
             && t.ContainingNamespace.ToDisplayString() = "System.Linq.Expressions"
         | _ -> false)
 
-/// Does any identifier token in the node spell the name?
+/// Does any identifier token in the node spell the name? No node (a root's
+/// missing parent) mentions nothing.
 let mentionsName (name: string) (node: SyntaxNode) : bool =
-    node.DescendantTokens()
-    |> Seq.exists (fun t -> t.IsKind SyntaxKind.IdentifierToken && t.ValueText = name)
+    not (isNull node)
+    && node.DescendantTokens()
+       |> Seq.exists (fun t -> t.IsKind SyntaxKind.IdentifierToken && t.ValueText = name)
 
 /// The enclosing member declaration — the scope a fresh name must be
-/// unused in — or the root when the node is not in one.
+/// unused in, and where a local may be written — or the root when the node
+/// is not in one. A top-level statement is one member of the compilation
+/// unit, but its locals are visible to every other top-level statement (a
+/// later local function included): there the scope is the whole unit.
 let enclosingMember (node: SyntaxNode) : SyntaxNode =
     node.Ancestors()
     |> Seq.tryFind (fun a -> a :? Syntax.MemberDeclarationSyntax)
+    |> Option.map (fun m ->
+        match m with
+        | :? Syntax.GlobalStatementSyntax when not (isNull m.Parent) -> m.Parent
+        | _ -> m)
     |> Option.defaultValue (node.SyntaxTree.GetRoot())
 
 /// Is the expression (by its text) assigned, incremented or passed by

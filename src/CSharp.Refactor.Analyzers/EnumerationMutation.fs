@@ -14,7 +14,8 @@
 /// closures, and not followed by `break`/`return`/`throw` (mutate-and-leave
 /// never reaches the next `MoveNext`); `Dictionary`/`HashSet.Remove` on
 /// CoreLib tolerates enumeration since .NET Core 3.0 and is not reported;
-/// `System.Linq` importable for the snapshot.
+/// `System.Linq` importable for the snapshot, and no `ToList` of the
+/// repository's own in scope for the source (it would take the call).
 module CSharp.Refactor.EnumerationMutation
 
 open Microsoft.CodeAnalysis
@@ -249,6 +250,18 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                         | None ->
                             match Usings.importEdit model tree source.SpanStart "System.Linq" "Enumerable" with
                             | None -> Some(Suggestion.note Code message firstNode.Span)
+                            // a `ToList` of the repository's own with a more specific
+                            // receiver would take the call and snapshot nothing
+                            | Some _ when
+                                not (
+                                    Guards.onlyBclCandidates
+                                        model
+                                        source.SpanStart
+                                        (model.GetTypeInfo(source).Type)
+                                        "ToList"
+                                )
+                                ->
+                                Some(Suggestion.note Code message firstNode.Span)
                             | Some imports ->
                                 Some(
                                     {

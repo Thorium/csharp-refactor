@@ -173,6 +173,117 @@ class C
         fixedSource
     )
 
+[<Fact>]
+let ``CR0022 without a break needs a total condition over an eager source and the BCL's Any`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+class Item { public int Id { get; set; } }
+class C
+{
+    bool A(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) if (x > 3) { found = true; break; } return found; }
+    bool B(List<Item> items, int id) { bool found = false; foreach (var x in items) if (x.Id == id) found = true; return found; }
+    bool D(string[] xs) { var any = false; foreach (var s in xs) if (string.IsNullOrEmpty(s)) any = true; return any; }
+    bool E(int[] xs) { bool ok = true; foreach (var x in xs) if (x < 0) ok = false; return ok; }
+    bool H1(int?[] xs) { bool found = false; foreach (var x in xs) { if (x.Value > 0) found = true; } return found; }
+    bool H2(List<Item?> items, int id) { bool found = false; foreach (var x in items) if (x!.Id == id) found = true; return found; }
+    static IEnumerable<int> Gen() { yield return 1; }
+    bool H3() { bool found = false; foreach (var x in Gen()) if (x > 0) found = true; return found; }
+}
+"""
+
+    let fired = suggestCode "CR0022" source
+    // H1 (`x.Value`) and H3 (a user iterator walked to its end) are notes; H2's `x!` never fired
+    Assert.Equal(6, fired.Length)
+    Assert.Equal(4, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0022" source
+    Assert.Contains("bool found = xs.Any(x => x > 3); return found;", fixedSource)
+    Assert.Contains("bool found = items.Any(x => x.Id == id); return found;", fixedSource)
+    Assert.Contains("var any = xs.Any(s => string.IsNullOrEmpty(s)); return any;", fixedSource)
+    Assert.Contains("bool ok = xs.All(x => x >= 0); return ok;", fixedSource)
+    Assert.Contains("foreach (var x in xs) { if (x.Value > 0) found = true; } return found;", fixedSource)
+    Assert.Contains("foreach (var x in items) if (x!.Id == id) found = true; return found;", fixedSource)
+
+[<Fact>]
+let ``CR0022 without a break takes a string comparison, not a user collection or a queryable over an iterator`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+public sealed class Bag : IEnumerable<string>
+{
+    public IEnumerator<string> GetEnumerator() { yield return "a"; }
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+}
+class C
+{
+    static IEnumerable<int> Gen() { yield return 1; }
+    bool F03(List<string> names) { bool found = false; foreach (var n in names) if (n.StartsWith("A", StringComparison.Ordinal)) found = true; return found; }
+    bool F06(Bag bag) { bool found = false; foreach (var n in bag) if (n.Length > 0) found = true; return found; }
+    bool F07() { bool found = false; foreach (var x in Gen().AsQueryable()) if (x > 0) found = true; return found; }
+}
+"""
+
+    let fired = suggestCode "CR0022" source
+    Assert.Equal(3, fired.Length)
+    Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+
+    Assert.Contains(
+        """bool found = names.Any(n => n.StartsWith("A", StringComparison.Ordinal)); return found;""",
+        fixAll "CR0022" source
+    )
+
+[<Fact>]
+let ``CR0022 without a break takes a StartsWith of a variable: a null element argument is the accepted residual`` () =
+    let source =
+        """
+using System.Collections.Generic;
+public sealed class P { public string Name { get; set; } = ""; public string? Sub { get; set; } }
+class C
+{
+    bool T02(List<P> xs) { bool found = false; foreach (var p in xs) { if (p.Name.StartsWith(p.Sub!)) found = true; } return found; }
+    bool Kept(List<P> xs) { bool found = false; foreach (var p in xs) { if (p.Name.StartsWith("a")) found = true; } return found; }
+}
+"""
+
+    let fired = suggestCode "CR0022" source
+    Assert.Equal(2, fired.Length)
+    Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
+    let fixedSource = fixAll "CR0022" source
+    Assert.Contains("""bool found = xs.Any(p => p.Name.StartsWith(p.Sub!)); return found;""", fixedSource)
+    Assert.Contains("""bool found = xs.Any(p => p.Name.StartsWith("a")); return found;""", fixedSource)
+
+[<Fact>]
+let ``CR0022 and CR0028 are notes where a repository extension would take the call they spell`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+static class MyExt
+{
+    public static bool Any<T>(this T[] xs, Func<T, bool> p) => false;
+    public static IEnumerable<T> Where<T>(this T[] xs, Func<T, bool> p) => xs;
+}
+class C
+{
+    bool A(int[] xs) { bool found = false; foreach (var x in xs) { if (x > 1) found = true; } return found; }
+    List<int> B(int[] xs) { var r = new List<int>(); foreach (var x in xs) if (x > 1) r.Add(x); return r; }
+    List<int> D(List<int> xs) { var r = new List<int>(); foreach (var x in xs) if (x > 1) r.Add(x); return r; }
+}
+"""
+
+    let flags = suggestCode "CR0022" source
+    Assert.Equal(1, flags.Length)
+    Assert.Empty flags.[0].Fixes
+    let fills = suggestCode "CR0028" source
+    Assert.Equal(2, fills.Length)
+    Assert.Equal(1, fills |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    Assert.Contains("var r = xs.Where(x => x > 1).ToList(); return r;", fixAll "CR0028" source)
+
 // ---- CR0025 ----
 
 [<Fact>]

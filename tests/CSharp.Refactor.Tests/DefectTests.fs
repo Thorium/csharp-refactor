@@ -571,6 +571,118 @@ class C
     Assert.Contains("if (!int.TryParse(s, CultureInfo.InvariantCulture, out v)) { v = 0; }", fixAll "CR0166" source)
 
 [<Fact>]
+let ``CR0166 takes a user getter or method evaluating the argument: one that throws is the accepted residual`` () =
+    let source =
+        """
+using System;
+using System.IO;
+static class Cfg
+{
+    public static string Raw => File.ReadAllText("none.txt");
+    public static string Field = "80";
+}
+class C
+{
+    static string Norm(string s) => string.Format(s, 1);
+    static string Prop { get { return string.Format("{bad", 1); } }
+    int A1()
+    {
+        int port;
+        try { port = int.Parse(Cfg.Raw); } catch (Exception) { port = 80; }
+        return port;
+    }
+    int A7()
+    {
+        try { return int.Parse(Cfg.Raw); } catch (Exception) { return 80; }
+    }
+    Guid A5(string s)
+    {
+        Guid g;
+        try { g = Guid.Parse(Norm(s)); } catch (FormatException) { g = Guid.Empty; }
+        return g;
+    }
+    bool A6()
+    {
+        bool b;
+        try { b = bool.Parse(Prop); } catch (FormatException) { b = true; }
+        return b;
+    }
+    int Kept1()
+    {
+        int port;
+        try { port = int.Parse(Cfg.Field); } catch (Exception) { port = 80; }
+        return port;
+    }
+    Guid Kept2(string s)
+    {
+        Guid g;
+        try { g = Guid.Parse(s.Trim()); } catch (FormatException) { g = Guid.Empty; }
+        return g;
+    }
+}
+"""
+
+    let fired = suggestCode "CR0166" source
+    Assert.Equal(6, fired.Length)
+    Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
+    let fixedSource = fixAll "CR0166" source
+    Assert.Contains("if (!int.TryParse(Cfg.Raw, out port)) { port = 80; }", fixedSource)
+    Assert.Contains("return int.TryParse(Cfg.Raw, out var parsed) ? parsed : 80;", fixedSource)
+    Assert.Contains("if (!Guid.TryParse(Norm(s), out g)) { g = Guid.Empty; }", fixedSource)
+    Assert.Contains("if (!bool.TryParse(Prop, out b)) { b = true; }", fixedSource)
+    Assert.Contains("if (!int.TryParse(Cfg.Field, out port)) { port = 80; }", fixedSource)
+    Assert.Contains("if (!Guid.TryParse(s.Trim(), out g)) { g = Guid.Empty; }", fixedSource)
+
+[<Fact>]
+let ``CR0166 takes an indexed or static auto-property argument, not a user conversion or an overridable getter`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+public static class Cfg { public static string Port { get; set; } = "80"; }
+public readonly struct W { public static implicit operator string(W w) => ""; }
+class C
+{
+    Guid P04(string[] parts) { Guid g; try { g = Guid.Parse(parts[0]); } catch (FormatException) { g = Guid.Empty; } return g; }
+    int P05() { int port; try { port = int.Parse(Cfg.Port); } catch (Exception) { port = 80; } return port; }
+    Guid P11(List<string> ids) { Guid g; try { g = Guid.Parse(ids[0]); } catch (FormatException) { g = Guid.Empty; } return g; }
+    int P07(W w) { int v; try { v = int.Parse(w); } catch { v = -1; } return v; }
+    Guid P08(W w) { Guid g; try { g = Guid.Parse(w); } catch (FormatException) { g = Guid.Empty; } return g; }
+    Guid P14(Exception ex) { Guid g; try { g = Guid.Parse(ex.Message); } catch (FormatException) { g = Guid.Empty; } return g; }
+}
+"""
+
+    let fired = suggestCode "CR0166" source
+    let fixedSource = fixAll "CR0166" source
+    Assert.Equal(3, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    Assert.Contains("if (!Guid.TryParse(parts[0], out g)) { g = Guid.Empty; }", fixedSource)
+    Assert.Contains("if (!int.TryParse(Cfg.Port, out port)) { port = 80; }", fixedSource)
+    Assert.Contains("if (!Guid.TryParse(ids[0], out g)) { g = Guid.Empty; }", fixedSource)
+    Assert.Contains("try { v = int.Parse(w); } catch { v = -1; }", fixedSource)
+    Assert.Contains("try { g = Guid.Parse(w); } catch (FormatException) { g = Guid.Empty; }", fixedSource)
+    Assert.Contains("try { g = Guid.Parse(ex.Message); } catch (FormatException) { g = Guid.Empty; }", fixedSource)
+
+[<Fact>]
+let ``CR0166 takes a virtual BCL getter but not Lazy, ThreadLocal or an Exception member`` () =
+    let source =
+        """
+using System;
+using System.IO;
+using System.Threading;
+class C
+{
+    Guid T14(Lazy<string> lazy) { Guid g; try { g = Guid.Parse(lazy.Value); } catch (FormatException) { g = Guid.Empty; } return g; }
+    Guid T15(ThreadLocal<string> tl) { Guid g; try { g = Guid.Parse(tl.Value!); } catch (FormatException) { g = Guid.Empty; } return g; }
+    Guid P14(Exception ex) { Guid g; try { g = Guid.Parse(ex.Message); } catch (FormatException) { g = Guid.Empty; } return g; }
+    Guid Kept(FileSystemInfo info) { Guid g; try { g = Guid.Parse(info.Name); } catch (FormatException) { g = Guid.Empty; } return g; }
+}
+"""
+
+    let fired = suggestCode "CR0166" source
+    Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    Assert.Contains("if (!Guid.TryParse(info.Name, out g)) { g = Guid.Empty; }", fixAll "CR0166" source)
+
+[<Fact>]
 let ``CR0166 keeps the configured default port when the setting is bad: the parse goes through a fresh variable`` () =
     let source =
         """
