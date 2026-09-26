@@ -422,6 +422,120 @@ let ``CR0032 sweeps past an unbound call: a baseline error is no detection`` () 
     Assert.Equal(2, fired.Length)
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
 
+[<Fact>]
+let ``CR0032 follows a partial method's implementation and a delegate a constructor or another member stores; a property read runs its getter alone``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+public sealed partial class P
+{
+    readonly Dictionary<string, int> _d = new() { ["a"] = 1, ["b"] = 2 };
+    readonly Action<string> _bump;
+    Action<string>? _late;
+    Action<string> _init = k => { };
+    Func<string, int> Bump { get; } = k => 1;
+    public P() { _bump = Bump2; Bump = k => _d[k] = 100; _init = k => _d[k] = 100; }
+    public void Init() { _late = k => _d[k] = 100; }
+    void Bump2(string k) { _d[k] = 100; }
+    partial void Touch(string k);
+    int V05() { int total = 0; foreach (var k in _d.Keys) { Touch(k); total += _d[k]; } return total; }
+    int V06() { int total = 0; foreach (var k in _d.Keys) { _bump(k); total += _d[k]; } return total; }
+    int V07() { int total = 0; foreach (var k in _d.Keys) { _late?.Invoke(k); total += _d[k]; } return total; }
+    int V18() { int total = 0; foreach (var k in _d.Keys) { _init(k); total += _d[k]; } return total; }
+    int V23() { int total = 0; foreach (var k in _d.Keys) { Bump(k); total += _d[k]; } return total; }
+}
+public sealed partial class P { partial void Touch(string k) { _d[k] = 100; } }
+public sealed class Q
+{
+    readonly Dictionary<string, int> _d = new() { ["a"] = 1 };
+    Dictionary<string, int> _o = new();
+    Dictionary<string, int> Data { get => _o; set => _o = value; }
+    static void Note(string k) { }
+    int V30() { int total = 0; foreach (var k in Data.Keys) { Note(k); total += Data[k]; } return total; }
+    int V30b() { int total = 0; foreach (var k in _d.Keys) { var n = Data.Count; total += _d[k] + n; } return total; }
+}
+"""
+
+    let compilation, tree = compile source
+    let model = compilation.GetSemanticModel(tree, false)
+
+    let suggestions, failures =
+        CSharp.Refactor.Roslyn.Rules.allWithFailures
+            tree
+            model
+            (CSharp.Refactor.Roslyn.Context.forTree None compilation tree false)
+
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0032")
+    Assert.Equal(7, fired.Length)
+    // P: every call before the lookup visibly writes `_d` — through the
+    // partial implementation, the stored lambdas or the method group; Q: a
+    // property receiver with a setter, and another property read, run only
+    // their getters
+    Assert.Equal(5, fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0032" source
+    Assert.Contains("foreach (var (k, value) in Data) { Note(k); total += value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in _d) { var n = Data.Count; total += value + n; }", fixedSource)
+
+[<Fact>]
+let ``CR0032 follows a function pointer through a cast in parentheses to the method it takes`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+public static unsafe class U
+{
+    static readonly Dictionary<string, int> S = new() { ["a"] = 1, ["b"] = 2 };
+    static void Bump(string k) => S[k] = 99;
+    static void Noop(string k) { }
+    public static int V40() { delegate*<string, void> fp = (delegate*<string, void>)(&Bump); int total = 0; foreach (var k in S.Keys) { fp(k); total += S[k]; } return total; }
+    public static int V41() { delegate*<string, void> fp = &Noop; fp = (delegate*<string, void>)(&Bump); int total = 0; foreach (var k in S.Keys) { fp(k); total += S[k]; } return total; }
+    public static int V42() { delegate*<string, void> fp = (delegate*<string, void>)(&Noop); int total = 0; foreach (var k in S.Keys) { fp(k); total += S[k]; } return total; }
+}
+"""
+
+    // a function pointer wants an unsafe compilation
+    let tree =
+        Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(normalize source, parseOptions, path = "Sample.cs")
+
+    let compilation =
+        Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+            "Test",
+            [ tree ],
+            metadataReferences,
+            Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
+                Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary,
+                nullableContextOptions = Microsoft.CodeAnalysis.NullableContextOptions.Enable,
+                allowUnsafe = true
+            )
+        )
+
+    Assert.Empty(errorsOf compilation)
+    let model = compilation.GetSemanticModel(tree, false)
+
+    let suggestions, failures =
+        CSharp.Refactor.Roslyn.Rules.allWithFailures
+            tree
+            model
+            (CSharp.Refactor.Roslyn.Context.forTree None compilation tree false)
+
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0032")
+    Assert.Equal(3, fired.Length)
+    // `(delegate*<string, void>)(&Bump)` binds the method group through the
+    // conversion: the pointer visibly writes `S`; `&Noop` through the same
+    // cast writes nothing
+    let methodOf (s: CSharp.Refactor.Suggestion) =
+        let line =
+            tree.GetText().Lines.[tree.GetLineSpan(s.Span).StartLinePosition.Line].ToString()
+
+        System.Text.RegularExpressions.Regex.Match(line, @"int (V\d+)\(").Groups.[1].Value
+
+    Assert.Equal<string list>([ "V40"; "V41" ], fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.map methodOf)
+
 // ---- CR0033 ----
 
 [<Fact>]

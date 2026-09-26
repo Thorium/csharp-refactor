@@ -408,6 +408,160 @@ static class C
     // H09 (a primary parameter the type never writes) and Kept (another local deconstructed)
     Assert.Equal<string list>([ "name.Substring(0, 3) == \"abc\""; "s.Substring(0, 3) == \"abc\"" ], swept)
 
+/// Every rule over the source, with the rules that threw.
+let private allWithFailures (source: string) =
+    let compilation, tree = compile source
+    let model = compilation.GetSemanticModel(tree, false)
+
+    CSharp.Refactor.Roslyn.Rules.allWithFailures
+        tree
+        model
+        (CSharp.Refactor.Roslyn.Context.forTree None compilation tree false)
+
+[<Fact>]
+let ``CR0175 reads a property through its getter alone, and follows a partial method, a stored delegate and a getter's callees``
+    ()
+    =
+    let source =
+        """
+using System;
+public sealed partial class Rec
+{
+    string _n = "abcdef";
+    string _s = "abcdef";
+    string _other = "";
+    readonly Action _reset;
+    readonly Action _lambda;
+    Action Zap { get; }
+    public Rec() { _reset = DoReset; _lambda = () => _s = "x"; Zap = () => _s = "x"; }
+    void DoReset() => _s = "x";
+    partial void Reset();
+    public string Name { get => _n; set => _n = value; }
+    public string Only { get => _n; }
+    public string Other { get => _n; set => _other = value; }
+    public string Via { get { return this._n; } set { this._n = value; } }
+    string Stepped => Step();
+    string Step() { _n = _n.Substring(1); return _n; }
+    static void Log(string s) { }
+    bool W07() => Name.Length >= 3 && Name.Substring(0, 3) == "abc";
+    bool W07b() => Only.Length >= 3 && Only.Substring(0, 3) == "abc";
+    bool W07c() { if (Name.Length >= 3) { Log(Name); return Name.Substring(0, 3) == "abc"; } return false; }
+    bool B07e() => Other.Length >= 3 && Other.Substring(0, 3) == "abc";
+    bool B07f() => Via.Length >= 3 && Via.Substring(0, 3) == "abc";
+    bool B18() { if (_s.Length >= 3) { Reset(); return _s.Substring(0, 3) == "abc"; } return false; }
+    bool B19() => Stepped.Length >= 3 && Stepped.Substring(0, 3) == "bcd";
+    bool B11() { if (_s.Length >= 3) { _lambda(); return _s.Substring(0, 3) == "abc"; } return false; }
+    bool B23() { if (_s.Length >= 3) { Zap(); return _s.Substring(0, 3) == "abc"; } return false; }
+    bool B29() { if (_s.Length >= 3) { _reset(); return _s.Substring(0, 3) == "abc"; } return false; }
+}
+public sealed partial class Rec { partial void Reset() => _s = "x"; }
+"""
+
+    let suggestions, failures = allWithFailures source
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0175")
+    Assert.Equal(10, fired.Length)
+
+    let swept =
+        fired
+        |> List.filter (fun s -> s.Fixes |> List.exists (fun f -> not f.EditorOnly))
+        |> firedText source
+
+    // a read of `Name` runs its getter, never the setter's `_n = value`; the
+    // partial `Reset()`'s implementation, the constructor-assigned delegates
+    // and `Step()` behind `Stepped` visibly write the receiver
+    Assert.Equal<string list>(
+        [
+            "Name.Substring(0, 3) == \"abc\""
+            "Only.Substring(0, 3) == \"abc\""
+            "Name.Substring(0, 3) == \"abc\""
+            "Other.Substring(0, 3) == \"abc\""
+            "Via.Substring(0, 3) == \"abc\""
+        ],
+        swept
+    )
+
+[<Fact>]
+let ``CR0175 sees the Dispose a using runs and the ToString an interpolation or a string + formats through`` () =
+    let source =
+        """
+using System;
+using System.IO;
+public sealed class Rec
+{
+    string _s = "abcdef";
+    int _n = 1;
+    sealed class Scope : IDisposable { readonly Rec _r; public Scope(Rec r) { _r = r; } public void Dispose() => _r._s = "x"; }
+    public override string ToString() { _s = "x"; return _s; }
+    bool B13() { if (_s.Length >= 3) { var t = $"{this}"; return _s.Substring(0, 3) == "abc" && t.Length > 0; } return false; }
+    bool B14() { if (_s.Length >= 3) { var t = "x" + this; return _s.Substring(0, 3) == "abc" && t.Length > 0; } return false; }
+    bool B15() { if (_s.Length >= 3) { using (new Scope(this)) { } return _s.Substring(0, 3) == "abc"; } return false; }
+    bool B15b() { if (_s.Length >= 3) { { using var sc = new Scope(this); } return _s.Substring(0, 3) == "abc"; } return false; }
+    bool Kept1(string k) { if (_s.Length >= 3) { var t = $"{k}:{_n}" + k; return _s.Substring(0, 3) == "abc" && t.Length > 0; } return false; }
+    bool Kept2() { if (_s.Length >= 3) { using (var sw = new StringWriter()) { sw.Write(1); } return _s.Substring(0, 3) == "abc"; } return false; }
+}
+"""
+
+    let suggestions, failures = allWithFailures source
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0175")
+    Assert.Equal(6, fired.Length)
+
+    // a string's or an int's formatting and a BCL `Dispose` run nothing of the user's
+    let swept =
+        fired
+        |> List.filter (fun s -> s.Fixes |> List.exists (fun f -> not f.EditorOnly))
+        |> List.length
+
+    Assert.Equal(2, swept)
+
+[<Fact>]
+let ``CR0175 takes a getter whose callee writes a field it never reads, or a member of a value it made itself`` () =
+    let source =
+        """
+using System;
+public sealed class Tag { public int N { get; set; } }
+public sealed class Rec
+{
+    string _s = "abcdef";
+    int _hits;
+    string FmtThis(string s) { this._hits = 0; return s; }
+    string FmtPlain(string s) { _hits = 0; return s; }
+    static string FmtFresh(string s) { var t = new Tag(); t.N = 1; return s + t.N; }
+    string FmtCount(string s) { _hits++; return s + _hits; }
+    public string A => FmtThis(_s);
+    public string B => FmtPlain(_s);
+    public string C => FmtFresh(_s);
+    public string D => FmtCount(_s);
+    bool T03() { if (A.Length >= 3) { return A.Substring(0, 3) == "abc"; } return false; }
+    bool T04() { if (B.Length >= 3) { return B.Substring(0, 3) == "abc"; } return false; }
+    bool T05() { if (C.Length >= 3) { return C.Substring(0, 3) == "abc"; } return false; }
+    bool Kept() { if (D.Length >= 3) { return D.Substring(0, 3) == "abc"; } return false; }
+}
+"""
+
+    let suggestions, failures = allWithFailures source
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0175")
+    Assert.Equal(4, fired.Length)
+
+    let swept =
+        fired
+        |> List.filter (fun s -> s.Fixes |> List.exists (fun f -> not f.EditorOnly))
+        |> firedText source
+
+    // `this._hits = 0` is one write, not a read beside it; a write-only
+    // `_hits` is no name the value depends on; `t.N` on a fresh local is
+    // the callee's own state — only `FmtCount` reads what it writes
+    Assert.Equal<string list>(
+        [
+            "A.Substring(0, 3) == \"abc\""
+            "B.Substring(0, 3) == \"abc\""
+            "C.Substring(0, 3) == \"abc\""
+        ],
+        swept
+    )
+
 // ---- CR0176 ----
 
 [<Fact>]

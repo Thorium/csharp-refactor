@@ -518,6 +518,18 @@ let private dictionaryHazards
                 | Some a -> atEnd a
                 | None -> atEnd op
 
+            // the accessors the mention runs: the setter of a store, the getter
+            // of a read, both of a step or a compound store — a read is not
+            // charged with what the setter writes
+            let accessors: ISymbol list =
+                [
+                    if store.IsNone || not (op.Parent :? ISimpleAssignmentOperation) then
+                        r.Property.GetMethod :> ISymbol
+                    if store.IsSome then
+                        r.Property.SetMethod :> ISymbol
+                ]
+                |> List.filter (isNull >> not)
+
             // a store into another dictionary-typed value: an alias
             if store.IsSome && mutatesDictionary r.Instance "set" then
                 effect
@@ -528,7 +540,7 @@ let private dictionaryHazards
                 match (if isNull r.Instance then null else r.Instance.Syntax) with
                 | :? ExpressionSyntax as x when originsHazardous x -> effect
                 | _ -> None
-            elif userTouches [ r.Property ] then
+            elif userTouches accessors then
                 effect
             else
                 None
@@ -554,6 +566,12 @@ let private dictionaryHazards
                 | _ -> None
             else
                 hazardIf [ m ] op
+
+        // a function pointer's `fp(k)`: what `fp` visibly came from (`&Bump`)
+        let functionPointerHazard (op: IOperation) =
+            match (op :?> IFunctionPointerInvocationOperation).Target.Syntax with
+            | :? ExpressionSyntax as x when originsHazardous x -> atEnd op
+            | _ -> None
 
         // a delegate value handed to a call, which may invoke it
         let argumentHazard (op: IOperation) =
@@ -705,6 +723,7 @@ let private dictionaryHazards
                 match op.Kind with
                 | OperationKind.PropertyReference -> propertyHazard op
                 | OperationKind.Invocation -> invocationHazard op
+                | OperationKind.FunctionPointerInvocation -> functionPointerHazard op
                 | OperationKind.ObjectCreation -> byOperator (op :?> IObjectCreationOperation).Constructor op
                 | OperationKind.MethodReference ->
                     // a method group handed on runs wherever it is called

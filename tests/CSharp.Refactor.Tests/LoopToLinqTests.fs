@@ -284,6 +284,106 @@ class C
     Assert.Equal(1, fills |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     Assert.Contains("var r = xs.Where(x => x > 1).ToList(); return r;", fixAll "CR0028" source)
 
+[<Fact>]
+let ``CR0022 without a break follows the source to its visible origin and a Select's lambda to a user method's effects``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+public sealed class Holder
+{
+    readonly IEnumerable<int> _xs;
+    public Holder() { _xs = Gen(); }
+    static IEnumerable<int> Gen() { yield return 1; yield return 2; }
+    public bool Y12() { bool found = false; foreach (var x in _xs) if (x > 0) found = true; return found; }
+}
+class C
+{
+    static int calls;
+    static readonly List<object> objs = new() { 1, "two" };
+    static IEnumerable<int> Gen() { yield return 1; yield return 2; }
+    static IEnumerable<int> Items => Gen();
+    static IEnumerable<int> Casted => objs.Cast<int>();
+    static int Log(int x) { calls++; return x; }
+    bool Y01() { bool found = false; foreach (var x in Items) if (x > 0) found = true; return found; }
+    bool Y02() { var xs = Gen(); bool found = false; foreach (var x in xs) if (x > 0) found = true; return found; }
+    bool Y03() { bool found = false; foreach (var x in Casted) if (x > 0) found = true; return found; }
+    bool Y10(List<int> items) { bool found = false; foreach (var x in items.Select(i => Log(i))) if (x > 0) found = true; return found; }
+    bool Y08(List<string> items) { bool found = false; foreach (var x in items) if (x.StartsWith("a")) found = true; return found; }
+}
+"""
+
+    let compilation, tree = compile source
+    let model = compilation.GetSemanticModel(tree, false)
+
+    let suggestions, failures =
+        CSharp.Refactor.Roslyn.Rules.allWithFailures
+            tree
+            model
+            (CSharp.Refactor.Roslyn.Context.forTree None compilation tree false)
+
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0022")
+    Assert.Equal(6, fired.Length)
+    // the field a constructor fills with an iterator, the property and the
+    // local holding one, `Cast<T>()` behind a getter, and `Log` counting its
+    // calls under `Select`: notes; Y08 over a list takes the fix
+    Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0022" source
+    Assert.Contains("""bool found = items.Any(x => x.StartsWith("a")); return found;""", fixedSource)
+    Assert.Contains("foreach (var x in _xs) if (x > 0) found = true; return found;", fixedSource)
+    Assert.Contains("foreach (var x in items.Select(i => Log(i))) if (x > 0) found = true; return found;", fixedSource)
+
+[<Fact>]
+let ``CR0022 without a break takes a materialised copy of an iterator, and sees an iterator getter and an explicit GetEnumerator``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+public sealed class Col : IEnumerable<int>
+{
+    public int Calls;
+    IEnumerator<int> IEnumerable<int>.GetEnumerator() { Calls++; yield return 1; Calls++; yield return 2; }
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
+}
+class C
+{
+    static int calls;
+    static IEnumerable<int> Gen() { calls++; yield return 1; calls++; yield return 2; }
+    static IEnumerable<int> Lazy { get { calls++; yield return 1; calls++; yield return 2; } }
+    bool Y20() { var arr = Gen().ToArray(); bool found = false; foreach (var x in arr) if (x > 1) found = true; return found; }
+    bool Y21() { bool found = false; foreach (var x in Lazy) if (x > 0) found = true; return found; }
+    bool Y22() { bool found = false; foreach (var x in new Col()) if (x > 0) found = true; return found; }
+}
+"""
+
+    let compilation, tree = compile source
+    let model = compilation.GetSemanticModel(tree, false)
+
+    let suggestions, failures =
+        CSharp.Refactor.Roslyn.Rules.allWithFailures
+            tree
+            model
+            (CSharp.Refactor.Roslyn.Context.forTree None compilation tree false)
+
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0022")
+    Assert.Equal(3, fired.Length)
+    // `ToArray()` walked the iterator before the loop; a getter that yields
+    // and an explicit `IEnumerable<T>.GetEnumerator()` that yields run code
+    // per element
+    Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0022" source
+    Assert.Contains("var arr = Gen().ToArray(); bool found = arr.Any(x => x > 1); return found;", fixedSource)
+    Assert.Contains("foreach (var x in Lazy) if (x > 0) found = true; return found;", fixedSource)
+    Assert.Contains("foreach (var x in new Col()) if (x > 0) found = true; return found;", fixedSource)
+
 // ---- CR0025 ----
 
 [<Fact>]

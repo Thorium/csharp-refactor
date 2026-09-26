@@ -137,22 +137,27 @@ let private noOverflow =
 /// (`Guards.hasThrowingShape`): no element access or indexer, no nested
 /// parse or `Convert`, no `Substring`/`First`/`Single`, no
 /// `Nullable<T>.Value`, no `Lazy<T>` factory or `Exception` member, no user
-/// conversion, no `checked` arithmetic. A user method or getter,
-/// `string.Format`, `Trim`: taken not to throw — the accepted residual is
-/// the user getter that does (`Cfg.Raw => File.ReadAllText(…)`).
+/// conversion, no `checked` arithmetic — in it, or in a user method or
+/// getter it runs, followed three calls deep (`Guards.throwsThrough`:
+/// `Get(s) => s.Substring(5)`, `First => _parts[0]`, `Raw => throw …`).
+/// `string.Format`, `Trim`, `textBox.Text`, a call whose body cannot be
+/// seen: taken not to throw — the accepted residual is the user getter
+/// that throws through the BCL (`Cfg.Raw => File.ReadAllText(…)`).
 let private nonThrowing (model: SemanticModel) (e: ExpressionSyntax) =
-    not (Guards.hasThrowingShape model false e)
+    not (Guards.hasThrowingShape model false e || Guards.throwsThrough model false e)
 
 /// Can evaluating the argument throw a `FormatException` of its own, which
 /// the catch absorbed and `TryParse` lets escape? Only where it holds a
 /// shape known to: a nested parse or `Convert`, a user conversion, a
 /// `Lazy<T>`/`ThreadLocal<T>` factory, an `Exception` member routinely
-/// overridden (`Guards.hasThrowingShape`, format only). An indexer or a
-/// `Substring` throws an index error the catch never absorbed, and a user
-/// method or getter (`Guid.Parse(Norm(s))`) or `string.Format` is taken not
-/// to throw one: the accepted residual.
+/// overridden (`Guards.hasThrowingShape`, format only) — in it, or in a
+/// user method or getter it runs, three calls deep (`Guid.Parse(Norm(s))`
+/// with `Norm(s) => int.Parse(s).ToString()`). An indexer or a `Substring`
+/// throws an index error the catch never absorbed, and `string.Format` or a
+/// call whose body cannot be seen is taken not to throw one: the accepted
+/// residual.
 let private cannotThrowFormat (model: SemanticModel) (e: ExpressionSyntax) =
-    not (Guards.hasThrowingShape model true e)
+    not (Guards.hasThrowingShape model true e || Guards.throwsThrough model true e)
 
 /// Does the catch cover every failure the `TryParse` twin would turn into
 /// `false`? Otherwise the rewrite swallows what used to propagate.
@@ -360,8 +365,26 @@ let private tryParses (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                         ViaFresh
                                 | _ -> Unsafe
 
-                            // `other.v = …` under the catch: a null `other` was caught there
-                            if form = Unsafe || not (nonThrowing model target) then
+                            // `other.V = …` under the catch: a null `other` was caught there
+                            // — where the flow state says a receiver in the target's chain
+                            // may be null (`Box? other = null; other.V = …`); under `other!`
+                            // the author vouched, and the flow state follows
+                            let rec maybeNullReceiver (x: ExpressionSyntax) =
+                                let receiver =
+                                    match x with
+                                    | :? MemberAccessExpressionSyntax as ma -> ma.Expression
+                                    | :? ElementAccessExpressionSyntax as ea -> ea.Expression
+                                    | :? ParenthesizedExpressionSyntax as p -> p.Expression
+                                    | :? PostfixUnaryExpressionSyntax as u -> u.Operand
+                                    | _ -> null
+
+                                match receiver with
+                                | null -> false
+                                | r ->
+                                    model.GetTypeInfo(r).Nullability.FlowState = NullableFlowState.MaybeNull
+                                    || maybeNullReceiver r
+
+                            if form = Unsafe || not (nonThrowing model target) || maybeNullReceiver target then
                                 note ()
                             else
                                 let replacement =

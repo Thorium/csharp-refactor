@@ -514,37 +514,61 @@ let private flags (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) :
                         let bindsToBcl =
                             Guards.onlyBclCandidates model f.SpanStart sourceType (if init then "All" else "Any")
 
-                        if not (Guards.speculativeCheck model edits) then
-                            None
-                        elif stopsAlike && bindsToBcl then
-                            Some
-                                {
-                                    Code = FlagCode
-                                    Message = message
-                                    Span = span
-                                    Fixes = [ Suggestion.fix (if init then "Use All" else "Use Any") FlagCode edits ]
-                                }
-                        elif not bindsToBcl then
+                        // the cheap proofs first: a note needs no compile, and the
+                        // speculative check is one
+                        if not bindsToBcl then
                             Some(
-                                Suggestion.note
-                                    FlagCode
-                                    (message
-                                     + " — no fix: an extension method of this repository would take the call")
-                                    span
+                                Choice1Of2(
+                                    Suggestion.note
+                                        FlagCode
+                                        (message
+                                         + " — no fix: an extension method of this repository would take the call")
+                                        span
+                                )
+                            )
+                        elif not stopsAlike then
+                            Some(
+                                Choice1Of2(
+                                    Suggestion.note
+                                        FlagCode
+                                        (message
+                                         + " — no fix: the loop tests every element, and the condition or the source may act or throw after the first decider, where Any/All stop")
+                                        span
+                                )
                             )
                         else
                             Some(
-                                Suggestion.note
-                                    FlagCode
-                                    (message
-                                     + " — no fix: the loop tests every element, and the condition or the source may act or throw after the first decider, where Any/All stop")
-                                    span
+                                Choice2Of2(
+                                    {
+                                        Code = FlagCode
+                                        Message = message
+                                        Span = span
+                                        Fixes =
+                                            [ Suggestion.fix (if init then "Use All" else "Use Any") FlagCode edits ]
+                                    },
+                                    edits
+                                )
                             )
                 else
                     None
             | _ -> None
         | _ -> None)
     |> List.ofSeq
+    |> fun found ->
+        let notes =
+            found
+            |> List.choose (function
+                | Choice1Of2 note -> Some note
+                | Choice2Of2 _ -> None)
+
+        let candidates =
+            found
+            |> List.choose (function
+                | Choice2Of2 candidate -> Some candidate
+                | Choice1Of2 _ -> None)
+
+        // a file of many flag loops is one re-bind, not one per loop
+        notes @ Guards.speculativeCheckEach model candidates
 
 // ---- CR0025 ----
 

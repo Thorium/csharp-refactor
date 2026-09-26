@@ -683,6 +683,69 @@ class C
     Assert.Contains("if (!Guid.TryParse(info.Name, out g)) { g = Guid.Empty; }", fixAll "CR0166" source)
 
 [<Fact>]
+let ``CR0166 follows a user method or getter three calls deep for a throwing shape, and keeps a target under a receiver that may be null``
+    ()
+    =
+    let source =
+        """
+using System;
+public sealed class Box { public int V; }
+public sealed class Cfg { readonly string[] _parts = new string[0]; public string First => _parts[0]; public static string Raw => throw new InvalidOperationException(); }
+public sealed class TextBox { public string Text { get; set; } = "12"; }
+class C
+{
+    static string Get(string s) => s.Substring(5);
+    static string A(string s) => B(s);
+    static string B(string s) => s.Substring(7);
+    static string Norm(string s) => int.Parse(s).ToString();
+    static string GetText() => "12";
+    int X01(string s) { int v; try { v = int.Parse(Get(s)); } catch { v = -1; } return v; }
+    int X11() { int v; try { v = int.Parse(A("12")); } catch { v = -1; } return v; }
+    int X04(Cfg c) { int v; try { v = int.Parse(c.First); } catch { v = -1; } return v; }
+    int X03() { int v; try { v = int.Parse(Cfg.Raw); } catch { v = -1; } return v; }
+    Guid X02(string s) { Guid g; try { g = Guid.Parse(Norm(s)); } catch (FormatException) { g = Guid.Empty; } return g; }
+    int X06(string s) { int v; try { v = int.Parse(s.Trim()); } catch { v = -1; } return v; }
+    int X07(TextBox textBox) { int v; try { v = int.Parse(textBox.Text); } catch { v = -1; } return v; }
+    int X08() { int v; try { v = int.Parse(GetText()); } catch { v = -1; } return v; }
+    string X10b() { Box? other = null; try { other.V = int.Parse("12"); } catch { return "caught"; } return other.V.ToString(); }
+    string X10c(Box other) { try { other.V = int.Parse("12"); } catch { return "caught"; } return other.V.ToString(); }
+}
+"""
+
+    let compilation, tree = compile source
+    let model = compilation.GetSemanticModel(tree, false)
+
+    let suggestions, failures =
+        CSharp.Refactor.Roslyn.Rules.allWithFailures
+            tree
+            model
+            (CSharp.Refactor.Roslyn.Context.forTree None compilation tree false)
+
+    Assert.Empty failures
+    let fired = suggestions |> List.filter (fun s -> s.Code = "CR0166")
+    // a `Substring` one or two calls down, an indexer or a `throw` behind a
+    // getter, and a null receiver the catch absorbed: kept (a nested parse
+    // under a FormatException catch is the note); `Trim`, an auto-property,
+    // a plain user method and a non-nullable receiver: the fix
+    Assert.Equal(5, fired.Length)
+    Assert.Equal(4, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0166" source
+    Assert.Contains("if (!int.TryParse(s.Trim(), out v)) { v = -1; }", fixedSource)
+    Assert.Contains("if (!int.TryParse(textBox.Text, out v)) { v = -1; }", fixedSource)
+    Assert.Contains("if (!int.TryParse(GetText(), out v)) { v = -1; }", fixedSource)
+    Assert.Contains("try { v = int.Parse(Get(s)); } catch { v = -1; }", fixedSource)
+    Assert.Contains("try { v = int.Parse(A(\"12\")); } catch { v = -1; }", fixedSource)
+    Assert.Contains("try { v = int.Parse(c.First); } catch { v = -1; }", fixedSource)
+    Assert.Contains("try { v = int.Parse(Cfg.Raw); } catch { v = -1; }", fixedSource)
+    Assert.Contains("try { g = Guid.Parse(Norm(s)); } catch (FormatException) { g = Guid.Empty; }", fixedSource)
+    Assert.Contains("Box? other = null; try { other.V = int.Parse(\"12\"); } catch { return \"caught\"; }", fixedSource)
+
+    Assert.Contains(
+        "if (int.TryParse(\"12\", out var parsed)) other.V = parsed; else { return \"caught\"; }",
+        fixedSource
+    )
+
+[<Fact>]
 let ``CR0166 keeps the configured default port when the setting is bad: the parse goes through a fresh variable`` () =
     let source =
         """

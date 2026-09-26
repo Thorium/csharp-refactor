@@ -589,8 +589,11 @@ let private sameStringProof (model: SemanticModel) (receiver: ExpressionSyntax) 
             Some((isNull p.SetMethod || p.SetMethod.IsInitOnly) && not (inConstructor s), [])
         // a computed getter: fixed where its body cannot be seen; never the
         // same string where that body assigns, counts or constructs (`calls++`,
-        // `=> new string(…)`); else a read of the mutables it reads, each a
-        // settable name of its own for the window to check
+        // `=> new string(…)`), or what it runs writes what it reads; else a
+        // read of the mutables it reads — itself, or through what it runs,
+        // three calls deep — each a settable name of its own for the window
+        // to check (a name only written there, `_hits = 0`, or a member of a
+        // value the callee made itself, is none the value depends on)
         | :? IPropertySymbol as p ->
             if Guards.unstableGetter model p then
                 None
@@ -599,7 +602,14 @@ let private sameStringProof (model: SemanticModel) (receiver: ExpressionSyntax) 
 
                 match Guards.visibleBodies model getter with
                 | [] -> Some(true, [])
-                | bodies ->
+                | own ->
+                    let bodies =
+                        own
+                        @ Guards.reachableBodies
+                            model
+                            3
+                            (own |> List.collect (fun (m, body) -> Guards.calleesOf m body))
+
                     let reads =
                         bodies
                         |> List.collect (fun (m, body) ->
@@ -607,9 +617,13 @@ let private sameStringProof (model: SemanticModel) (receiver: ExpressionSyntax) 
                             |> Seq.choose (fun n ->
                                 match n with
                                 | :? IdentifierNameSyntax
-                                | :? MemberAccessExpressionSyntax ->
+                                | :? MemberAccessExpressionSyntax when
+                                    not (Guards.isNamePart n) && fst (Guards.mentionAccess n)
+                                    ->
                                     match m.GetSymbolInfo(n).Symbol with
-                                    | (:? IFieldSymbol | :? IPropertySymbol) as r when not (Guards.isBclSymbol r) ->
+                                    | (:? IFieldSymbol | :? IPropertySymbol) as r when
+                                        not (Guards.isBclSymbol r || Guards.onOwnValue m n)
+                                        ->
                                         Some r
                                     | _ -> None
                                 | _ -> None)

@@ -332,6 +332,147 @@ class C
     Assert.Contains("bool found = xs.Any(x => x % 'a' == 0); return found;", fixAll "CR0022" source)
 
 [<Fact>]
+let ``Count to Any follows a source to its visible origin and a predicate's user method to its effects`` () =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+public sealed class Col : IEnumerable<int>
+{
+    public IEnumerator<int> GetEnumerator() => new En();
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    sealed class En : IEnumerator<int> { int _i; public int Current => _i; object System.Collections.IEnumerator.Current => _i; public bool MoveNext() { Console.Write(_i); return ++_i <= 2; } public void Reset() { } public void Dispose() { } }
+}
+class C
+{
+    static int calls;
+    static readonly List<object> objs = new() { 1, "two" };
+    static IEnumerable<int> Gen() { yield return 1; yield return 2; }
+    static IEnumerable<int> Items => Gen();
+    static IEnumerable<int> Casted => objs.Cast<int>();
+    static bool Check(int x) { calls++; return x > 0; }
+    static bool IsValid(int x) => x > 0;
+    bool C01() => Items.Count(x => x > 0) > 0;
+    bool C02() { var xs = Gen(); return xs.Count(x => x > 0) > 0; }
+    bool C03() => Casted.Count(x => x > 0) > 0;
+    bool C04(List<int> xs) => xs.Count(x => Check(x)) > 0;
+    bool C05(List<int> xs) => xs.Count(Check) > 0;
+    bool C07() => new Col().Count(x => x > 0) > 0;
+    bool C10() { var xs = Gen(); return xs.Where(x => x > 0).Count() > 0; }
+    bool K01(List<int> xs) => xs.Count(IsValid) > 0;
+    bool C08(List<int> xs) => xs.Count(x => IsValid(x)) > 0;
+    bool C11(IEnumerable<int> xs) => xs.Count(x => x > 0) > 0;
+}
+"""
+
+    let suggestions, failures = allWithFailures source
+    Assert.Empty failures
+    let hints = suggestions |> List.filter (fun s -> s.Code = code)
+    Assert.Equal(10, hints.Length)
+    // an iterator behind a property or a local, `Cast<T>()` behind a getter, a
+    // hand-written enumerator writing its state, a `Check` counting its
+    // calls: notes; a pure user predicate and a parameter's sequence: the fix
+    Assert.Equal(7, hints |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll code source
+    Assert.Contains("bool K01(List<int> xs) => xs.Any(IsValid);", fixedSource)
+    Assert.Contains("bool C08(List<int> xs) => xs.Any(x => IsValid(x));", fixedSource)
+    Assert.Contains("bool C11(IEnumerable<int> xs) => xs.Any(x => x > 0);", fixedSource)
+    Assert.Contains("bool C04(List<int> xs) => xs.Count(x => Check(x)) > 0;", fixedSource)
+    Assert.Contains("bool C07() => new Col().Count(x => x > 0) > 0;", fixedSource)
+
+[<Fact>]
+let ``Count to Any takes a materialised source, a callee's own values and an in argument, and sees an iterator getter, an explicit GetEnumerator and a source behind a bang, a coalesce or a conditional``
+    ()
+    =
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+public sealed class Tag { public int N { get; set; } public int M; }
+public sealed class Col : IEnumerable<int>
+{
+    public int Calls;
+    IEnumerator<int> IEnumerable<int>.GetEnumerator() { Calls++; yield return 1; Calls++; yield return 2; }
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
+}
+public record P(string Name, int N);
+public sealed class Bag
+{
+    public int Calls;
+    static int _limit = 1;
+    readonly IEnumerable<int>? _items;
+    readonly HashSet<int> _set;
+    IEnumerable<int> Gen() { Calls++; yield return 1; Calls++; yield return 2; }
+    public Bag() { _items = Gen(); _set = Gen().ToHashSet(); }
+    public IEnumerable<int> Lazy { get { Calls++; yield return 1; } }
+    public IEnumerable<int> Either => Calls >= 0 ? Gen() : new List<int>();
+    public List<int> Snapshot => Gen().ToList();
+    static bool Fresh(int x) { var t = new Tag(); t.N = x; var u = new Tag { M = x }; var sb = new StringBuilder(); sb.Length = 0; return t.N + u.M > 2; }
+    static bool Touch(Tag t) { t.N = 1; return t.N > 0; }
+    static bool TryLookup(string k, out int v) { v = k.Length; return v > 0; }
+    static void Bump(ref int n) => n++;
+    static bool ViaRef(int x) { var n = x; Bump(ref n); return n > 2; }
+    static bool Inner(int x, in int limit) => x > limit;
+    static bool Check(int x) => Inner(x, in _limit);
+    bool A01() { var list = Gen().ToList(); return list.Count(x => x > 1) > 0; }
+    bool A02() => Gen().ToList().Count(x => x > 1) > 0;
+    bool A03() => Snapshot.Count(x => x > 1) > 0;
+    bool A04() => _set.Count(x => x > 1) > 0;
+    bool B01(List<int> xs) => xs.Count(x => Fresh(x)) > 0;
+    bool B02(List<string> xs) => xs.Count(k => TryLookup(k, out var v) && v > 1) > 0;
+    bool B03(List<int> xs) => xs.Count(x => ViaRef(x)) > 0;
+    bool B04(List<int> xs) => xs.Count(x => Check(x)) > 0;
+    bool B05(List<P> xs) => xs.Count(p => (p with { N = 3 }).N == 3) > 0;
+    bool B06(List<int> xs) => xs.Count(x => new Tag { N = x }.N > 1) > 0;
+    bool K01(List<Tag> xs) => xs.Count(t => Touch(t)) > 0;
+    bool K02(List<string> xs) => xs.Count(k => TryLookup(k, out Calls)) > 0;
+    bool K03() => Lazy.Count(x => x > 0) > 0;
+    bool K04() => Either.Count(x => x > 0) > 0;
+    bool K05() => _items!.Count(x => x > 0) > 0;
+    bool K06() => (_items ?? Enumerable.Empty<int>()).Count(x => x > 0) > 0;
+    bool K07() { var xs = Calls >= 0 ? Gen() : new List<int>(); return xs.Count(x => x > 0) > 0; }
+    bool K08() => new Col().Count(x => x > 0) > 0;
+}
+"""
+
+    let suggestions, failures = allWithFailures source
+    Assert.Empty failures
+    let hints = suggestions |> List.filter (fun s -> s.Code = code)
+    Assert.Equal(18, hints.Length)
+    // A: `ToList`/`ToHashSet` walked the iterator already, wherever the copy is
+    // held; B: a store into a local the callee made, an out or ref landing in
+    // a local, an `in` argument, an initializer's `N = x`: nothing outside
+    // changes; K: a store on a parameter's element, a field handed `out`, an
+    // iterator getter, an iterator behind `?:`, `!`, `??` or an explicit
+    // `IEnumerable<T>.GetEnumerator()`: notes
+    let swept = hints |> List.filter (fun s -> not s.Fixes.IsEmpty) |> firedText source
+
+    Assert.Equal<string list>(
+        [
+            "list.Count(x => x > 1) > 0"
+            "Gen().ToList().Count(x => x > 1) > 0"
+            "Snapshot.Count(x => x > 1) > 0"
+            "_set.Count(x => x > 1) > 0"
+            "xs.Count(x => Fresh(x)) > 0"
+            "xs.Count(k => TryLookup(k, out var v) && v > 1) > 0"
+            "xs.Count(x => ViaRef(x)) > 0"
+            "xs.Count(x => Check(x)) > 0"
+            "xs.Count(p => (p with { N = 3 }).N == 3) > 0"
+            "xs.Count(x => new Tag { N = x }.N > 1) > 0"
+        ],
+        swept
+    )
+
+    let fixedSource = fixAll code source
+    Assert.Contains("bool A01() { var list = Gen().ToList(); return list.Any(x => x > 1); }", fixedSource)
+    Assert.Contains("bool B01(List<int> xs) => xs.Any(x => Fresh(x));", fixedSource)
+    Assert.Contains("bool K01(List<Tag> xs) => xs.Count(t => Touch(t)) > 0;", fixedSource)
+    Assert.Contains("bool K05() => _items!.Count(x => x > 0) > 0;", fixedSource)
+
+[<Fact>]
 let ``error types in a predicate do not silence the file's hints`` () =
     let source =
         "using System.Collections.Generic;\nusing System.Linq;\nclass C\n{\n    bool Broken(List<Missing> xs) => xs.Count(x => x.Value > 0) > 0;\n    bool Plain(List<int> xs) => xs.Count(x => x > 0) > 0;\n}\n"
