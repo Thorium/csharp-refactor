@@ -338,7 +338,14 @@ element type has value equality (`string`, an enum, a struct, a record, or
 a class implementing `IEquatable<T>`); every use in the compilation is a
 probe, and the field is private or internal (the friend check applies) —
 otherwise a note names the companion set (a public field is API). Measured
-with the build cost charged against the probes. F# twin: FR0035.
+with the build cost charged against the probes. A literal too short for the set to
+pay gets nothing, measured on .NET 10: `Contains` over an array or a List
+of a primitive or an enum runs a vectorised `IndexOf`, and a FrozenSet
+catches up only at about 16 elements (a HashSet at about 8); for strings,
+records and structs a FrozenSet wins from the first element and a HashSet
+from about 6. So a primitive or enum literal needs 16 elements on .NET 8+,
+8 before it, and anything else 6 before .NET 8 — `csharp_refactor.CR0023.
+min_elements` overrides every case. F# twin: FR0035.
 
 ### CR0025 — performance
 
@@ -520,8 +527,13 @@ becomes `var x = await t;`, `t.Wait();` becomes `await t;`,
 becomes `await Task.WhenAll(a, b);`, and `Task.Run(() => t.Result)` is
 `t` itself (a cancelled task stays cancelled instead of faulting, which is
 the more correct of the two). Outside an `async` body the same drain is
-the boundary between the async and sync worlds and gets a note; the
-sync-twin swap is the author's, and `GetAwaiter().GetResult()` is never
+the boundary between the async and sync worlds and gets a note; where the
+drained method's own type declares a synchronous sibling (`LoadAsync` →
+`Load`: same staticness, arguments that fit, no task returned, the
+`.Result` value's type), the editor offers the swap, which walks the code
+away from async, and a sweep applies it only under
+`csharp_refactor.CR0040.sync_swap = true` (FR0049's `syncSwap`);
+`GetAwaiter().GetResult()` is never
 emitted by any rule. Guards: the receiver is typed `Task`, `Task<T>`,
 `ValueTask` or `ValueTask<T>`; the site is not inside a `lock`, a `catch`
 filter, a `finally`, an `unsafe` block, a non-`async` lambda or a local
@@ -1310,7 +1322,11 @@ cost of the match and 2.6 KB, measured in PerfClaims), a static call is
 served from the runtime's cache of fifteen patterns until the cache turns
 over, and either runs the interpreter where the generated regex runs its
 own code, nearly three times faster (a field initializer or a
-constructor builds once per object and stays). With `[GeneratedRegex]`
+constructor builds once per object and stays).
+`csharp_refactor.CR0109.per_call = false` keeps only the sites inside a
+loop or a lambda handed to a call, which rebuild per element - a plain
+body builds once per call, the smaller and less certain win (FR0015's
+`perCall`). With `[GeneratedRegex]`
 resolvable and every type of the containing chain declared in this file,
 the pattern becomes `[GeneratedRegex("lit")] private static partial Regex
 LitRegex();` and each type in the chain gains `partial`; otherwise — and
@@ -1331,10 +1347,12 @@ reached) that is not plain text under no options (CR0108's, rewritten or
 not) and constant options, on one line, not inside an expression tree;
 the name comes from the local the result is bound to (`var emitted =
 Regex.Matches(…)` → `EmittedRegex`; a local named for the type itself —
-`regex`, `rx`, `pattern` — names nothing), else the pattern's words of
-three letters or more (`ErrorCodeRegex`), else the enclosing member's
-name, numbered (`ARegex2`) where the type already has that member or
-another hoist claimed it; one pattern gets one member — a second site of
+`regex`, `rx`, `pattern` — names nothing), else the enclosing member's
+name (`IsPostcode` → `PostcodeRegex`, a predicate's `Is`/`Has` dropped,
+then the whole name), else the pattern's words of three letters or more
+with its escapes cut out and each word's own capitals (`\bWarningCode\b`
+→ `WarningCodeRegex`) — the first of these the type does not hold yet,
+else the first numbered (`ARegex2`); one pattern gets one member — a second site of
 the same pattern and options in the type refers to the first's, and a
 static `Regex` field or generated method the type already declares for
 the construction is used as it stands; a bare `Regex` resolves only
@@ -1750,7 +1768,11 @@ a hash (a checksum of non-hostile data can keep MD5, and should say so).
 The WebSocket handshake SHA-1 in a file carrying RFC 6455's GUID
 (`258EAFA5-…`) is quiet; a SHA-1 in a `switch` whose sibling arm
 constructs SHA-256 or stronger is a caller's format option; retiring a
-protocol changes what the wire negotiates, so that stays a note. F# twin:
+protocol changes what the wire negotiates, so the editor offers to comment
+one out of a `|` of flags, operator and all (`Tls12 /* | Tls11 */`, the diff
+saying what was retired), and a sweep does so only under
+`csharp_refactor.CR0125.drop_legacy_protocols = true`; a protocol that is
+the whole setting stays a note. F# twin:
 FR0065. Yields to CA5350, CA5351, CA5359, CA5364, CA5386, CA5397.
 
 ### CR0126 — idiom

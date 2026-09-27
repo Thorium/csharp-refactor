@@ -450,11 +450,11 @@ class C
 {
     static readonly string[] Allowed = { "a", "b", "c" };
     static readonly string[] Listed = new[] { "x", "y" };
-    public static readonly int[] Public = { 1, 2 };
+    public static readonly string[] Public = { "p", "q" };
     IEnumerable<string> A(IEnumerable<string> xs) => xs.Where(x => Allowed.Contains(x));
     void B(IEnumerable<string> xs) { foreach (var x in xs) if (Listed.Contains(x)) Console.WriteLine(x); }
     string D() => Listed[0];
-    bool E(IEnumerable<int> xs) => xs.Any(x => Public.Contains(x));
+    bool E(IEnumerable<string> xs) => xs.Any(x => Public.Contains(x));
 }
 """
 
@@ -469,7 +469,43 @@ class C
 
     Assert.Contains("using System.Collections.Frozen;", fixedSource)
     Assert.Contains("static readonly string[] Listed = new[] { \"x\", \"y\" };", fixedSource)
-    Assert.Contains("public static readonly int[] Public = { 1, 2 };", fixedSource)
+    Assert.Contains("public static readonly string[] Public = { \"p\", \"q\" };", fixedSource)
+
+[<Fact>]
+let ``CR0023 converts a short string literal but leaves a short int literal to its vectorised scan`` () =
+    // measured on .NET 10: a string FrozenSet beats the array scan from the
+    // first element, an int one only at about 16 - Array.IndexOf over a
+    // primitive is vectorised
+    let sixteen = [ 1..16 ] |> List.map string |> String.concat ", "
+
+    let source =
+        $$"""
+using System.Collections.Generic;
+using System.Linq;
+class C
+{
+    static readonly string[] Words = { "a", "b" };
+    static readonly int[] Few = { 1, 2, 3, 4 };
+    static readonly int[] Many = { {{sixteen}} };
+    bool A(IEnumerable<string> xs) => xs.Any(x => Words.Contains(x));
+    bool B(IEnumerable<int> xs) => xs.Any(x => Few.Contains(x));
+    bool D(IEnumerable<int> xs) => xs.Any(x => Many.Contains(x));
+}
+"""
+
+    let fixedSource = fixAll "CR0023" source
+    Assert.Contains("static readonly FrozenSet<string> Words = new[] { \"a\", \"b\" }.ToFrozenSet();", fixedSource)
+    Assert.Contains("static readonly int[] Few = { 1, 2, 3, 4 };", fixedSource)
+    Assert.Contains("static readonly FrozenSet<int> Many", fixedSource)
+
+    // the knob moves every floor
+    let options =
+        Some(
+            FakeOptions(dict [ "csharp_refactor.CR0023.min_elements", "2" ])
+            :> Microsoft.CodeAnalysis.Diagnostics.AnalyzerConfigOptions
+        )
+
+    Assert.Contains("static readonly FrozenSet<int> Few", fixAllWith options "CR0023" source)
 
 // ---- CR0028 ----
 

@@ -465,7 +465,21 @@ let private toReported (f: Finding) : ReportedFinding =
 
 /// Run the analyzers over one project's compilation and pair every CR
 /// diagnostic with the pure rules' suggestion at its span.
-let private analyzeProject (opts: Options) (project: Project) (compilation: Compilation) (ct: CancellationToken) =
+let private analyzeProject
+    (opts: Options)
+    (project: Project)
+    (compilation: Compilation)
+    (scope: HashSet<string> option)
+    (ct: CancellationToken)
+    =
+    // passes after the first: only the files the previous pass touched
+    let inScope (tree: SyntaxTree) =
+        match scope with
+        | None -> true
+        | Some files ->
+            not (String.IsNullOrEmpty tree.FilePath)
+            && files.Contains(Path.GetFullPath tree.FilePath)
+
     // --codes names an ask: a default-off rule or a config `none` wakes
     // for the codes typed, through the compilation's own diagnostic
     // options, which outrank .editorconfig
@@ -494,7 +508,20 @@ let private analyzeProject (opts: Options) (project: Project) (compilation: Comp
 
     let withAnalyzers = CompilationWithAnalyzers(withCodes, analyzers, analyzerOptions)
 
-    let diagnostics = withAnalyzers.GetAnalyzerDiagnosticsAsync(ct).Result
+    let diagnostics =
+        match scope with
+        | None -> withAnalyzers.GetAnalyzerDiagnosticsAsync(ct).Result
+        | Some _ ->
+            // the analyzers over the scoped trees alone: a tree is analysed
+            // with the whole compilation's semantics, but only ITS findings
+            // are computed
+            withCodes.SyntaxTrees
+            |> Seq.filter inScope
+            |> Seq.collect (fun tree ->
+                withAnalyzers
+                    .GetAnalyzerSemanticDiagnosticsAsync(withCodes.GetSemanticModel tree, Nullable(), ct)
+                    .Result)
+            |> ImmutableArray.CreateRange
 
     let wanted (d: Diagnostic) =
         RuleCatalog.known.Contains d.Id
@@ -516,6 +543,7 @@ let private analyzeProject (opts: Options) (project: Project) (compilation: Comp
     let trees =
         if opts.ApiChanges then
             compilation.SyntaxTrees
+            |> Seq.filter inScope
             |> Seq.map (fun t ->
                 t,
                 byTree
@@ -683,6 +711,10 @@ type private PassOutcome =
         Applied: int
         Solution: Solution
         ChangedFiles: string list
+        /// The files the next pass analyses: every file this pass edited, kept
+        /// or put back, and every file holding a fix held to the next pass. The
+        /// rest were analysed as they are and would only answer the same.
+        SweepNext: string list
     }
 
 let private printFinding (prefix: string) (f: Finding) =
@@ -708,12 +740,13 @@ let private runPass
     (onlyFile: string option)
     (baselineErrors: int)
     (pass: int)
+    (scope: HashSet<string> option)
     (ct: CancellationToken)
     : PassOutcome =
     let project = solution.GetProject projectId
     let compilation = project.GetCompilationAsync(ct).Result
     let sw = Diagnostics.Stopwatch.StartNew()
-    let findings = analyzeProject opts project compilation ct
+    let findings = analyzeProject opts project compilation scope ct
     runAnalysisMs <- runAnalysisMs + sw.ElapsedMilliseconds
 
     let suppressionPolicy =
@@ -801,6 +834,14 @@ let private runPass
     let mutable applied = 0
     let mutable current = solution
     let changed = ResizeArray<string>()
+
+    // files holding a fix held to the next pass, which must be analysed again
+    // even where nothing of theirs was written
+    let heldFiles = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+
+    // the fixes each unit (a document's edit set) applied, by its first file:
+    // a pass that puts units back counts the fixes of the rest, not their files
+    let unitFixCounts = Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
     // the files one document's fixes touched, its own and those reached
     // through cross-file edits: an edit set stands or falls as one
     let units = ResizeArray<string list>()
@@ -858,6 +899,7 @@ let private runPass
             | _ ->
                 let line = printFinding "  " f
                 printfn $"{line} (held to the next pass)"
+                heldFiles.Add(Path.GetFullPath f.Document.FilePath) |> ignore
 
         if not (opts.DryRun || chosen.IsEmpty) then
             // this document's edits, and those addressed to other files of the
@@ -896,6 +938,12 @@ let private runPass
 
             units.Add(byTarget |> List.map fst)
 
+            (let head = List.head (byTarget |> List.map fst)
+
+             match unitFixCounts.TryGetValue head with
+             | true, n -> unitFixCounts.[head] <- n + chosen.Length
+             | _ -> unitFixCounts.[head] <- chosen.Length)
+
             unitFingerprints.[List.head (byTarget |> List.map fst)] <-
                 items
                 |> List.choose (fun (f, reported, _) ->
@@ -925,6 +973,7 @@ let private runPass
             Applied = 0
             Solution = solution
             ChangedFiles = []
+            SweepNext = List.ofSeq heldFiles
         }
     else
         // the in-memory arbiter: the error count must not rise. Where it
@@ -1116,7 +1165,11 @@ let private runPass
             if survivors.Length = changed.Count then
                 applied
             else
-                survivors.Length
+                keptUnits
+                |> List.sumBy (fun unit ->
+                    match unitFixCounts.TryGetValue(List.head unit) with
+                    | true, n -> n
+                    | _ -> 0)
 
         Out.good $"  {count} fix(es) applied in pass {pass}"
 
@@ -1124,6 +1177,11 @@ let private runPass
             Applied = count
             Solution = finalSolution
             ChangedFiles = survivors
+            SweepNext =
+                Seq.append changed heldFiles
+                |> Seq.map Path.GetFullPath
+                |> Seq.distinct
+                |> List.ofSeq
         }
 
 /// Load a project (and what it references) into the workspace, once.
@@ -1326,7 +1384,7 @@ let private narrowPutBack
     result, [ for kv in touched -> kv.Key, kv.Value ]
 
 /// The whole run for one Options value.
-let executeRun (opts: Options) : int =
+let private executeRunCore (opts: Options) : int =
     // a source file that is not UTF-8 decodes as the system code page (Roslyn's
     // fallback asks the provider for it), not as UTF-8 with every such byte
     // replaced by U+FFFD and written back so
@@ -1514,20 +1572,39 @@ let executeRun (opts: Options) : int =
                         Out.dim
                             $"  ({baselineErrors.Length} error(s) before any fix, expected without the build tree; the in-memory check holds the count)"
 
-                    printfn $"{ruleCount} rules, {Seq.length project.Documents} files"
+                    printfn
+                        $"""{(match opts.Codes with
+                              | Some c -> $"{c.Count} of {ruleCount}"
+                              | None -> string ruleCount)} rules, {Seq.length project.Documents} files"""
+
                     let mutable pass = 1
                     let mutable go = true
                     let mutable solution = projectWorkspace.CurrentSolution
                     let mutable projectApplied = 0
 
+                    // the first pass analyses every file; a later one only what the pass
+                    // before it touched (PassOutcome.SweepNext). A fix can enable one in
+                    // a file it did not touch - a callee losing its dictionary write
+                    // frees a caller's loop - which the next RUN then finds: a fix
+                    // missed, never a wrong one applied
+                    let mutable scope: HashSet<string> option = None
+
                     while go do
                         printfn $"pass {pass}:"
 
+                        match scope with
+                        | Some files ->
+                            Out.dim
+                                $"  (re-analysing {files.Count} of {Seq.length project.Documents} file(s): the ones the last pass touched)"
+                        | None -> ()
+
                         let outcome =
-                            runPass opts solution project.Id onlyFile baselineErrors.Length pass ct
+                            runPass opts solution project.Id onlyFile baselineErrors.Length pass scope ct
 
                         projectApplied <- projectApplied + outcome.Applied
                         solution <- outcome.Solution
+
+                        scope <- Some(HashSet<string>(outcome.SweepNext, StringComparer.OrdinalIgnoreCase))
 
                         // a cross-file fix may have landed in another project: it is
                         // verified with the rest
@@ -1781,3 +1858,14 @@ let executeRun (opts: Options) : int =
             3
         else
             0
+
+/// A run of the tool. The rule modules outside `--codes`/`--categories` are
+/// switched off for its length (Rules.restrictTo) and on again after it, so
+/// no later run - an MCP request, a test calling in - inherits the set.
+let executeRun (opts: Options) : int =
+    Rules.restrictTo opts.Codes
+
+    try
+        executeRunCore opts
+    finally
+        Rules.restrictTo None

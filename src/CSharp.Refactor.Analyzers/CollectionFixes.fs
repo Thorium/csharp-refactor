@@ -520,11 +520,19 @@ let private dictionaryHazards
 
             // the accessors the mention runs: the setter of a store, the getter
             // of a read, both of a step or a compound store — a read is not
-            // charged with what the setter writes
-            let accessors: ISymbol list =
+            // charged with what the setter writes. Each where it RUNS: the
+            // getter at the mention, before a compound store's right side
+            // (`acc.Sum += d[k]` reads `acc.Sum` before `d[k]`), the setter
+            // when the store completes
+            let getter: ISymbol list =
                 [
                     if store.IsNone || not (op.Parent :? ISimpleAssignmentOperation) then
                         r.Property.GetMethod :> ISymbol
+                ]
+                |> List.filter (isNull >> not)
+
+            let setter: ISymbol list =
+                [
                     if store.IsSome then
                         r.Property.SetMethod :> ISymbol
                 ]
@@ -540,7 +548,9 @@ let private dictionaryHazards
                 match (if isNull r.Instance then null else r.Instance.Syntax) with
                 | :? ExpressionSyntax as x when originsHazardous x -> effect
                 | _ -> None
-            elif userTouches accessors then
+            elif userTouches getter then
+                atEnd op
+            elif userTouches setter then
                 effect
             else
                 None
@@ -589,18 +599,14 @@ let private dictionaryHazards
             else
                 None
 
-        // the user's `ToString` a formatting runs: its visible override
+        // the user's `ToString` a formatting runs: the nearest override up the
+        // base types (Guards.toStringOf), not only the type's own - a derived
+        // type formats through its base's override
         let formatterHazard (t: ITypeSymbol) (op: IOperation) =
             if isNull t || bclFormatted t then
                 None
             else
-                t.GetMembers "ToString"
-                |> Seq.filter (fun s ->
-                    match s with
-                    | :? IMethodSymbol as meth -> meth.Parameters.Length = 0
-                    | _ -> false)
-                |> List.ofSeq
-                |> fun overrides -> hazardIf overrides op
+                hazardIf (Guards.toStringOf t) op
 
         let binaryHazard (op: IOperation) =
             let b = op :?> IBinaryOperation

@@ -10,8 +10,10 @@
 ///     Task.Run(() => t.Result)              →  t
 ///
 /// Outside an `async` body the same drain is the boundary between the
-/// async and sync worlds and gets a note (the sync-twin swap is the
-/// author's). Guards: the receiver is typed `Task`/`Task<T>`/`ValueTask`/
+/// async and sync worlds and gets a note; where the drained method's own
+/// type declares a synchronous sibling (`LoadAsync` → `Load`, same
+/// arguments, no task returned), the editor offers the swap, and
+/// `csharp_refactor.CR0040.sync_swap = true` lets a sweep apply it. Guards: the receiver is typed `Task`/`Task<T>`/`ValueTask`/
 /// `ValueTask<T>`; the site is not inside a `lock`, a `catch` filter, a
 /// `finally`, an `unsafe` block, a non-`async` lambda or a local function
 /// (each is its own boundary; only the innermost function attributes a
@@ -623,7 +625,98 @@ let bindable (model: SemanticModel) (fn: Function) (drain: Drain) =
     && not (receiver |> Option.exists (fun r -> knownComplete model fn r site))
     && not (threadChoreographed fn.Body)
 
-let private blocking (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+/// The swap of a boundary drain for the call's synchronous sibling -
+/// `x.LoadAsync(p).Result` → `x.Load(p)`, `x.SaveAsync(p).Wait();` →
+/// `x.Save(p);` - where the method's own type declares an ordinary `Load`
+/// of the same staticness taking those arguments and returning no task:
+/// the drain's value type for a `.Result`, anything for a `.Wait()`.
+/// Verified against the model, never guessed from the name alone, and
+/// checked to compile. It walks the code AWAY from async (FR0049's twin),
+/// so it is an editor action unless `sync_swap` opts a sweep in.
+let private syncSiblingFix (syncSwap: bool) (model: SemanticModel) (drain: Drain) : Fix option =
+    let swap (receiver: ExpressionSyntax) (replaceSpan: TextSpan) (valueType: ITypeSymbol option) =
+        match receiver with
+        | :? InvocationExpressionSyntax as inv ->
+            match model.GetSymbolInfo(inv).Symbol with
+            | :? IMethodSymbol as m when m.Name.EndsWith "Async" && m.Name.Length > "Async".Length ->
+                let name = m.Name.Substring(0, m.Name.Length - "Async".Length)
+                let argCount = inv.ArgumentList.Arguments.Count
+
+                let fits (s: ISymbol) =
+                    match s with
+                    | :? IMethodSymbol as sibling ->
+                        sibling.MethodKind = MethodKind.Ordinary
+                        && sibling.IsStatic = m.IsStatic
+                        && sibling.Arity = m.Arity
+                        && not (isTaskLike sibling.ReturnType)
+                        && (sibling.Parameters
+                            |> Seq.filter (fun p -> not (p.IsOptional || p.IsParams))
+                            |> Seq.length)
+                           <= argCount
+                        && argCount <= sibling.Parameters.Length
+                        && (match valueType with
+                            | Some t -> SymbolEqualityComparer.Default.Equals(sibling.ReturnType, t)
+                            | None -> true)
+                    | _ -> false
+
+                let siblings = m.ContainingType.GetMembers name |> Seq.filter fits |> List.ofSeq
+
+                // the rewritten call must BIND to one of them where it stands: a
+                // derived type's better overload (`Derived.Load(object)` for
+                // `d.Load(1)`) or a local function named `Load` would take the
+                // call instead, compile, and run something else
+                let bindsToSibling (callText: string) =
+                    let call = SyntaxFactory.ParseExpression callText
+
+                    match
+                        model
+                            .GetSpeculativeSymbolInfo(inv.SpanStart, call, SpeculativeBindingOption.BindAsExpression)
+                            .Symbol
+                    with
+                    | :? IMethodSymbol as bound ->
+                        siblings
+                        |> List.exists (fun s ->
+                            SymbolEqualityComparer.Default.Equals(bound.OriginalDefinition, s.OriginalDefinition))
+                    | _ -> false
+
+                if not siblings.IsEmpty then
+                    let callee =
+                        match inv.Expression with
+                        | :? MemberAccessExpressionSyntax as ma ->
+                            let typeArgs =
+                                match ma.Name with
+                                | :? GenericNameSyntax as g -> g.TypeArgumentList.ToString()
+                                | _ -> ""
+
+                            Some $"{ma.Expression}.{name}{typeArgs}"
+                        | :? IdentifierNameSyntax -> Some name
+                        | :? GenericNameSyntax as g -> Some(name + g.TypeArgumentList.ToString())
+                        | _ -> None
+
+                    callee
+                    |> Option.map (fun c -> c + inv.ArgumentList.ToString())
+                    |> Option.filter bindsToSibling
+                    |> Option.map (fun callText -> Suggestion.replace replaceSpan callText)
+                    |> Option.filter (fun edit -> Guards.speculativeCheck model [ edit ])
+                    |> Option.map (fun edit ->
+                        let fix = Suggestion.fix $"Call the synchronous {name}" BlockingCode [ edit ]
+                        if syncSwap then fix else Suggestion.editorOnly fix)
+                else
+                    None
+            | _ -> None
+        | _ -> None
+
+    match drain with
+    | Value(s, r) ->
+        // the drained value's type: Task<T>'s T
+        match model.GetTypeInfo(r).Type with
+        | :? INamedTypeSymbol as t when t.TypeArguments.Length = 1 -> swap r s.Span (Some t.TypeArguments.[0])
+        | _ -> None
+    | Wait(s, r) -> swap r s.Expression.Span None
+    | WaitAll _
+    | RunDrain _ -> None
+
+let private blocking (syncSwap: bool) (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     let text = tree.GetText()
 
     drains model (tree.GetRoot())
@@ -686,12 +779,27 @@ let private blocking (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
             if isConsoleSpine fn site then
                 None
             else
-                Some(
-                    Suggestion.note
-                        BlockingCode
-                        "A sync-over-async boundary: the thread blocks on the task here; make the caller async (CR0041) or keep it as the one deliberate blocking point"
-                        site.Span
-                ))
+                let message =
+                    "A sync-over-async boundary: the thread blocks on the task here; make the caller async (CR0041) or keep it as the one deliberate blocking point"
+
+                // `.Result` and `.Wait()` throw the fault wrapped in an
+                // AggregateException, the sibling throws it bare: a `catch
+                // (AggregateException)` around the drain would go dead
+                let swap =
+                    match fn with
+                    | Some f when underAggregateCatch f site -> None
+                    | _ -> syncSiblingFix syncSwap model drain
+
+                match swap with
+                | Some fix ->
+                    Some
+                        {
+                            Code = BlockingCode
+                            Message = message + ", or call the method's synchronous sibling"
+                            Span = site.Span
+                            Fixes = [ fix ]
+                        }
+                | None -> Some(Suggestion.note BlockingCode message site.Span))
 
 // ---- CR0044 ----
 
@@ -1033,8 +1141,10 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
         | _ -> None)
     |> List.ofSeq
 
-let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Suggestion list =
-    blocking tree model
+let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
+    // the sync-sibling swap walks code AWAY from async: an editor action the
+    // author picks, or `csharp_refactor.CR0040.sync_swap = true` for a sweep
+    blocking (RuleContext.knobBool ctx BlockingCode "sync_swap" false) tree model
     @ forgottenTasks tree model
     @ elideAsync tree model
     @ asyncVoidLambdas tree model

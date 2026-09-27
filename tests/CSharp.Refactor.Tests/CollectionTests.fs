@@ -536,6 +536,52 @@ public static unsafe class U
 
     Assert.Equal<string list>([ "V40"; "V41" ], fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.map methodOf)
 
+[<Fact>]
+let ``CR0032 times a compound store's getter before its right side, and formats through a base type's ToString`` () =
+    // `acc.Sum += d[k]` runs Sum's getter BEFORE reading d[k]: a getter
+    // writing the dictionary happens ahead of the lookup, which the loop
+    // over pairs would already have read. An interpolation formats `x`
+    // through the ToString Derived inherits from Base, which writes it too.
+    // The controls: a setter alone runs after the read, and a type whose
+    // ToString (own or inherited) writes nothing
+    let source =
+        """
+using System;
+using System.Collections.Generic;
+class Holder
+{
+    readonly Dictionary<string, int> m; int sum;
+    public Holder(Dictionary<string, int> m) { this.m = m; }
+    public int Sum { get { m["z"] = 1; return sum; } set { sum = value; } }
+    public int Quiet { get { return sum; } set { m["z"] = 1; sum = value; } }
+}
+class Base
+{
+    protected Dictionary<string, int> m;
+    public override string ToString() { m["z"] = 1; return "b"; }
+}
+class Derived : Base { public Derived(Dictionary<string, int> d) { m = d; } }
+class Plain { public override string ToString() => "p"; }
+class PlainDerived : Plain { }
+class C
+{
+    int W1(Dictionary<string, int> d) { var acc = new Holder(d); foreach (var k in d.Keys) { acc.Sum += d[k]; } return acc.Sum; }
+    string W2(Dictionary<string, int> d) { var x = new Derived(d); var r = ""; foreach (var k in d.Keys) { r += $"{x}{d[k]}"; } return r; }
+    int W3(Dictionary<string, int> d) { var acc = new Holder(d); foreach (var k in d.Keys) { acc.Quiet = d[k]; } return 0; }
+    string W4(Dictionary<string, int> d) { var y = new PlainDerived(); var r = ""; foreach (var k in d.Keys) { r += $"{y}{d[k]}"; } return r; }
+}
+"""
+
+    let fired = suggestCode "CR0032" source
+    Assert.Equal(4, fired.Length)
+    // W1 and W2 keep the loop as notes; W3 and W4 are fixed
+    Assert.Equal(2, fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
+    let fixedSource = fixAll "CR0032" source
+    Assert.Contains("foreach (var k in d.Keys) { acc.Sum += d[k]; }", fixedSource)
+    Assert.Contains("foreach (var k in d.Keys) { r += $\"{x}{d[k]}\"; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { acc.Quiet = value; }", fixedSource)
+    Assert.Contains("foreach (var (k, value) in d) { r += $\"{y}{value}\"; }", fixedSource)
+
 // ---- CR0033 ----
 
 [<Fact>]

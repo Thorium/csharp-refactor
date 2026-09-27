@@ -319,3 +319,102 @@ let anchor (code: string) =
 /// The rule's section in Rules.md.
 let helpUri (code: string) =
     "https://github.com/Thorium/csharp-refactor/blob/main/Rules.md#" + anchor code
+
+/// A rule's tunable, `csharp_refactor.CRxxxx.<name>` in `.editorconfig`, as
+/// `--create-config` writes it. `Default` is this build's fallback as the
+/// value would be written, or None where the fallback is not one value - a
+/// floor measured per element type, the file's own `max_line_length` - and
+/// the line is then written commented out, since any value would pin one.
+type Knob =
+    {
+        Name: string
+        Default: string option
+        Summary: string
+    }
+
+let private number (name: string) (value: int) (summary: string) =
+    {
+        Name = name
+        Default = Some(string value)
+        Summary = summary
+    }
+
+let private flag (name: string) (value: bool) (summary: string) =
+    {
+        Name = name
+        Default = Some(if value then "true" else "false")
+        Summary = summary
+    }
+
+let private derived (name: string) (summary: string) =
+    {
+        Name = name
+        Default = None
+        Summary = summary
+    }
+
+let private wrapColumn =
+    derived "wrap_column" "how wide a rewritten line may get (default: the file's max_line_length, else 120)"
+
+/// The tunables, by rule. A default here is the SAME fallback the rule's
+/// `RuleContext.knobInt`/`knobBool` call passes; KnobTests holds the two
+/// together, so a rule whose default moves fails a test rather than
+/// writing a config that lies. F#'s twins: RuleCatalog.knobs there.
+let knobs: (string * Knob list) list =
+    [
+        "CR0005", [ wrapColumn ]
+        "CR0006",
+        [
+            number "then_at_least" 20 "how long the then-branch must be before flipping is suggested"
+            number "else_at_most" 3 "how short the else-branch must stay"
+        ]
+        "CR0009", [ wrapColumn ]
+        "CR0022",
+        [
+            flag "lists" true "rewrite a flag loop over a List<T> to Any/All too, not only one over an array"
+        ]
+        "CR0023",
+        [
+            derived
+                "min_elements"
+                "written-out elements a probed literal needs before a set pays (default: 16 for a primitive or enum on .NET 8+, 8 before; otherwise any on .NET 8+, 6 before)"
+        ]
+        "CR0040",
+        [
+            flag "sync_swap" false "let a sweep swap a boundary drain for the method's synchronous sibling"
+        ]
+        "CR0041", [ flag "async_suffix" true "name a taskified method with the Async suffix" ]
+        "CR0100", [ wrapColumn ]
+        "CR0101", [ wrapColumn ]
+        "CR0105",
+        [
+            flag "invariant" false "let a sweep apply CultureInfo.InvariantCulture to an uncultured parse"
+        ]
+        "CR0106", [ flag "utc_now" false "let a sweep rewrite DateTime.Now to UtcNow" ]
+        "CR0109",
+        [
+            flag "per_call" true "hoist a regex out of a plain member body too, not only out of a loop"
+        ]
+        "CR0125",
+        [
+            flag "drop_legacy_protocols" false "let a sweep comment a retired TLS protocol out of the flags"
+        ]
+        "CR0142",
+        [
+            number "max_attributes" 4 "how many attributes may share one [A, B] bracket"
+            wrapColumn
+        ]
+        "CR0145",
+        [
+            number "uses" 6 "how many spellings of a namespace earn a using"
+            number "deep_uses" 4 "the same, for a namespace three segments deep"
+        ]
+        "CR0173", [ wrapColumn ]
+    ]
+
+/// The tunables of one rule, empty when it has none.
+let knobsOf (code: string) =
+    knobs
+    |> List.tryFind (fun (c, _) -> String.Equals(c, code, StringComparison.OrdinalIgnoreCase))
+    |> Option.map snd
+    |> Option.defaultValue []

@@ -21,7 +21,11 @@
 /// public field is API and gets a note) — otherwise a note names the
 /// companion set. `FrozenSet<T>` where `System.Collections.Frozen`
 /// resolves, else `HashSet<T>`; the `using` is added. Measured with the
-/// build cost charged against the probes.
+/// build cost charged against the probes. A literal too short for the set
+/// to pay gets nothing: on .NET 8+ a primitive or enum literal of fewer than
+/// 16 elements (its array scan is vectorised), before .NET 8 fewer than 8
+/// of those or 6 of anything else (`minElementsFor`;
+/// `csharp_refactor.CR0023.min_elements`).
 module CSharp.Refactor.ContainsSet
 
 open Microsoft.CodeAnalysis
@@ -106,6 +110,44 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
     let frozen =
         not (isNull (compilation.GetTypeByMetadataName "System.Collections.Frozen.FrozenSet`1"))
 
+    // the size from which the set pays, measured on .NET 10 (4M probes, best
+    // of three). `Contains` on an array or a List of a primitive or an enum
+    // runs a VECTORISED IndexOf: an int FrozenSet catches up only at about 16
+    // elements (14 ms against 17 at 16, all probes missing), a HashSet at
+    // about 8. For strings, records and structs the scan is element by
+    // element, and a FrozenSet wins from the first (13 ms against 49 at
+    // four) while a HashSet wins from about 6. A shorter literal is probed
+    // fastest as it is: no fix and no note. `csharp_refactor.CR0023.
+    // min_elements` overrides every case
+    let minElementsFor (elementType: ITypeSymbol) =
+        let vectorised =
+            elementType.TypeKind = TypeKind.Enum
+            || (match elementType.SpecialType with
+                | SpecialType.System_Boolean
+                | SpecialType.System_Char
+                | SpecialType.System_SByte
+                | SpecialType.System_Byte
+                | SpecialType.System_Int16
+                | SpecialType.System_UInt16
+                | SpecialType.System_Int32
+                | SpecialType.System_UInt32
+                | SpecialType.System_Int64
+                | SpecialType.System_UInt64
+                | SpecialType.System_Single
+                | SpecialType.System_Double
+                | SpecialType.System_IntPtr
+                | SpecialType.System_UIntPtr -> true
+                | _ -> false)
+
+        let measured =
+            match frozen, vectorised with
+            | true, true -> 16
+            | true, false -> 1
+            | false, true -> 8
+            | false, false -> 6
+
+        RuleContext.knobInt ctx Code "min_elements" measured
+
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun node ->
         match node with
@@ -131,6 +173,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                 | Some elementType, Some elements when
                     hasValueEquality elementType
                     && not elements.IsEmpty
+                    && elements.Length >= minElementsFor elementType
                     // a null element: the set may refuse it
                     && not (elements |> List.exists (fun e -> e.IsKind SyntaxKind.NullLiteralExpression))
                     ->

@@ -134,8 +134,8 @@ csharp-refactor Your.csproj [--dry-run] [--codes CR0090,CR0103] [--categories co
 | Flag | |
 |---|---|
 | `--dry-run` | Report only: lists every fix it would make, writes nothing. |
-| `--codes CR0090,CR0103` | Restrict the run to chosen rules. Naming a rule is an ask: it outranks the rule's default-off status and a config `none`. |
-| `--categories <list>` | Restrict to kinds of rule: `correctness`, `performance`, `idiom`, `cosmetic`. For a repository you do not maintain, `correctness,performance` is the set worth a pull request. |
+| `--codes CR0090,CR0103` | Restrict the run to chosen rules; the other rules do not run at all. Naming a rule is an ask: it outranks the rule's default-off status and a config `none`. |
+| `--categories <list>` | Restrict to kinds of rule: `correctness`, `performance`, `idiom`, `cosmetic`. The rules of the other kinds do not run. For a repository you do not maintain, `correctness,performance` is the set worth a pull request. |
 | `--api-changes` | Also apply fixes that change internal or public signatures and shapes, rewriting call sites across the solution (the reference oracle finds them in every project; a caller in a VB project holds the fix, an F# consumer holds the surface). Held back and counted without it. |
 | `--report <file>` | Write every finding: `.sarif`, `.html` (a self-contained page) or `.csv`. |
 | `--baseline <sarif>` | The ratchet: findings whose fingerprints appear in this earlier report are neither reported nor fixed. |
@@ -146,7 +146,7 @@ csharp-refactor Your.csproj [--dry-run] [--codes CR0090,CR0103] [--categories co
 | `--create-config` | Append a commented block of every rule and key at its default to the directory's `.editorconfig`. |
 | `--mcp` | Serve `analyze` and `list_rules` as an MCP server over stdio, one warm workspace across calls. |
 | `--parse-only` | No references: syntax-only rules. Not a substitute for a real run. |
-| `--max-passes <n>` | Fix-then-reanalyse iterations (default 5). |
+| `--max-passes <n>` | Fix-then-reanalyse iterations (default 5). A pass after the first re-analyses only the files the previous pass edited or held a fix in. |
 
 Projects are loaded through `MSBuildWorkspace` — SDK-style projects of any
 target, `net48` included, in every framework flavour they list. A legacy
@@ -189,7 +189,10 @@ csharp_refactor.ignore_paths = generated;external/imported
 ```
 
 `csharp-refactor --create-config` writes the block for you, every value at
-this build's default, so it changes nothing until you edit a line.
+this build's default, so it changes nothing until you edit a line. Each
+rule's knobs follow its severity line, at their defaults; a knob whose
+default is not one value (CR0023's measured floor, a rule's `wrap_column`,
+which falls back to the file's `max_line_length`) is written commented out.
 
 A generated file is never touched, in the editor or by the tool: one under
 `bin`, `obj`, `node_modules` or `.git`, one named `*.g.cs`, `*.designer.cs`,

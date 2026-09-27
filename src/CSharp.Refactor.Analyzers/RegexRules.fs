@@ -43,8 +43,8 @@
 /// preceding the member, which type initialization runs first. Guards: a literal pattern and constant options, on one
 /// line; the hoist lands above the enclosing member's leading comment
 /// block and under no `#if`; the name comes from the local the result is
-/// bound to, else the pattern's words, else the enclosing member's name,
-/// numbered where taken; a bare `Regex` resolves only under a `using`
+/// bound to, else the enclosing member's name, else the pattern's words -
+/// the first one free, numbered where all are taken; a bare `Regex` resolves only under a `using`
 /// that precedes the insertion point. The string-operation rewrite
 /// (CR0108) subsumes the hoist on the same site, and a plain-text pattern
 /// under no options is never hoisted, rewritten or not: the regex over
@@ -397,10 +397,16 @@ let private plainTextSites (tree: SyntaxTree) (model: SemanticModel) : Suggestio
 let private aZaz3Regex = Regex "[A-Za-z]{3,}"
 // ---- CR0109 ----
 
-/// A name for the hoisted regex: the local it is bound to (`var emitted =
-/// Regex.Matches(…)` → `EmittedRegex`), else the pattern's words of three
-/// letters or more (`ErrorCodeRegex`), else the enclosing member's name.
-let private regexName (pattern: string) (site: SyntaxNode) (member': MemberDeclarationSyntax) =
+let private escapeSequence = Regex @"\\."
+
+/// The names for the hoisted regex, best first: the local it is bound to
+/// (`var emitted = Regex.Matches(…)` → `EmittedRegex`), then the enclosing
+/// member's (`IsPostcode` → `PostcodeRegex`, a predicate's `Is`/`Has`
+/// dropped: the regex is the postcode's), then the pattern's words of three
+/// letters or more (`ErrorCodeRegex`) - escapes cut out first, so `\bError\b`
+/// is `Error`, not `bError`, and each word keeps its own capitals. The
+/// caller takes the first one free, then numbers the first.
+let private regexNames (pattern: string) (site: SyntaxNode) (member': MemberDeclarationSyntax) : string list =
     let pascal (s: string) =
         if s = "" then
             ""
@@ -421,27 +427,61 @@ let private regexName (pattern: string) (site: SyntaxNode) (member': MemberDecla
     // a binder named for the type (`regex`, `rx`) names nothing: the pattern's words do
     let generic = set [ "regex"; "rx"; "re"; "r"; "pattern"; "matcher"; "expression" ]
 
-    match bound with
-    | Some local when local.Length > 1 && not (generic.Contains(local.ToLowerInvariant())) -> pascal local + "Regex"
-    | _ ->
+    let fromLocal =
+        match bound with
+        | Some local when local.Length > 1 && not (generic.Contains(local.ToLowerInvariant())) ->
+            [ pascal local + "Regex" ]
+        | _ -> []
+
+    let fromMember =
+        let owner =
+            match member' with
+            | :? MethodDeclarationSyntax as m -> m.Identifier.ValueText
+            | :? PropertyDeclarationSyntax as p -> p.Identifier.ValueText
+            | _ -> ""
+
+        let stem =
+            [ "Is"; "Has" ]
+            |> List.tryPick (fun prefix ->
+                if
+                    owner.Length > prefix.Length
+                    && owner.StartsWith(prefix, StringComparison.Ordinal)
+                    && Char.IsUpper owner.[prefix.Length]
+                then
+                    Some(owner.Substring prefix.Length)
+                else
+                    None)
+            |> Option.defaultValue owner
+
+        if stem = "" then
+            []
+        else
+            List.distinct [ pascal stem + "Regex"; pascal owner + "Regex" ]
+
+    let fromWords =
+        // a word written in capitals reads as one: ERROR is Error
+        let word (w: string) =
+            if w |> Seq.forall Char.IsUpper then
+                pascal (w.ToLowerInvariant())
+            else
+                pascal w
+
         let words =
-            aZaz3Regex.Matches(pattern.Replace("\\", " "))
+            aZaz3Regex.Matches(escapeSequence.Replace(pattern, " "))
             |> Seq.cast<Match>
-            |> Seq.map (fun m -> pascal (m.Value.ToLowerInvariant()))
+            |> Seq.map (fun m -> word m.Value)
             |> Seq.distinct
             |> Seq.truncate 3
             |> List.ofSeq
 
-        if not words.IsEmpty then
-            String.concat "" words + "Regex"
+        if words.IsEmpty then
+            []
         else
-            let owner =
-                match member' with
-                | :? MethodDeclarationSyntax as m -> m.Identifier.ValueText
-                | :? PropertyDeclarationSyntax as p -> p.Identifier.ValueText
-                | _ -> "Pattern"
+            [ String.concat "" words + "Regex" ]
 
-            pascal owner + "Regex"
+    match fromLocal @ fromMember @ fromWords with
+    | [] -> [ "PatternRegex" ]
+    | names -> List.distinct names
 
 /// Built per call: inside a method, accessor, local function or lambda
 /// body (a field initializer or a constructor builds once per object).
@@ -502,7 +542,19 @@ let private isTimeout (model: SemanticModel) (a: ArgumentSyntax) =
     | null -> false
     | t -> t.ToDisplayString() = "System.TimeSpan"
 
-let private hoists (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+/// Does the site run more than once per call of its member: inside a loop,
+/// or inside a lambda handed to a call (a LINQ operator runs it per element)?
+let private runsRepeatedly (site: SyntaxNode) =
+    Linq.insideLoop site
+    || site.Ancestors()
+       |> Seq.exists (fun a -> a :? AnonymousFunctionExpressionSyntax && a.Parent :? ArgumentSyntax)
+
+/// `hoistPerCall`: hoist a site in a plain member body too, not only one in a
+/// loop - `csharp_refactor.CR0109.per_call` (default true, FR0015's `perCall`).
+/// A loop rebuilds the regex per element; a plain body once per call, where
+/// a static call is also served from the runtime's cache of fifteen patterns
+/// until it turns over - the smaller and less certain win.
+let private hoists (hoistPerCall: bool) (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     let text = tree.GetText()
 
     let generated =
@@ -521,6 +573,7 @@ let private hoists (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
         match patternArgument model n with
         | Some(args, pattern) when
             perCallBody n
+            && (hoistPerCall || runsRepeatedly n)
             && not (Text.spansLines n)
             && not (Text.holdsCommentOrDirective n)
             && not (Text.insideExpressionTree model n)
@@ -708,15 +761,30 @@ let private hoists (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                         match reuse with
                         | Some(reference, declarationEdits) -> suggestion reference declarationEdits
                         | None ->
-                            let baseName = regexName patternText n member'
+                            let names = regexNames patternText n member'
+                            let baseName = List.head names
+
+                            // free: no member of the type OR A BASE TYPE carries it -
+                            // a field named like an inherited one hides it, and the
+                            // references to the inherited one silently rebind (a
+                            // warning, CS0108, not an error) - it is not the type's
+                            // own name (CS0542), nothing visible at the site already
+                            // means it (a local, a parameter), and no other hoist of
+                            // this pass claimed it
+                            let rec declaredUp (t: INamedTypeSymbol) (candidate: string) =
+                                not (isNull t)
+                                && (not (Seq.isEmpty (t.GetMembers candidate)) || declaredUp t.BaseType candidate)
 
                             let free (candidate: string) =
-                                (typeSymbol.GetMembers candidate |> Seq.isEmpty)
+                                not (declaredUp typeSymbol candidate)
+                                && candidate <> typeSymbol.Name
+                                && model.LookupSymbols(n.SpanStart, name = candidate).IsEmpty
                                 && not (taken.Contains $"{typeDecl.Identifier.ValueText}.{candidate}")
 
-                            // the derived name, or the first numbered one that is free
+                            // the first derived name that is free, else the first
+                            // numbered one
                             let name =
-                                baseName :: [ for i in 2..9 -> baseName + string i ]
+                                names @ [ for i in 2..9 -> baseName + string i ]
                                 |> List.tryFind free
                                 |> Option.defaultValue baseName
 
@@ -907,13 +975,13 @@ let private perCall (tree: SyntaxTree) (model: SemanticModel) : Suggestion list 
         | _ -> None)
     |> List.ofSeq
 
-let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Suggestion list =
+let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     let plain = plainTextSites tree model
     let plainSpans = plain |> List.map (fun s -> s.Span)
 
     invalidPatterns tree model
     @ plain
     // the string-operation rewrite subsumes the hoist on the same site
-    @ (hoists tree model
+    @ (hoists (RuleContext.knobBool ctx HoistCode "per_call" true) tree model
        |> List.filter (fun h -> not (plainSpans |> List.exists (fun s -> s.Contains h.Span))))
     @ perCall tree model

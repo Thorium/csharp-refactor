@@ -142,6 +142,57 @@ class C
     Assert.DoesNotContain("HRegex", fixedSource)
 
 [<Fact>]
+let ``CR0109 names a hoist after its member before the pattern's words, which lose their escapes`` () =
+    // `\bError\b` once gave `BerrorRegex`: the escape's letter stuck to the
+    // word, and the word was lower-cased. A predicate's `Is` goes; a name
+    // taken moves to the next candidate - the whole member name, then the
+    // pattern's words
+    let source =
+        """
+using System.Text.RegularExpressions;
+class C
+{
+    static int PostcodeRegex;
+    static int ScanRegex;
+    bool Check(string s) => Regex.IsMatch(s, @"\bERROR\b\s*\d+");
+    bool IsPostcode(string s) => Regex.IsMatch(s, @"^[A-Z]{2}\d$");
+    bool Scan(string s) => Regex.IsMatch(s, @"\bWarningCode\b\d+");
+}
+"""
+
+    let fixedSource = fixAllAllowing [ "CS8795" ] None "CR0109" source
+    Assert.Contains("bool Check(string s) => CheckRegex().IsMatch(s);", fixedSource)
+    Assert.Contains("bool IsPostcode(string s) => IsPostcodeRegex().IsMatch(s);", fixedSource)
+    Assert.Contains("bool Scan(string s) => WarningCodeRegex().IsMatch(s);", fixedSource)
+    Assert.DoesNotContain("Berror", fixedSource)
+
+[<Fact>]
+let ``CR0109 never takes a name a base type or the type itself holds`` () =
+    // a field named like an inherited one hides it, and `Legacy`'s reference
+    // would silently test the new pattern; a member named like its type is
+    // CS0542
+    let source =
+        """
+using System.Text.RegularExpressions;
+class BaseValidator { protected static readonly Regex PostcodeRegex = new Regex("^[A-Z]{2}$"); }
+class Validator : BaseValidator
+{
+    bool IsPostcode(string s) => Regex.IsMatch(s, "^[0-9]{5}$");
+    bool Legacy(string s) => PostcodeRegex.IsMatch(s);
+}
+class EmailRegex
+{
+    bool IsEmail(string s) => Regex.IsMatch(s, "^[^@]+@[^@]+$");
+}
+"""
+
+    let fixedSource = fixAllAllowing [ "CS8795" ] None "CR0109" source
+    Assert.Contains("bool IsPostcode(string s) => IsPostcodeRegex().IsMatch(s);", fixedSource)
+    Assert.Contains("bool Legacy(string s) => PostcodeRegex.IsMatch(s);", fixedSource)
+    Assert.DoesNotContain("Regex PostcodeRegex()", fixedSource)
+    Assert.Contains("bool IsEmail(string s) => IsEmailRegex().IsMatch(s);", fixedSource)
+
+[<Fact>]
 let ``CR0109 places a hoisted field above the static initializer that reaches its member`` () =
     let source =
         """

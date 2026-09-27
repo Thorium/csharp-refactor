@@ -1,6 +1,6 @@
 /// --create-config: the `.editorconfig` block that changes nothing — every
-/// rule at the default this build applies anyway, every run-level key at
-/// its own default, a comment on each saying what turning it round does.
+/// rule at the default this build applies anyway, every rule's knob at its
+/// own default (RuleCatalog.knobs), every run-level key at its own default, a comment on each saying what turning it round does.
 /// Appended to the directory's `.editorconfig` (written when there is
 /// none); a key already present is never rewritten.
 module CSharp.Refactor.Tool.ConfigFile
@@ -79,6 +79,15 @@ let defaultConfigText () =
 
                 let summary = (RuleCatalog.describe code).Replace('\n', ' ').Replace('\r', ' ')
                 line $"dotnet_diagnostic.{code}.severity = {value}  # {summary}"
+
+                // the rule's tunables at this build's default, so the knob is
+                // found in the file rather than only in Rules.md; one whose
+                // default is not a single value stays commented out, since any
+                // value written would pin one
+                for knob in RuleCatalog.knobsOf code do
+                    match knob.Default with
+                    | Some v -> line $"csharp_refactor.{code}.{knob.Name} = {v}  # {knob.Summary}"
+                    | None -> line $"# csharp_refactor.{code}.{knob.Name} =  # {knob.Summary}"
 
     text.ToString()
 

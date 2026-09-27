@@ -187,6 +187,43 @@ type EndToEnd() =
         Assert.Equal(0, Sweep.runTotalApplied)
 
     [<Fact>]
+    member _.``--codes runs only the rules asked for, and a later pass re-analyses only the files the last one touched``
+        ()
+        =
+        let dir = tempDir ()
+        let project = writeProject dir
+
+        File.WriteAllText(
+            Path.Combine(dir, "Quiet.cs"),
+            "namespace Sample;\npublic static class Quiet\n{\n    public static int One() => 1;\n}\n"
+        )
+
+        use captured = new StringWriter()
+        let oldOut = Console.Out
+        Console.SetOut captured
+
+        let code =
+            try
+                Sweep.resetRun ()
+
+                match parseArgs [| project; "--codes"; "CR0090" |] with
+                | Ok opts -> Sweep.executeRun opts
+                | Error e -> failwith e
+            finally
+                Console.SetOut oldOut
+
+        let output = captured.ToString()
+        Assert.Equal(0, code)
+        Assert.Contains($"1 of {CSharp.Refactor.RuleCatalog.rules.Length} rules", output)
+        // CR0103's hole-free interpolation is not asked for: untouched
+        let after = File.ReadAllText(Path.Combine(dir, "Program.cs"))
+        Assert.Contains("=> Guid.Empty;", after)
+        Assert.Contains("$\"no holes here\"", after)
+        Assert.Equal(1, Sweep.runTotalApplied)
+        // pass 2 looks at Program.cs alone, never Quiet.cs
+        Assert.Matches(@"re-analysing 1 of \d+ file\(s\)", output)
+
+    [<Fact>]
     member _.``a csx script is its own compilation: #r and #load resolve, fixes apply, the run is verified in memory``
         ()
         =

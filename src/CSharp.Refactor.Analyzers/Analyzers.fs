@@ -167,6 +167,90 @@ module Rules =
 
     let private typed = typedNamed |> List.map snd
 
+    /// The codes each typed rule module declares - its `Code` literals
+    /// (`let Code = "CR0023"`, `let FlagCode = ...`) - read off the module's
+    /// compiled class. Every rule module spells the codes it reports that
+    /// way and borrows no other module's (a test holds the source to it), so
+    /// a module whose codes are all outside a run's `--codes` has nothing to
+    /// say in it. A module whose class is not found reads as empty, and an
+    /// empty set always runs.
+    let moduleCodes: Lazy<Map<string, Set<string>>> =
+        lazy
+            (let assembly = typeof<RuleContext>.Assembly
+
+             let flags =
+                 System.Reflection.BindingFlags.Static
+                 ||| System.Reflection.BindingFlags.Public
+                 ||| System.Reflection.BindingFlags.NonPublic
+
+             let isCode (value: obj) =
+                 match value with
+                 | :? string as s ->
+                     s.Length = 6
+                     && s.StartsWith "CR"
+                     && s.Substring 2 |> Seq.forall System.Char.IsDigit
+                 | _ -> false
+
+             typedNamed
+             |> List.map (fun (name, _) ->
+                 let codes =
+                     match assembly.GetType("CSharp.Refactor." + name) with
+                     | null -> Set.empty
+                     | t ->
+                         let fromFields =
+                             t.GetFields flags
+                             |> Seq.filter (fun f -> f.FieldType = typeof<string>)
+                             |> Seq.choose (fun f ->
+                                 try
+                                     Some(
+                                         if f.IsLiteral then
+                                             f.GetRawConstantValue()
+                                         else
+                                             f.GetValue null
+                                     )
+                                 with
+                                 | :? System.InvalidOperationException
+                                 | :? System.Reflection.TargetInvocationException -> None)
+
+                         let fromProperties =
+                             t.GetProperties flags
+                             |> Seq.filter (fun p ->
+                                 p.PropertyType = typeof<string> && p.GetIndexParameters().Length = 0)
+                             |> Seq.choose (fun p ->
+                                 try
+                                     Some(p.GetValue null)
+                                 with :? System.Reflection.TargetInvocationException ->
+                                     None)
+
+                         Seq.append fromFields fromProperties
+                         |> Seq.filter isCode
+                         |> Seq.map (fun v -> v :?> string)
+                         |> Set.ofSeq
+
+                 name, codes)
+             |> Map.ofList)
+
+    /// The codes the running tool is restricted to (`--codes`, narrowed by
+    /// `--categories`), or None. Set by the tool for the length of a run and
+    /// cleared after it; an editor never sets it. A module none of whose
+    /// codes is wanted is skipped outright: filtering only its diagnostics
+    /// afterwards ran every rule, twice per file, for a run of one code.
+    /// An AsyncLocal: it switches rules OFF, and a process-wide switch would
+    /// take them from whatever runs beside the run - a test class in parallel
+    /// with one driving the tool. It flows into the tasks the run starts
+    /// (Roslyn's analyzer driver among them) and nowhere else.
+    let private restriction = System.Threading.AsyncLocal<Set<string> option>()
+
+    let restrictTo (codes: Set<string> option) = restriction.Value <- codes
+
+    let private runs (name: string) =
+        match restriction.Value with
+        | None -> true
+        | Some wanted ->
+            match moduleCodes.Value.TryFind name with
+            | Some codes when not codes.IsEmpty -> codes |> Set.exists wanted.Contains
+            | _ -> true
+
     /// Time spent in each rule module, summed over every file and thread
     /// since the last reset, in Stopwatch ticks: a module takes microseconds
     /// on a small file, and milliseconds would round most of them to zero.
@@ -218,6 +302,7 @@ module Rules =
                 []
             else
                 typedNamed
+                |> List.filter (fun (name, _) -> runs name)
                 |> List.collect (fun (name, rule) ->
                     let sw = System.Diagnostics.Stopwatch.StartNew()
                     let insideIndexBefore = Index.threadInsideTicks ()

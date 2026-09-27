@@ -50,8 +50,9 @@
 /// offers SHA-256 for a hash. The WebSocket handshake SHA-1 beside RFC
 /// 6455's GUID (`258EAFA5-…`) is quiet; a SHA-1 in a `switch` arm whose
 /// sibling constructs SHA-256 or stronger is a caller's format option;
-/// retiring a protocol changes what the wire negotiates, so that is a
-/// note only. Yields to CA5350, CA5351, CA5359, CA5364, CA5386, CA5397.
+/// retiring a protocol changes what the wire negotiates, so the editor
+/// offers to comment one out of a `|` of flags and a sweep does so only
+/// under `csharp_refactor.CR0125.drop_legacy_protocols = true`. Yields to CA5350, CA5351, CA5359, CA5364, CA5386, CA5397.
 ///
 /// CR0126 (idiom, fix): `new SHA256Managed()`, `new
 /// SHA256CryptoServiceProvider()`, `new RNGCryptoServiceProvider()`, `new
@@ -516,7 +517,7 @@ let private obsoleteToFactory =
 [<Literal>]
 let private rfc6455 = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-let private weakCrypto (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+let private weakCrypto (dropLegacyProtocols: bool) (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     let fileText = tree.GetRoot().ToString()
     let websocketHandshake = fileText.Contains rfc6455
 
@@ -616,12 +617,74 @@ let private weakCrypto (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
             m.Expression.ToString().EndsWith "SecurityProtocolType"
             && List.contains m.Name.Identifier.ValueText [ "Ssl3"; "Tls"; "Tls11" ]
             ->
-            Some(
-                Suggestion.note
-                    WeakCryptoCode
-                    $"{m.Name.Identifier.ValueText} is a retired protocol: TLS 1.2 or later (or leave the OS default, SystemDefault)"
-                    m.Span
-            )
+            let message =
+                $"{m.Name.Identifier.ValueText} is a retired protocol: TLS 1.2 or later (or leave the OS default, SystemDefault)"
+
+            // an operand of a `|` beside other protocols: commented out of the
+            // flags, operator and all, so the diff says what was retired where
+            // a deletion would say only that something changed (FR0065's twin).
+            // Retiring it changes what the wire negotiates, so the editor
+            // offers it unless `drop_legacy_protocols` opts a sweep in
+            // only where the `|` chain IS the protocols being switched on: the
+            // whole chain, through `|` and parentheses, the value of a plain
+            // `=` or an initializer. Inside `&= ~(Ssl3 | Tls11)` it lists what
+            // is switched OFF, inside `(p & (Tls | Tls11)) != 0` what is
+            // tested: commenting a protocol out there re-enables it or stops
+            // detecting it
+            let enablesProtocols =
+                let rec top (n: SyntaxNode) =
+                    match n.Parent with
+                    | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.BitwiseOrExpression -> top b
+                    | :? ParenthesizedExpressionSyntax as p -> top p
+                    | _ -> n
+
+                let chain = top m
+
+                match chain.Parent with
+                | :? AssignmentExpressionSyntax as a ->
+                    a.IsKind SyntaxKind.SimpleAssignmentExpression
+                    && obj.ReferenceEquals(a.Right, chain)
+                | :? EqualsValueClauseSyntax -> true
+                | _ -> false
+
+            let retire =
+                match m.Parent with
+                | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.BitwiseOrExpression && enablesProtocols ->
+                    let edit =
+                        if obj.ReferenceEquals(b.Right, m) then
+                            let span = TextSpan.FromBounds(b.Left.Span.End, m.Span.End)
+                            Suggestion.replace span $" /* | {m} */"
+                        else
+                            let span = TextSpan.FromBounds(m.Span.Start, b.Right.Span.Start)
+                            Suggestion.replace span $"/* {m} | */ "
+
+                    if Guards.speculativeCheck model [ edit ] then
+                        let fix =
+                            Suggestion.fix
+                                $"Comment {m.Name.Identifier.ValueText} out of the flags"
+                                WeakCryptoCode
+                                [ edit ]
+
+                        Some(
+                            if dropLegacyProtocols then
+                                fix
+                            else
+                                Suggestion.editorOnly fix
+                        )
+                    else
+                        None
+                | _ -> None
+
+            match retire with
+            | Some fix ->
+                Some
+                    {
+                        Code = WeakCryptoCode
+                        Message = message
+                        Span = m.Span
+                        Fixes = [ fix ]
+                    }
+            | None -> Some(Suggestion.note WeakCryptoCode message m.Span)
         | _ -> None)
     |> List.ofSeq
 
@@ -686,10 +749,12 @@ let private obsoleteCrypto (tree: SyntaxTree) (model: SemanticModel) : Suggestio
         | _ -> None)
     |> List.ofSeq
 
-let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Suggestion list =
+let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     sqlSinks tree model
     @ commandLines tree model
     @ secrets tree
     @ connectionStrings tree
-    @ weakCrypto tree model
+    // retiring a protocol changes what the wire negotiates: an editor action,
+    // or `csharp_refactor.CR0125.drop_legacy_protocols = true` for a sweep
+    @ weakCrypto (RuleContext.knobBool ctx WeakCryptoCode "drop_legacy_protocols" false) tree model
     @ obsoleteCrypto tree model

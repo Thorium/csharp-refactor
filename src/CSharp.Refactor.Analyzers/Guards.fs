@@ -16,6 +16,8 @@ module CSharp.Refactor.Guards
 
 open System
 open System.Collections.Concurrent
+open System.Collections.Generic
+open System.Runtime.CompilerServices
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.CSharp.Syntax
@@ -443,8 +445,7 @@ let private errorKeys (model: SemanticModel) =
 /// under `[GeneratedRegex]` has no body until then).
 /// The whole file's error counts of an original model, once per model:
 /// every check of a file compares against the same counts.
-let private fileErrorKeys =
-    System.Runtime.CompilerServices.ConditionalWeakTable<SemanticModel, Map<string, int>>()
+let private fileErrorKeys = ConditionalWeakTable<SemanticModel, Map<string, int>>()
 
 /// Errors inside the given spans only, by id.
 let private spanErrorKeys (model: SemanticModel) (spans: TextSpan list) =
@@ -887,7 +888,7 @@ let sameReference (model: SemanticModel) (a: ExpressionSyntax) (b: ExpressionSyn
         (isNull sa && isNull sb) || SymbolEqualityComparer.Default.Equals(sa, sb))
 
 let private candidateVerdicts =
-    System.Runtime.CompilerServices.ConditionalWeakTable<SemanticModel, ConcurrentDictionary<string, bool>>()
+    ConditionalWeakTable<SemanticModel, ConcurrentDictionary<string, bool>>()
 
 /// Is every method of this name callable on a receiver of this type at the
 /// position — its own members and the extension methods in scope — the
@@ -978,10 +979,7 @@ let visibleBodies (model: SemanticModel) (s: ISymbol) : (SemanticModel * SyntaxN
         |> List.ofSeq
 
 let private originCache =
-    System.Runtime.CompilerServices.ConditionalWeakTable<
-        Compilation,
-        ConcurrentDictionary<ISymbol, (SemanticModel * ExpressionSyntax) list>
-     >()
+    ConditionalWeakTable<Compilation, ConcurrentDictionary<ISymbol, (SemanticModel * ExpressionSyntax) list>>()
 
 /// Where a delegate, a lazy or a stored sequence came from: the value's
 /// initializer, the stores into it — for a local or a parameter those of
@@ -1171,7 +1169,7 @@ let isInitializerStore (a: AssignmentExpressionSyntax) : bool =
     | _ -> false
 
 let private freshLocals =
-    System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, ConcurrentDictionary<ISymbol, bool>>()
+    ConditionalWeakTable<Compilation, ConcurrentDictionary<ISymbol, bool>>()
 
 /// Is the member mention on a value the body made itself — the target of an
 /// initializer's `N = x`, or a member of a local whose every visible origin
@@ -1425,8 +1423,7 @@ let calleesOfNode (m: SemanticModel) (n: SyntaxNode) : ISymbol list =
 
 /// The symbols a body runs, each once.
 let calleesOf (m: SemanticModel) (body: SyntaxNode) : ISymbol list =
-    let seen =
-        System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
+    let seen = HashSet<ISymbol>(SymbolEqualityComparer.Default)
 
     body.DescendantNodesAndSelf()
     |> Seq.collect (calleesOfNode m)
@@ -1443,8 +1440,7 @@ let reachesThrough
     (test: SemanticModel -> SyntaxNode -> bool)
     (roots: ISymbol list)
     : bool =
-    let visited =
-        System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
+    let visited = HashSet<ISymbol>(SymbolEqualityComparer.Default)
 
     let rec go (depth: int) (s: ISymbol) =
         not (isNull s)
@@ -1459,8 +1455,7 @@ let reachesThrough
 /// what they call — each once, with its model. What cannot be seen is not
 /// among them.
 let reachableBodies (model: SemanticModel) (depth: int) (roots: ISymbol list) : (SemanticModel * SyntaxNode) list =
-    let visited =
-        System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
+    let visited = HashSet<ISymbol>(SymbolEqualityComparer.Default)
 
     let rec go (depth: int) (s: ISymbol) =
         if isNull s || not (visited.Add s) then
@@ -1526,10 +1521,7 @@ let unstableGetter (model: SemanticModel) (p: IPropertySymbol) =
         let mentions = bodies |> List.collect (fun (m, body) -> memberMentions m body)
 
         let written =
-            System.Collections.Generic.HashSet<ISymbol>(
-                mentions |> List.filter snd |> List.map fst,
-                SymbolEqualityComparer.Default
-            )
+            HashSet<ISymbol>(mentions |> List.filter snd |> List.map fst, SymbolEqualityComparer.Default)
 
         let readAndWritten =
             written.Count > 0
@@ -1762,7 +1754,7 @@ let isTotalPredicate (model: SemanticModel) (f: ExpressionSyntax) : bool =
     | :? IdentifierNameSyntax
     | :? MemberAccessExpressionSyntax ->
         match symbolOf model f with
-        | ValueSome(:? IMethodSymbol as m) -> not (throwingCall false m) && not (actsThrough model [ m ])
+        | ValueSome(:? IMethodSymbol as m) -> not (throwingCall false m || actsThrough model [ m ])
         | _ -> true
     | _ -> true
 
@@ -1802,8 +1794,7 @@ let private returnsOf (body: SyntaxNode) : ExpressionSyntax list =
 /// the first.
 let isEagerSource (model: SemanticModel) (e: ExpressionSyntax) : bool =
     // a name or a method followed once: `Items => Items` ends here
-    let visited =
-        System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
+    let visited = HashSet<ISymbol>(SymbolEqualityComparer.Default)
 
     let iterator (s: ISymbol) =
         visibleBodies model s
