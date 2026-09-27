@@ -118,13 +118,14 @@ let ``every typed rule module declares the codes it reports, as literals the too
 [<Fact>]
 let ``a run restricted to other codes skips the module, and the restriction stays in its own flow`` () =
     let source =
-        """
-using System.Collections.Generic;
-class C
-{
-    int A(Dictionary<string, int> d) { var t = 0; foreach (var k in d.Keys) { t += d[k]; } return t; }
-}
-"""
+        csharp
+            """
+            using System.Collections.Generic;
+            class C
+            {
+                int A(Dictionary<string, int> d) { var t = 0; foreach (var k in d.Keys) { t += d[k]; } return t; }
+            }
+            """
 
     Assert.NotEmpty(Harness.suggestCode "CR0032" source)
     Rules.restrictTo (Some(set [ "CR0023" ]))

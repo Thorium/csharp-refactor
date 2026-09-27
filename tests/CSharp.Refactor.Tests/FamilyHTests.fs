@@ -8,63 +8,84 @@ open CSharp.Refactor.Tests.Harness
 [<Fact>]
 let ``attribute lists on one line merge, targets and comments hold`` () =
     let source =
-        """
-using System;
-class TraitAttribute : Attribute { public TraitAttribute(string a, string b) { } }
-class FactAttribute : Attribute { }
-class C
-{
-    [Fact] [Trait("a", "b")]
-    public void A() { }
-    [Fact]
-    [Trait("a", "b")]
-    public void B() { }
-    [Fact] /* why */ [Trait("a", "b")]
-    public void D() { }
-    [return: Trait("a", "b")] [Fact]
-    public void E() { }
-}
-"""
+        csharp
+            """
+            using System;
+            class TraitAttribute : Attribute { public TraitAttribute(string a, string b) { } }
+            class FactAttribute : Attribute { }
+            class C
+            {
+                [Fact] [Trait("a", "b")]
+                public void A() { }
+                [Fact]
+                [Trait("a", "b")]
+                public void B() { }
+                [Fact] /* why */ [Trait("a", "b")]
+                public void D() { }
+                [return: Trait("a", "b")] [Fact]
+                public void E() { }
+            }
+            """
 
     let fired = suggestCode "CR0142" source
     Assert.Equal(1, fired.Length)
-    Assert.Contains("    [Fact, Trait(\"a\", \"b\")]\n    public void A() { }", fixAll "CR0142" source)
+
+    Assert.Contains(
+        csharp
+            """
+                [Fact, Trait("a", "b")]
+                public void A() { }
+            """,
+        fixAll "CR0142" source
+    )
 
 // ---- CR0146 ----
 
 [<Fact>]
 let ``a trailing note on a public declaration becomes its summary, weak notes and documented members stay`` () =
     let source =
-        """
-using System;
-class C
-{
-    public decimal Rate(int n) => n * 2m; // monthly, non-compounding rate
-    [Obsolete]
-    public int Count; // number of items seen so far
-    /// <summary>Documented already.</summary>
-    public int Documented; // the summary above wins
-    public int Short; // unused
-    public int Todo; // TODO: revisit this later on
-    public int Angle; // less than <b> more
-    private int Hidden; // private members are not the API surface
-    public int Code; // x => x.Count() + 1
-    public int
-        Split; // the comment is not on the header line? it is: the identifier line
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                public decimal Rate(int n) => n * 2m; // monthly, non-compounding rate
+                [Obsolete]
+                public int Count; // number of items seen so far
+                /// <summary>Documented already.</summary>
+                public int Documented; // the summary above wins
+                public int Short; // unused
+                public int Todo; // TODO: revisit this later on
+                public int Angle; // less than <b> more
+                private int Hidden; // private members are not the API surface
+                public int Code; // x => x.Count() + 1
+                public int
+                    Split; // the comment is not on the header line? it is: the identifier line
+            }
+            """
 
     let fired = suggestCode "CR0146" source
     Assert.Equal(3, fired.Length)
     let fixedSource = fixAll "CR0146" source
 
     Assert.Contains(
-        "    /// <summary>monthly, non-compounding rate</summary>\n    public decimal Rate(int n) => n * 2m;\n",
+        csharp
+            """
+                /// <summary>monthly, non-compounding rate</summary>
+                public decimal Rate(int n) => n * 2m;
+
+            """,
         fixedSource
     )
 
     Assert.Contains(
-        "    /// <summary>number of items seen so far</summary>\n    [Obsolete]\n    public int Count;\n",
+        csharp
+            """
+                /// <summary>number of items seen so far</summary>
+                [Obsolete]
+                public int Count;
+
+            """,
         fixedSource
     )
 
@@ -76,48 +97,78 @@ class C
 [<Fact>]
 let ``an enum member's trailing note becomes its summary, comma or not`` () =
     let source =
-        """
-public enum MyErrorType
-{
-    Transient,      // Network issue
-    Validation,     // Malformed payload
-    Processing,     // Processing issue
-    BusinessLogic   // Data conflict
-}
-"""
+        csharp
+            """
+            public enum MyErrorType
+            {
+                Transient,      // Network issue
+                Validation,     // Malformed payload
+                Processing,     // Processing issue
+                BusinessLogic   // Data conflict
+            }
+            """
 
     let fired = suggestCode "CR0146" source
     Assert.Equal(4, fired.Length)
     let fixedSource = fixAll "CR0146" source
 
-    Assert.Contains("    /// <summary>Network issue</summary>\n    Transient,\n", fixedSource)
+    Assert.Contains(
+        csharp
+            """
+                /// <summary>Network issue</summary>
+                Transient,
 
-    Assert.Contains("    /// <summary>Data conflict</summary>\n    BusinessLogic\n", fixedSource)
+            """,
+        fixedSource
+    )
+
+    Assert.Contains(
+        csharp
+            """
+                /// <summary>Data conflict</summary>
+                BusinessLogic
+
+            """,
+        fixedSource
+    )
 
 // ---- CR0145 ----
 
 [<Fact>]
 let ``a namespace spelled out often enough becomes a using, sorted into its family`` () =
     let source =
-        """
-using System;
-using System.Linq;
-using Zed;
-namespace Zed { public class Thing { } }
-namespace Deep.Down.Here { public class Helper { public static int Go() => 1; } public class Other { } }
-class C
-{
-    int A() => Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go();
-    int B() => Deep.Down.Here.Helper.Go();
-    Deep.Down.Here.Other D() => new Deep.Down.Here.Other();
-    string E() => System.Text.Json.JsonSerializer.Serialize(1) + System.Text.Json.JsonSerializer.Serialize(2);
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Linq;
+            using Zed;
+            namespace Zed { public class Thing { } }
+            namespace Deep.Down.Here { public class Helper { public static int Go() => 1; } public class Other { } }
+            class C
+            {
+                int A() => Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go();
+                int B() => Deep.Down.Here.Helper.Go();
+                Deep.Down.Here.Other D() => new Deep.Down.Here.Other();
+                string E() => System.Text.Json.JsonSerializer.Serialize(1) + System.Text.Json.JsonSerializer.Serialize(2);
+            }
+            """
 
     let fired = suggestCode "CR0145" source
     Assert.Equal(1, fired.Length)
     let fixedSource = fixAll "CR0145" source
-    Assert.Contains("using System;\nusing System.Linq;\nusing Deep.Down.Here;\nusing Zed;\n", fixedSource)
+
+    Assert.Contains(
+        csharp
+            """
+            using System;
+            using System.Linq;
+            using Deep.Down.Here;
+            using Zed;
+
+            """,
+        fixedSource
+    )
+
     Assert.Contains("int A() => Helper.Go() + Helper.Go();", fixedSource)
     Assert.Contains("Other D() => new Other();", fixedSource)
     // two spellings of a three-segment namespace are under the threshold
@@ -126,18 +177,19 @@ class C
 [<Fact>]
 let ``an imported namespace, a clashing name and a global alias stand down`` () =
     let source =
-        """
-using Deep.Down.Here;
-namespace Deep.Down.Here { public class Helper { public static int Go() => 1; } }
-namespace Deep.Down.There { public class Helper { public static int Go() => 2; } }
-class Helper2 { }
-class C
-{
-    int A() => Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go();
-    int B() => Deep.Down.There.Helper.Go() + Deep.Down.There.Helper.Go() + Deep.Down.There.Helper.Go() + Deep.Down.There.Helper.Go();
-    int D() => global::Deep.Down.There.Helper.Go();
-}
-"""
+        csharp
+            """
+            using Deep.Down.Here;
+            namespace Deep.Down.Here { public class Helper { public static int Go() => 1; } }
+            namespace Deep.Down.There { public class Helper { public static int Go() => 2; } }
+            class Helper2 { }
+            class C
+            {
+                int A() => Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go();
+                int B() => Deep.Down.There.Helper.Go() + Deep.Down.There.Helper.Go() + Deep.Down.There.Helper.Go() + Deep.Down.There.Helper.Go();
+                int D() => global::Deep.Down.There.Helper.Go();
+            }
+            """
 
     // `Here` is imported (IDE0001's); `There` would clash with the imported `Helper`
     let fired = suggestCode "CR0145" source

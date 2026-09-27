@@ -9,21 +9,22 @@ let private code = "CR0103"
 [<Fact>]
 let ``hole-free interpolation loses its dollar`` () =
     let source =
-        """
-class C
-{
-    string A() => $"no holes";
-    string B() => $@"verbatim \ no holes";
-    string C2() => @$"verbatim \ no holes";
-}
-"""
+        csharp
+            """
+            class C
+            {
+                string A() => $"no holes";
+                string B() => $@"verbatim \ no holes";
+                string C2() => @$"verbatim \ no holes";
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal(3, fired.Length)
 
     let fixedSource = fixAll code source
-    Assert.Contains("=> \"no holes\";", fixedSource)
-    Assert.Contains("=> @\"verbatim \\ no holes\";", fixedSource)
+    Assert.Contains("""=> "no holes";""", fixedSource)
+    Assert.Contains("""=> @"verbatim \ no holes";""", fixedSource)
     Assert.DoesNotContain("$", fixedSource)
 
 [<Fact>]
@@ -39,37 +40,45 @@ let ``a FormattableString, IFormattable or handler target keeps the dollar`` () 
     // stopped compiling once its `$` went, and ILogger's handler parameters
     // are not string parameters at all
     let source =
-        """
-using System;
-using System.Runtime.CompilerServices;
-[InterpolatedStringHandler]
-struct Handler
-{
-    public Handler(int literalLength, int formattedCount) { }
-    public void AppendLiteral(string s) { }
-}
-class C
-{
-    FormattableString A() => $"typed";
-    IFormattable B() { IFormattable f = $"formattable"; return f; }
-    void Only(Handler h) { }
-    void D() => Only($"handler parameter");
-    string E() { var s = $"plain"; return s; }
-    string F() { string s = $"declared string"; return s; }
-    object G() => $"boxed";
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Runtime.CompilerServices;
+            [InterpolatedStringHandler]
+            struct Handler
+            {
+                public Handler(int literalLength, int formattedCount) { }
+                public void AppendLiteral(string s) { }
+            }
+            class C
+            {
+                FormattableString A() => $"typed";
+                IFormattable B() { IFormattable f = $"formattable"; return f; }
+                void Only(Handler h) { }
+                void D() => Only($"handler parameter");
+                string E() { var s = $"plain"; return s; }
+                string F() { string s = $"declared string"; return s; }
+                object G() => $"boxed";
+            }
+            """
 
     let fired = suggestCode code source |> firedText source
     Assert.Equal<string list>([ "$\"plain\""; "$\"declared string\""; "$\"boxed\"" ], fired)
     let fixedSource = fixAll code source
-    Assert.Contains("=> $\"typed\";", fixedSource)
-    Assert.Contains("Only($\"handler parameter\")", fixedSource)
+    Assert.Contains("""=> $"typed";""", fixedSource)
+    Assert.Contains("""Only($"handler parameter")""", fixedSource)
 
 [<Fact>]
 let ``without a semantic model an argument or typed declaration keeps the dollar`` () =
     let source =
-        "class C\n{\n    void M(object o) { M($\"argument\"); string s = $\"declared\"; var v = $\"var\"; _ = v; }\n}\n"
+        csharp
+            """
+            class C
+            {
+                void M(object o) { M($"argument"); string s = $"declared"; var v = $"var"; _ = v; }
+            }
+
+            """
 
     let tree = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText source
 

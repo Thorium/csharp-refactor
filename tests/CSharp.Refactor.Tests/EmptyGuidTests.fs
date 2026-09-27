@@ -9,19 +9,20 @@ let private code = "CR0090"
 [<Fact>]
 let ``new Guid() becomes Guid.Empty, qualification kept`` () =
     let source =
-        """
-using System;
-class C
-{
-    Guid A() => new Guid();
-    System.Guid B() => new System.Guid();
-    Guid D()
-    {
-        Guid g = new();
-        return g;
-    }
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                Guid A() => new Guid();
+                System.Guid B() => new System.Guid();
+                Guid D()
+                {
+                    Guid g = new();
+                    return g;
+                }
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal<string list>([ "new Guid()"; "new System.Guid()"; "new()" ], firedText source fired)
@@ -43,35 +44,37 @@ let ``the editor alternative is NewGuid and never auto-applied`` () =
 [<Fact>]
 let ``a Guid with arguments, or another type's constructor, stays`` () =
     let source =
-        """
-using System;
-struct Guid { }
-class C
-{
-    System.Guid A(byte[] b) => new System.Guid(b);
-    System.Guid B(string s) => new System.Guid(s);
-    Guid Own() => new Guid();
-    object O() => new object();
-}
-"""
+        csharp
+            """
+            using System;
+            struct Guid { }
+            class C
+            {
+                System.Guid A(byte[] b) => new System.Guid(b);
+                System.Guid B(string s) => new System.Guid(s);
+                Guid Own() => new Guid();
+                object O() => new object();
+            }
+            """
 
     Assert.Empty(suggestCode code source)
 
 [<Fact>]
 let ``a parameter default stays, a target-typed new() without using System is qualified`` () =
     let source =
-        """
-class C
-{
-    void M(System.Guid g = new System.Guid()) { }
-    void N(System.Guid g = new()) { }
-    System.Guid A()
-    {
-        System.Guid g = new();
-        return g;
-    }
-}
-"""
+        csharp
+            """
+            class C
+            {
+                void M(System.Guid g = new System.Guid()) { }
+                void N(System.Guid g = new()) { }
+                System.Guid A()
+                {
+                    System.Guid g = new();
+                    return g;
+                }
+            }
+            """
 
     Assert.Equal<string list>([ "new()" ], firedText source (suggestCode code source))
     Assert.Contains("System.Guid g = System.Guid.Empty;", fixAll code source)

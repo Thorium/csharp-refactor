@@ -22,16 +22,17 @@ open CSharp.Refactor.Tests.Harness
 let ``a fix never spells a name a nested type or local shadows`` () =
     // `Guid.Empty` would bind to the nested Guid; `Regex` to the nested class
     let source =
-        """
-using System;
-class C
-{
-    class Guid { public static int Empty = 1; }
-    System.Guid A() => new System.Guid();
-    class Regex { }
-    bool B(string s) => System.Text.RegularExpressions.Regex.IsMatch(s, "a.b");
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                class Guid { public static int Empty = 1; }
+                System.Guid A() => new System.Guid();
+                class Regex { }
+                bool B(string s) => System.Text.RegularExpressions.Regex.IsMatch(s, "a.b");
+            }
+            """
 
     let fixedSource = fixAllAllowing [ "CS8795" ] None "CR0090" source
     Assert.Contains("System.Guid.Empty", fixedSource)
@@ -44,13 +45,14 @@ let ``a local named like the replacement's helper keeps the rewrite honest`` () 
     // CR0104 spells `string.IsNullOrEmpty`; a local `string` cannot exist, but a
     // method named IsNullOrEmpty on the type can: the fix must qualify or hold
     let source =
-        """
-class C
-{
-    static bool IsNullOrEmpty(string s) => false;
-    bool A(string x) => x == null || x == "";
-}
-"""
+        csharp
+            """
+            class C
+            {
+                static bool IsNullOrEmpty(string s) => false;
+                bool A(string x) => x == null || x == "";
+            }
+            """
 
     let fixedSource = fixAll "CR0104" source
     Assert.Contains("string.IsNullOrEmpty(x)", fixedSource)
@@ -60,21 +62,22 @@ class C
 [<Fact>]
 let ``a backing field reached by reflection or nameof keeps the field keyword away`` () =
     let source =
-        """
-using System.Reflection;
-class C
-{
-    private int _count = 3;
-    public int Count { get => _count; set => _count = value < 0 ? 0 : value; }
-    FieldInfo F() => typeof(C).GetField("_count", BindingFlags.NonPublic | BindingFlags.Instance);
-}
-class D
-{
-    private int _count = 3;
-    public int Count { get => _count; set => _count = value < 0 ? 0 : value; }
-    string N() => nameof(_count);
-}
-"""
+        csharp
+            """
+            using System.Reflection;
+            class C
+            {
+                private int _count = 3;
+                public int Count { get => _count; set => _count = value < 0 ? 0 : value; }
+                FieldInfo F() => typeof(C).GetField("_count", BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            class D
+            {
+                private int _count = 3;
+                public int Count { get => _count; set => _count = value < 0 ? 0 : value; }
+                string N() => nameof(_count);
+            }
+            """
 
     Assert.Empty(suggestCode "CR0153" source)
 
@@ -83,40 +86,50 @@ let ``a property set through reflection still takes init, which reflection sets 
     ()
     =
     let source =
-        """
-class Key
-{
-    public int Id { get; set; }
-    public Key(int id) { Id = id; }
-}
-class Binder
-{
-    void Fill(Key k) => typeof(Key).GetProperty("Id").SetValue(k, 2);
-}
-class Named
-{
-    public int Id { get; set; }
-    public Named(int id) { Id = id; }
-    string N() => nameof(Id);
-}
-"""
+        csharp
+            """
+            class Key
+            {
+                public int Id { get; set; }
+                public Key(int id) { Id = id; }
+            }
+            class Binder
+            {
+                void Fill(Key k) => typeof(Key).GetProperty("Id").SetValue(k, 2);
+            }
+            class Named
+            {
+                public int Id { get; set; }
+                public Named(int id) { Id = id; }
+                string N() => nameof(Id);
+            }
+            """
 
     // one suggestion, on Key's setter; Named's holds
     Assert.Equal(1, (suggestCode "CR0083" source).Length)
-    Assert.Contains("public int Id { get; init; }\n    public Key(int id)", fixAll "CR0083" source)
+
+    Assert.Contains(
+        csharp
+            """
+            public int Id { get; init; }
+                public Key(int id)
+            """,
+        fixAll "CR0083" source
+    )
 
 [<Fact>]
 let ``an enum compared by text whose names are read by reflection still rewrites, since values are the contract`` () =
     let source =
-        """
-using System;
-enum Status { Active = 1, Closed = 2 }
-class C
-{
-    bool A(Status s) => s.ToString() == "Active";
-    string[] Names() => Enum.GetNames(typeof(Status));
-}
-"""
+        csharp
+            """
+            using System;
+            enum Status { Active = 1, Closed = 2 }
+            class C
+            {
+                bool A(Status s) => s.ToString() == "Active";
+                string[] Names() => Enum.GetNames(typeof(Status));
+            }
+            """
 
     Assert.Contains("s == Status.Active", fixAll "CR0087" source)
 
@@ -125,18 +138,19 @@ class C
 [<Fact>]
 let ``inside an expression tree the boolean, string and LINQ rewrites hold`` () =
     let source =
-        """
-using System;
-using System.Linq;
-using System.Linq.Expressions;
-class C
-{
-    Expression<Func<int, bool>> A() => x => !(x > 1);
-    Expression<Func<string, string>> B() => s => "a " + s + " b";
-    Expression<Func<int[], int>> D() => xs => xs.Select(x => x + 1).Select(y => y * 2).Count();
-    Expression<Func<string, bool>> E() => s => s == null || s == "";
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Linq;
+            using System.Linq.Expressions;
+            class C
+            {
+                Expression<Func<int, bool>> A() => x => !(x > 1);
+                Expression<Func<string, string>> B() => s => "a " + s + " b";
+                Expression<Func<int[], int>> D() => xs => xs.Select(x => x + 1).Select(y => y * 2).Count();
+                Expression<Func<string, bool>> E() => s => s == null || s == "";
+            }
+            """
 
     for code in [ "CR0011"; "CR0100"; "CR0029"; "CR0104" ] do
         Assert.Empty(suggestCode code source)
@@ -144,15 +158,16 @@ class C
 [<Fact>]
 let ``a dynamic operand holds the rewrites that assume static binding`` () =
     let source =
-        """
-using System;
-class C
-{
-    bool A(dynamic x) => !(x > 1);
-    string B(dynamic x) => "a " + x + " b";
-    bool D(dynamic x) => x == null || x == "";
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                bool A(dynamic x) => !(x > 1);
+                string B(dynamic x) => "a " + x + " b";
+                bool D(dynamic x) => x == null || x == "";
+            }
+            """
 
     Assert.Empty(suggestCode "CR0011" source)
     Assert.Empty(suggestCode "CR0104" source)
@@ -185,19 +200,20 @@ let ``pointer loops and arithmetic are left to the author`` () =
         Rules.all tree model (Context.forTree None compilation tree false)
 
     let source =
-        """
-using System;
-class C
-{
-    unsafe int A(int* xs, int n)
-    {
-        int total = 0;
-        for (int i = 0; i < n; i++) total += xs[i];
-        return total;
-    }
-    unsafe void B(byte* p, int n) { for (int i = 0; i < n; i++) Console.WriteLine(p[i]); }
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                unsafe int A(int* xs, int n)
+                {
+                    int total = 0;
+                    for (int i = 0; i < n; i++) total += xs[i];
+                    return total;
+                }
+                unsafe void B(byte* p, int n) { for (int i = 0; i < n; i++) Console.WriteLine(p[i]); }
+            }
+            """
 
     let fired = unsafeRules source
     Assert.Empty(fired |> List.filter (fun s -> s.Code = "CR0015"))
@@ -233,30 +249,32 @@ let ``a partial type's other file counts: a method there keeps the record away, 
     ()
     =
     let first =
-        """
-partial class Money
-{
-    public int Amount { get; }
-    public Money(int amount) { Amount = amount; }
-}
-partial class Counted
-{
-    private int _count = 3;
-    public int Count { get => _count; set => _count = value; }
-}
-"""
+        csharp
+            """
+            partial class Money
+            {
+                public int Amount { get; }
+                public Money(int amount) { Amount = amount; }
+            }
+            partial class Counted
+            {
+                private int _count = 3;
+                public int Count { get => _count; set => _count = value; }
+            }
+            """
 
     let second =
-        """
-partial class Money
-{
-    public int Apply(int x) => x * Amount;
-}
-partial class Counted
-{
-    void Reset() { _count = 0; }
-}
-"""
+        csharp
+            """
+            partial class Money
+            {
+                public int Apply(int x) => x * Amount;
+            }
+            partial class Counted
+            {
+                void Reset() { _count = 0; }
+            }
+            """
 
     let fired = partialPair first second
     Assert.Empty(fired |> List.filter (fun s -> s.Code = "CR0080"))
@@ -267,24 +285,25 @@ partial class Counted
 [<Fact>]
 let ``a member implementing an interface or overriding keeps its signature`` () =
     let source =
-        """
-using System.Threading.Tasks;
-interface ILoader { int Fetch(int n); void Fire(); int Sum(params int[] xs); }
-class C : ILoader
-{
-    Task<int> Load() => Task.FromResult(1);
-    public int Fetch(int n) { var x = Load().Result; return x + n; }
-    async Task<int> A() { var r = Fetch(1); return r; }
-    public void Fire() { }
-    public int Sum(params int[] xs) { var t = 0; foreach (var x in xs) t += x; return t; }
-    int Use() => Sum(1, 2);
-}
-abstract class Base { public abstract int Count(params int[] xs); }
-class Derived : Base
-{
-    public override int Count(params int[] xs) => xs.Length;
-}
-"""
+        csharp
+            """
+            using System.Threading.Tasks;
+            interface ILoader { int Fetch(int n); void Fire(); int Sum(params int[] xs); }
+            class C : ILoader
+            {
+                Task<int> Load() => Task.FromResult(1);
+                public int Fetch(int n) { var x = Load().Result; return x + n; }
+                async Task<int> A() { var r = Fetch(1); return r; }
+                public void Fire() { }
+                public int Sum(params int[] xs) { var t = 0; foreach (var x in xs) t += x; return t; }
+                int Use() => Sum(1, 2);
+            }
+            abstract class Base { public abstract int Count(params int[] xs); }
+            class Derived : Base
+            {
+                public override int Count(params int[] xs) => xs.Length;
+            }
+            """
 
     // CR0041 would rename and re-type Fetch; CR0151 would change the params type
     Assert.Empty(suggestCode "CR0041" source |> List.filter (fun s -> not s.Fixes.IsEmpty))
@@ -295,21 +314,30 @@ class Derived : Base
 [<Fact>]
 let ``a file with an auto-generated header gets no suggestion from any rule`` () =
     let body =
-        """
-using System;
-class C
-{
-    Guid A() => new Guid();
-    string B() => $"x";
-    bool D(int x) => !(x > 1);
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                Guid A() => new Guid();
+                string B() => $"x";
+                bool D(int x) => !(x > 1);
+            }
+            """
 
     Assert.NotEmpty(suggest body)
 
     Assert.Empty(
         suggest (
-            "//------------------------------------------------------------------------------\n// <auto-generated>\n//     This code was generated by a tool.\n// </auto-generated>\n//------------------------------------------------------------------------------\n"
+            csharp
+                """
+                //------------------------------------------------------------------------------
+                // <auto-generated>
+                //     This code was generated by a tool.
+                // </auto-generated>
+                //------------------------------------------------------------------------------
+
+                """
             + body
         )
     )
@@ -351,15 +379,16 @@ let private withoutAssembly (name: string) (source: string) =
 [<Fact>]
 let ``a fix that needs a type the framework lacks is not offered`` () =
     let frozen =
-        """
-using System;
-using System.Collections.Generic;
-class C
-{
-    private static readonly HashSet<string> Allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "a", "b" };
-    static bool M(string s) => Allowed.Contains(s);
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            class C
+            {
+                private static readonly HashSet<string> Allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "a", "b" };
+                static bool M(string s) => Allowed.Contains(s);
+            }
+            """
 
     // FrozenSet lives in System.Collections.Immutable: without it, CR0150 has nothing to offer
     Assert.NotEmpty(suggestCode "CR0150" frozen)

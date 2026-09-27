@@ -204,6 +204,20 @@ let suggestRaw (compilation: CSharpCompilation) (tree: SyntaxTree) : Suggestion 
     let model = compilation.GetSemanticModel(tree, false)
     Rules.all tree model (Context.forTree None compilation tree false)
 
+/// `suggestRaw` over a compilation that must compile clean, as `suggest`
+/// requires of its input: a negative assertion on a broken compilation would
+/// pass for the wrong reason. CS8805 (top-level statements in a library) is
+/// the harness's own output kind talking, not the input.
+let suggestRawClean (compilation: CSharpCompilation) (tree: SyntaxTree) : Suggestion list =
+    let errors =
+        errorsAfterFix compilation
+        |> List.filter (fun d -> not (d.Contains "error CS8805:"))
+
+    if not errors.IsEmpty then
+        failwithf "test input does not compile:\n%s" (String.Join("\n", errors))
+
+    suggestRaw compilation tree
+
 /// A fix's edits applied to the text as it is, nothing normalised.
 let applyFixRaw (source: string) (fix: Fix) : string =
     let text = SourceText.From source

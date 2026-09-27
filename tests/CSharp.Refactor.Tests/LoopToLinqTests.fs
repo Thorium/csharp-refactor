@@ -8,23 +8,24 @@ open CSharp.Refactor.Tests.Harness
 [<Fact>]
 let ``a copy before a consumer or a foreach goes, before a lazy stage it moves after; the snapshot idiom stays`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    bool A(HashSet<int> xs) => xs.ToList().Any(x => x > 1);
-    void B(IEnumerable<int> xs) { foreach (var x in xs.ToList()) Console.WriteLine(x); }
-    IEnumerable<int> D(IEnumerable<int> xs) => xs.ToList().Where(x => x > 1);
-    void E(List<int> list) { foreach (var x in list.ToList()) list.Remove(x); }
-    void F(IEnumerable<int> xs, List<int> other) { foreach (var x in xs.ToList()) other.Add(x); }
-    int G(List<int> list) => list.ToArray().Count();
-    void H(IEnumerable<int> xs) { var copy = xs; foreach (var x in xs.ToList()) Console.WriteLine(copy.Count()); }
-    int I(IEnumerable<int> xs) => xs.ToList().Count(x => Console.Read() > x);
-    void J(IQueryable<int> q) { foreach (var x in q.ToList()) Console.WriteLine(x); }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                bool A(HashSet<int> xs) => xs.ToList().Any(x => x > 1);
+                void B(IEnumerable<int> xs) { foreach (var x in xs.ToList()) Console.WriteLine(x); }
+                IEnumerable<int> D(IEnumerable<int> xs) => xs.ToList().Where(x => x > 1);
+                void E(List<int> list) { foreach (var x in list.ToList()) list.Remove(x); }
+                void F(IEnumerable<int> xs, List<int> other) { foreach (var x in xs.ToList()) other.Add(x); }
+                int G(List<int> list) => list.ToArray().Count();
+                void H(IEnumerable<int> xs) { var copy = xs; foreach (var x in xs.ToList()) Console.WriteLine(copy.Count()); }
+                int I(IEnumerable<int> xs) => xs.ToList().Count(x => Console.Read() > x);
+                void J(IQueryable<int> q) { foreach (var x in q.ToList()) Console.WriteLine(x); }
+            }
+            """
 
     let fired = suggestCode "CR0020" source
     Assert.Equal(3, fired.Length)
@@ -38,18 +39,19 @@ class C
 [<Fact>]
 let ``CR0020 keeps the copy before a short-circuiting consumer over a generator`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    IEnumerable<int> Numbers() { for (var i = 0; i < 5; i++) { Console.WriteLine(i); yield return i; } }
-    bool A() { var seq = Numbers(); return seq.ToList().Any(p => p > 1); }
-    bool B(IEnumerable<int> xs) => xs.ToList().Any(p => p > 1);
-    bool D(int[] xs) { var view = xs.Where(x => x > 0); return view.ToList().Any(p => p > 1); }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                IEnumerable<int> Numbers() { for (var i = 0; i < 5; i++) { Console.WriteLine(i); yield return i; } }
+                bool A() { var seq = Numbers(); return seq.ToList().Any(p => p > 1); }
+                bool B(IEnumerable<int> xs) => xs.ToList().Any(p => p > 1);
+                bool D(int[] xs) { var view = xs.Where(x => x > 0); return view.ToList().Any(p => p > 1); }
+            }
+            """
 
     // A's generator prints all five before; B's may be one; D's is a pure view of an array
     Assert.Equal<string list>([ ".ToList()" ], firedText source (suggestCode "CR0020" source))
@@ -60,22 +62,23 @@ class C
 [<Fact>]
 let ``two Selects fuse and an identity Select goes, a duplicated impure stage or a captured name stays`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class P { public readonly P Parent; public readonly string Name; }
-class C
-{
-    IEnumerable<string> A(IEnumerable<P> ps) => ps.Select(p => p.Parent).Select(q => q.Name);
-    IEnumerable<int> B(IEnumerable<P> ps) => ps.Select(p => p.Name.Length).Select(n => n * n);
-    IEnumerable<int> D(IEnumerable<P> ps) => ps.Select(p => Console.Read()).Select(n => n * n);
-    IEnumerable<int> E(IEnumerable<int> xs) => xs.Select(x => x);
-    List<int> F(List<int> xs) => xs.Select(x => x).ToList();
-    IEnumerable<int> G(IEnumerable<int> xs, int q) => xs.Select(x => x + 1).Select(y => y * q);
-    IEnumerable<int> H(IEnumerable<int> xs, int x) => xs.Select(y => y + 1).Select(z => z + x);
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class P { public readonly P Parent; public readonly string Name; }
+            class C
+            {
+                IEnumerable<string> A(IEnumerable<P> ps) => ps.Select(p => p.Parent).Select(q => q.Name);
+                IEnumerable<int> B(IEnumerable<P> ps) => ps.Select(p => p.Name.Length).Select(n => n * n);
+                IEnumerable<int> D(IEnumerable<P> ps) => ps.Select(p => Console.Read()).Select(n => n * n);
+                IEnumerable<int> E(IEnumerable<int> xs) => xs.Select(x => x);
+                List<int> F(List<int> xs) => xs.Select(x => x).ToList();
+                IEnumerable<int> G(IEnumerable<int> xs, int q) => xs.Select(x => x + 1).Select(y => y * q);
+                IEnumerable<int> H(IEnumerable<int> xs, int x) => xs.Select(y => y + 1).Select(z => z + x);
+            }
+            """
 
     let fired = suggestCode "CR0029" source
     Assert.Equal(5, fired.Length)
@@ -123,7 +126,7 @@ class C
     )
 
     Assert.Contains(
-        "string D(IEnumerable<Item> items) { var s = string.Concat(items.Select(i => i.Name)); return s + \"!\"; }",
+        """string D(IEnumerable<Item> items) { var s = string.Concat(items.Select(i => i.Name)); return s + "!"; }""",
         fixedSource
     )
 
@@ -148,19 +151,20 @@ class C
 [<Fact>]
 let ``a flag set or cleared by a loop is Any or All, an impure predicate or a mid-loop read stays`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    bool A(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) if (x > 3) found = true; return found; }
-    bool B(IEnumerable<int> xs) { bool ok = true; foreach (var x in xs) { if (x < 0) { ok = false; break; } } return ok; }
-    bool D(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) if (Console.Read() == x) found = true; return found; }
-    bool E(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) { if (x > 3) found = true; Console.WriteLine(found); } return found; }
-    bool F(IEnumerable<string> xs) { var any = false; foreach (var s in xs) if (string.IsNullOrEmpty(s)) any = true; return any; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                bool A(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) if (x > 3) found = true; return found; }
+                bool B(IEnumerable<int> xs) { bool ok = true; foreach (var x in xs) { if (x < 0) { ok = false; break; } } return ok; }
+                bool D(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) if (Console.Read() == x) found = true; return found; }
+                bool E(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) { if (x > 3) found = true; Console.WriteLine(found); } return found; }
+                bool F(IEnumerable<string> xs) { var any = false; foreach (var s in xs) if (string.IsNullOrEmpty(s)) any = true; return any; }
+            }
+            """
 
     let fired = suggestCode "CR0022" source
     Assert.Equal(3, fired.Length)
@@ -176,23 +180,24 @@ class C
 [<Fact>]
 let ``CR0022 without a break needs a total condition over an eager source and the BCL's Any`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class Item { public int Id { get; set; } }
-class C
-{
-    bool A(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) if (x > 3) { found = true; break; } return found; }
-    bool B(List<Item> items, int id) { bool found = false; foreach (var x in items) if (x.Id == id) found = true; return found; }
-    bool D(string[] xs) { var any = false; foreach (var s in xs) if (string.IsNullOrEmpty(s)) any = true; return any; }
-    bool E(int[] xs) { bool ok = true; foreach (var x in xs) if (x < 0) ok = false; return ok; }
-    bool H1(int?[] xs) { bool found = false; foreach (var x in xs) { if (x.Value > 0) found = true; } return found; }
-    bool H2(List<Item?> items, int id) { bool found = false; foreach (var x in items) if (x!.Id == id) found = true; return found; }
-    static IEnumerable<int> Gen() { yield return 1; }
-    bool H3() { bool found = false; foreach (var x in Gen()) if (x > 0) found = true; return found; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class Item { public int Id { get; set; } }
+            class C
+            {
+                bool A(IEnumerable<int> xs) { bool found = false; foreach (var x in xs) if (x > 3) { found = true; break; } return found; }
+                bool B(List<Item> items, int id) { bool found = false; foreach (var x in items) if (x.Id == id) found = true; return found; }
+                bool D(string[] xs) { var any = false; foreach (var s in xs) if (string.IsNullOrEmpty(s)) any = true; return any; }
+                bool E(int[] xs) { bool ok = true; foreach (var x in xs) if (x < 0) ok = false; return ok; }
+                bool H1(int?[] xs) { bool found = false; foreach (var x in xs) { if (x.Value > 0) found = true; } return found; }
+                bool H2(List<Item?> items, int id) { bool found = false; foreach (var x in items) if (x!.Id == id) found = true; return found; }
+                static IEnumerable<int> Gen() { yield return 1; }
+                bool H3() { bool found = false; foreach (var x in Gen()) if (x > 0) found = true; return found; }
+            }
+            """
 
     let fired = suggestCode "CR0022" source
     // H1 (`x.Value`) and H3 (a user iterator walked to its end) are notes; H2's `x!` never fired
@@ -209,23 +214,24 @@ class C
 [<Fact>]
 let ``CR0022 without a break takes a string comparison, not a user collection or a queryable over an iterator`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-public sealed class Bag : IEnumerable<string>
-{
-    public IEnumerator<string> GetEnumerator() { yield return "a"; }
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-}
-class C
-{
-    static IEnumerable<int> Gen() { yield return 1; }
-    bool F03(List<string> names) { bool found = false; foreach (var n in names) if (n.StartsWith("A", StringComparison.Ordinal)) found = true; return found; }
-    bool F06(Bag bag) { bool found = false; foreach (var n in bag) if (n.Length > 0) found = true; return found; }
-    bool F07() { bool found = false; foreach (var x in Gen().AsQueryable()) if (x > 0) found = true; return found; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            public sealed class Bag : IEnumerable<string>
+            {
+                public IEnumerator<string> GetEnumerator() { yield return "a"; }
+                System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+            }
+            class C
+            {
+                static IEnumerable<int> Gen() { yield return 1; }
+                bool F03(List<string> names) { bool found = false; foreach (var n in names) if (n.StartsWith("A", StringComparison.Ordinal)) found = true; return found; }
+                bool F06(Bag bag) { bool found = false; foreach (var n in bag) if (n.Length > 0) found = true; return found; }
+                bool F07() { bool found = false; foreach (var x in Gen().AsQueryable()) if (x > 0) found = true; return found; }
+            }
+            """
 
     let fired = suggestCode "CR0022" source
     Assert.Equal(3, fired.Length)
@@ -239,15 +245,16 @@ class C
 [<Fact>]
 let ``CR0022 without a break takes a StartsWith of a variable: a null element argument is the accepted residual`` () =
     let source =
-        """
-using System.Collections.Generic;
-public sealed class P { public string Name { get; set; } = ""; public string? Sub { get; set; } }
-class C
-{
-    bool T02(List<P> xs) { bool found = false; foreach (var p in xs) { if (p.Name.StartsWith(p.Sub!)) found = true; } return found; }
-    bool Kept(List<P> xs) { bool found = false; foreach (var p in xs) { if (p.Name.StartsWith("a")) found = true; } return found; }
-}
-"""
+        csharp
+            """
+            using System.Collections.Generic;
+            public sealed class P { public string Name { get; set; } = ""; public string? Sub { get; set; } }
+            class C
+            {
+                bool T02(List<P> xs) { bool found = false; foreach (var p in xs) { if (p.Name.StartsWith(p.Sub!)) found = true; } return found; }
+                bool Kept(List<P> xs) { bool found = false; foreach (var p in xs) { if (p.Name.StartsWith("a")) found = true; } return found; }
+            }
+            """
 
     let fired = suggestCode "CR0022" source
     Assert.Equal(2, fired.Length)
@@ -259,22 +266,23 @@ class C
 [<Fact>]
 let ``CR0022 and CR0028 are notes where a repository extension would take the call they spell`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-static class MyExt
-{
-    public static bool Any<T>(this T[] xs, Func<T, bool> p) => false;
-    public static IEnumerable<T> Where<T>(this T[] xs, Func<T, bool> p) => xs;
-}
-class C
-{
-    bool A(int[] xs) { bool found = false; foreach (var x in xs) { if (x > 1) found = true; } return found; }
-    List<int> B(int[] xs) { var r = new List<int>(); foreach (var x in xs) if (x > 1) r.Add(x); return r; }
-    List<int> D(List<int> xs) { var r = new List<int>(); foreach (var x in xs) if (x > 1) r.Add(x); return r; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            static class MyExt
+            {
+                public static bool Any<T>(this T[] xs, Func<T, bool> p) => false;
+                public static IEnumerable<T> Where<T>(this T[] xs, Func<T, bool> p) => xs;
+            }
+            class C
+            {
+                bool A(int[] xs) { bool found = false; foreach (var x in xs) { if (x > 1) found = true; } return found; }
+                List<int> B(int[] xs) { var r = new List<int>(); foreach (var x in xs) if (x > 1) r.Add(x); return r; }
+                List<int> D(List<int> xs) { var r = new List<int>(); foreach (var x in xs) if (x > 1) r.Add(x); return r; }
+            }
+            """
 
     let flags = suggestCode "CR0022" source
     Assert.Equal(1, flags.Length)
@@ -289,32 +297,33 @@ let ``CR0022 without a break follows the source to its visible origin and a Sele
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-public sealed class Holder
-{
-    readonly IEnumerable<int> _xs;
-    public Holder() { _xs = Gen(); }
-    static IEnumerable<int> Gen() { yield return 1; yield return 2; }
-    public bool Y12() { bool found = false; foreach (var x in _xs) if (x > 0) found = true; return found; }
-}
-class C
-{
-    static int calls;
-    static readonly List<object> objs = new() { 1, "two" };
-    static IEnumerable<int> Gen() { yield return 1; yield return 2; }
-    static IEnumerable<int> Items => Gen();
-    static IEnumerable<int> Casted => objs.Cast<int>();
-    static int Log(int x) { calls++; return x; }
-    bool Y01() { bool found = false; foreach (var x in Items) if (x > 0) found = true; return found; }
-    bool Y02() { var xs = Gen(); bool found = false; foreach (var x in xs) if (x > 0) found = true; return found; }
-    bool Y03() { bool found = false; foreach (var x in Casted) if (x > 0) found = true; return found; }
-    bool Y10(List<int> items) { bool found = false; foreach (var x in items.Select(i => Log(i))) if (x > 0) found = true; return found; }
-    bool Y08(List<string> items) { bool found = false; foreach (var x in items) if (x.StartsWith("a")) found = true; return found; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            public sealed class Holder
+            {
+                readonly IEnumerable<int> _xs;
+                public Holder() { _xs = Gen(); }
+                static IEnumerable<int> Gen() { yield return 1; yield return 2; }
+                public bool Y12() { bool found = false; foreach (var x in _xs) if (x > 0) found = true; return found; }
+            }
+            class C
+            {
+                static int calls;
+                static readonly List<object> objs = new() { 1, "two" };
+                static IEnumerable<int> Gen() { yield return 1; yield return 2; }
+                static IEnumerable<int> Items => Gen();
+                static IEnumerable<int> Casted => objs.Cast<int>();
+                static int Log(int x) { calls++; return x; }
+                bool Y01() { bool found = false; foreach (var x in Items) if (x > 0) found = true; return found; }
+                bool Y02() { var xs = Gen(); bool found = false; foreach (var x in xs) if (x > 0) found = true; return found; }
+                bool Y03() { bool found = false; foreach (var x in Casted) if (x > 0) found = true; return found; }
+                bool Y10(List<int> items) { bool found = false; foreach (var x in items.Select(i => Log(i))) if (x > 0) found = true; return found; }
+                bool Y08(List<string> items) { bool found = false; foreach (var x in items) if (x.StartsWith("a")) found = true; return found; }
+            }
+            """
 
     let compilation, tree = compile source
     let model = compilation.GetSemanticModel(tree, false)
@@ -342,26 +351,27 @@ let ``CR0022 without a break takes a materialised copy of an iterator, and sees 
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-public sealed class Col : IEnumerable<int>
-{
-    public int Calls;
-    IEnumerator<int> IEnumerable<int>.GetEnumerator() { Calls++; yield return 1; Calls++; yield return 2; }
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
-}
-class C
-{
-    static int calls;
-    static IEnumerable<int> Gen() { calls++; yield return 1; calls++; yield return 2; }
-    static IEnumerable<int> Lazy { get { calls++; yield return 1; calls++; yield return 2; } }
-    bool Y20() { var arr = Gen().ToArray(); bool found = false; foreach (var x in arr) if (x > 1) found = true; return found; }
-    bool Y21() { bool found = false; foreach (var x in Lazy) if (x > 0) found = true; return found; }
-    bool Y22() { bool found = false; foreach (var x in new Col()) if (x > 0) found = true; return found; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            public sealed class Col : IEnumerable<int>
+            {
+                public int Calls;
+                IEnumerator<int> IEnumerable<int>.GetEnumerator() { Calls++; yield return 1; Calls++; yield return 2; }
+                System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
+            }
+            class C
+            {
+                static int calls;
+                static IEnumerable<int> Gen() { calls++; yield return 1; calls++; yield return 2; }
+                static IEnumerable<int> Lazy { get { calls++; yield return 1; calls++; yield return 2; } }
+                bool Y20() { var arr = Gen().ToArray(); bool found = false; foreach (var x in arr) if (x > 1) found = true; return found; }
+                bool Y21() { bool found = false; foreach (var x in Lazy) if (x > 0) found = true; return found; }
+                bool Y22() { bool found = false; foreach (var x in new Col()) if (x > 0) found = true; return found; }
+            }
+            """
 
     let compilation, tree = compile source
     let model = compilation.GetSemanticModel(tree, false)
@@ -389,19 +399,20 @@ class C
 [<Fact>]
 let ``growing by one in a loop is noted, except the shape CR0021 rewrites and numeric increments`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    string A(string[] parts, int n) { var s = ""; for (int i = 0; i < n; i++) { s += parts[i]; s += ","; } return s; }
-    int[] B(int[] arr, IEnumerable<int> xs) { foreach (var x in xs) arr = arr.Append(x).ToArray(); return arr; }
-    void D(int[] arr, IEnumerable<int> xs) { foreach (var x in xs) Array.Resize(ref arr, arr.Length + 1); }
-    int E(IEnumerable<int> xs) { int i = 0; foreach (var x in xs) i = i + 1; return i; }
-    string F(IEnumerable<string> xs) { var s = ""; foreach (var x in xs) s += x; return s; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                string A(string[] parts, int n) { var s = ""; for (int i = 0; i < n; i++) { s += parts[i]; s += ","; } return s; }
+                int[] B(int[] arr, IEnumerable<int> xs) { foreach (var x in xs) arr = arr.Append(x).ToArray(); return arr; }
+                void D(int[] arr, IEnumerable<int> xs) { foreach (var x in xs) Array.Resize(ref arr, arr.Length + 1); }
+                int E(IEnumerable<int> xs) { int i = 0; foreach (var x in xs) i = i + 1; return i; }
+                string F(IEnumerable<string> xs) { var s = ""; foreach (var x in xs) s += x; return s; }
+            }
+            """
 
     let texts = firedText source (suggestCode "CR0025" source)
 
@@ -419,21 +430,22 @@ class C
 let ``CR0025 leaves an audit trail grown with ImmutableList.Add alone: a persistent list shares structure`` () =
     // only ImmutableArray<T>.Add copies the whole array; ImmutableList<T>.Add is O(log n)
     let source =
-        """
-using System.Collections.Generic;
-using System.Collections.Immutable;
-class AuditTrail
-{
-    ImmutableList<string> Record(ImmutableList<string> trail, IEnumerable<string> events)
-    {
-        foreach (var e in events)
-        {
-            trail = trail.Add(e);
-        }
-        return trail;
-    }
-}
-"""
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Collections.Immutable;
+            class AuditTrail
+            {
+                ImmutableList<string> Record(ImmutableList<string> trail, IEnumerable<string> events)
+                {
+                    foreach (var e in events)
+                    {
+                        trail = trail.Add(e);
+                    }
+                    return trail;
+                }
+            }
+            """
 
     Assert.Empty(suggestCode "CR0025" source)
 
@@ -442,34 +454,35 @@ class AuditTrail
 [<Fact>]
 let ``a literal list probed per element becomes a set, other uses or a public field hold it to a note`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    static readonly string[] Allowed = { "a", "b", "c" };
-    static readonly string[] Listed = new[] { "x", "y" };
-    public static readonly string[] Public = { "p", "q" };
-    IEnumerable<string> A(IEnumerable<string> xs) => xs.Where(x => Allowed.Contains(x));
-    void B(IEnumerable<string> xs) { foreach (var x in xs) if (Listed.Contains(x)) Console.WriteLine(x); }
-    string D() => Listed[0];
-    bool E(IEnumerable<string> xs) => xs.Any(x => Public.Contains(x));
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                static readonly string[] Allowed = { "a", "b", "c" };
+                static readonly string[] Listed = new[] { "x", "y" };
+                public static readonly string[] Public = { "p", "q" };
+                IEnumerable<string> A(IEnumerable<string> xs) => xs.Where(x => Allowed.Contains(x));
+                void B(IEnumerable<string> xs) { foreach (var x in xs) if (Listed.Contains(x)) Console.WriteLine(x); }
+                string D() => Listed[0];
+                bool E(IEnumerable<string> xs) => xs.Any(x => Public.Contains(x));
+            }
+            """
 
     let fired = suggestCode "CR0023" source
     Assert.Equal(3, fired.Length)
     let fixedSource = fixAll "CR0023" source
 
     Assert.Contains(
-        "static readonly FrozenSet<string> Allowed = new[] { \"a\", \"b\", \"c\" }.ToFrozenSet();",
+        """static readonly FrozenSet<string> Allowed = new[] { "a", "b", "c" }.ToFrozenSet();""",
         fixedSource
     )
 
     Assert.Contains("using System.Collections.Frozen;", fixedSource)
-    Assert.Contains("static readonly string[] Listed = new[] { \"x\", \"y\" };", fixedSource)
-    Assert.Contains("public static readonly string[] Public = { \"p\", \"q\" };", fixedSource)
+    Assert.Contains("""static readonly string[] Listed = new[] { "x", "y" };""", fixedSource)
+    Assert.Contains("""public static readonly string[] Public = { "p", "q" };""", fixedSource)
 
 [<Fact>]
 let ``CR0023 converts a short string literal but leaves a short int literal to its vectorised scan`` () =
@@ -494,7 +507,7 @@ class C
 """
 
     let fixedSource = fixAll "CR0023" source
-    Assert.Contains("static readonly FrozenSet<string> Words = new[] { \"a\", \"b\" }.ToFrozenSet();", fixedSource)
+    Assert.Contains("""static readonly FrozenSet<string> Words = new[] { "a", "b" }.ToFrozenSet();""", fixedSource)
     Assert.Contains("static readonly int[] Few = { 1, 2, 3, 4 };", fixedSource)
     Assert.Contains("static readonly FrozenSet<int> Many", fixedSource)
 
@@ -512,31 +525,41 @@ class C
 [<Fact>]
 let ``a fill loop that is then only read becomes the pipeline, a later mutation or a widening add stays`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-interface IShape { }
-class Circle : IShape { public bool Ok; public string Name; }
-class C
-{
-    List<string> A(IEnumerable<Circle> xs)
-    {
-        var names = new List<string>();
-        foreach (var x in xs)
-        {
-            if (x.Ok) names.Add(x.Name);
-        }
-        return names;
-    }
-    List<Circle> B(IEnumerable<Circle> xs) { var r = new List<Circle>(); foreach (var x in xs) r.Add(x); r.Add(null); return r; }
-    List<IShape> D(IEnumerable<Circle> xs) { var r = new List<IShape>(); foreach (var x in xs) r.Add(x); return r; }
-    int E(IEnumerable<Circle> xs) { List<Circle> r = []; foreach (var x in xs) if (x.Ok) r.Add(x); return r.Count; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            interface IShape { }
+            class Circle : IShape { public bool Ok; public string Name; }
+            class C
+            {
+                List<string> A(IEnumerable<Circle> xs)
+                {
+                    var names = new List<string>();
+                    foreach (var x in xs)
+                    {
+                        if (x.Ok) names.Add(x.Name);
+                    }
+                    return names;
+                }
+                List<Circle> B(IEnumerable<Circle> xs) { var r = new List<Circle>(); foreach (var x in xs) r.Add(x); r.Add(null); return r; }
+                List<IShape> D(IEnumerable<Circle> xs) { var r = new List<IShape>(); foreach (var x in xs) r.Add(x); return r; }
+                int E(IEnumerable<Circle> xs) { List<Circle> r = []; foreach (var x in xs) if (x.Ok) r.Add(x); return r.Count; }
+            }
+            """
 
     let fired = suggestCode "CR0028" source
     Assert.Equal(2, fired.Length)
     let fixedSource = fixAll "CR0028" source
-    Assert.Contains("var names = xs.Where(x => x.Ok).Select(x => x.Name).ToList();\n        return names;", fixedSource)
+
+    Assert.Contains(
+        csharp
+            """
+            var names = xs.Where(x => x.Ok).Select(x => x.Name).ToList();
+                    return names;
+            """,
+        fixedSource
+    )
+
     Assert.Contains("List<Circle> r = xs.Where(x => x.Ok).ToList(); return r.Count;", fixedSource)

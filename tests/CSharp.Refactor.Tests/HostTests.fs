@@ -14,14 +14,15 @@ open CSharp.Refactor.Roslyn
 open CSharp.Refactor.Tests.Harness
 
 let private source =
-    """
-using System;
-class C
-{
-    Guid A() => new Guid();
-    string B() => $"plain";
-}
-"""
+    csharp
+        """
+        using System;
+        class C
+        {
+            Guid A() => new Guid();
+            string B() => $"plain";
+        }
+        """
 
 let private analyze (compilation: Compilation) =
     let analyzers = ImmutableArray.Create<DiagnosticAnalyzer>(CSharpRefactorAnalyzer())
@@ -105,14 +106,38 @@ let ``the fix provider rewrites a method's callers in another document through t
         let declaring =
             project.AddDocument(
                 "Service.cs",
-                "using System.Threading.Tasks;\nnamespace App;\ninternal static class Service\n{\n    static Task<int> Source() => Task.FromResult(1);\n    internal static int Load() { var x = Source().Result; return x; }\n}\n",
+                csharp
+                    """
+                    using System.Threading.Tasks;
+                    namespace App;
+                    internal static class Service
+                    {
+                        static Task<int> Source() => Task.FromResult(1);
+                        internal static int Load() { var x = Source().Result; return x; }
+                    }
+
+                    """,
                 filePath = "C:/fake/Service.cs"
             )
 
         let calling =
             declaring.Project.AddDocument(
                 "Caller.cs",
-                "using System.Threading.Tasks;\nnamespace App;\nclass Caller\n{\n    async Task<int> Run()\n    {\n        var x = Service.Load();\n        var y = Service.Load();\n        return x + y;\n    }\n}\n",
+                csharp
+                    """
+                    using System.Threading.Tasks;
+                    namespace App;
+                    class Caller
+                    {
+                        async Task<int> Run()
+                        {
+                            var x = Service.Load();
+                            var y = Service.Load();
+                            return x + y;
+                        }
+                    }
+
+                    """,
                 filePath = "C:/fake/Caller.cs"
             )
 
@@ -193,14 +218,36 @@ let ``a reference tuple spelled in two files of one compilation is retyped as on
         let a =
             project.AddDocument(
                 "A.cs",
-                "using System;\nnamespace App;\ninternal static class Maker\n{\n    internal static Tuple<int, string> Make() => Tuple.Create(1, \"a\");\n}\n",
+                csharp
+                    """
+                    using System;
+                    namespace App;
+                    internal static class Maker
+                    {
+                        internal static Tuple<int, string> Make() => Tuple.Create(1, "a");
+                    }
+
+                    """,
                 filePath = "C:/fake/A.cs"
             )
 
         let b =
             a.Project.AddDocument(
                 "B.cs",
-                "using System;\nnamespace App;\nclass User\n{\n    int Use()\n    {\n        Tuple<int, string> t = Maker.Make();\n        return t.Item1;\n    }\n}\n",
+                csharp
+                    """
+                    using System;
+                    namespace App;
+                    class User
+                    {
+                        int Use()
+                        {
+                            Tuple<int, string> t = Maker.Make();
+                            return t.Item1;
+                        }
+                    }
+
+                    """,
                 filePath = "C:/fake/B.cs"
             )
 
@@ -246,7 +293,7 @@ let ``a reference tuple spelled in two files of one compilation is retyped as on
 
         let textA = changed.GetDocument(a.Id).GetTextAsync().Result.ToString()
         let textB = changed.GetDocument(b.Id).GetTextAsync().Result.ToString()
-        Assert.Contains("internal static (int, string) Make() => (1, \"a\");", textA)
+        Assert.Contains("""internal static (int, string) Make() => (1, "a");""", textA)
         Assert.Contains("(int, string) t = Maker.Make();", textB)
         let! after = changed.GetProject(a.Project.Id).GetCompilationAsync()
         Assert.Empty(errorsOf after)

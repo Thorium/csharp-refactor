@@ -38,43 +38,44 @@ let private expressionsOf (source: string) =
     model, byLabel
 
 let private fixture =
-    """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class P { public int Get { get { Console.WriteLine("x"); return 1; } } public int this[int i] => i; }
-class C
-{
-    static int Log(int x) { Console.WriteLine(x); return x; }
-    readonly int ro = 1;
-    int mutable = 2;
-    const int K = 3;
-    void M(int a, string s, int[] arr, List<int> xs, P p, Lazy<int> lazy, dynamic d)
-    {
-        _ = a + 1;                          // pure-arith
-        _ = s.Length;                       // pure-length
-        _ = arr[0] * K;                     // pure-index
-        _ = ro;                             // pure-readonly
-        _ = (a, s);                         // pure-tuple
-        _ = a > 0 ? a : -a;                 // pure-cond
-        _ = nameof(a);                      // pure-nameof
-        _ = Log(a);                         // impure-call
-        _ = mutable;                        // impure-field
-        _ = p.Get;                          // impure-getter
-        _ = p[1];                           // impure-indexer
-        _ = a++;                            // impure-increment
-        _ = s.Trim().ToUpperInvariant();    // core-string
-        _ = Math.Max(a, 1);                 // core-math
-        _ = xs.Select(x => x * 2).Count();  // core-linq
-        _ = xs.Select(x => Log(x));         // notcore-lambda
-        _ = xs.Where(x => x > 0).ToList();  // notcore-tolist
-        _ = lazy.Value;                     // notcore-lazy
-        _ = $"{a}";                         // notcore-hole
-        _ = d + 1;                          // notcore-dynamic
-        _ = DateTime.Now;                   // notcore-clock
-    }
-}
-"""
+    csharp
+        """
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        class P { public int Get { get { Console.WriteLine("x"); return 1; } } public int this[int i] => i; }
+        class C
+        {
+            static int Log(int x) { Console.WriteLine(x); return x; }
+            readonly int ro = 1;
+            int mutable = 2;
+            const int K = 3;
+            void M(int a, string s, int[] arr, List<int> xs, P p, Lazy<int> lazy, dynamic d)
+            {
+                _ = a + 1;                          // pure-arith
+                _ = s.Length;                       // pure-length
+                _ = arr[0] * K;                     // pure-index
+                _ = ro;                             // pure-readonly
+                _ = (a, s);                         // pure-tuple
+                _ = a > 0 ? a : -a;                 // pure-cond
+                _ = nameof(a);                      // pure-nameof
+                _ = Log(a);                         // impure-call
+                _ = mutable;                        // impure-field
+                _ = p.Get;                          // impure-getter
+                _ = p[1];                           // impure-indexer
+                _ = a++;                            // impure-increment
+                _ = s.Trim().ToUpperInvariant();    // core-string
+                _ = Math.Max(a, 1);                 // core-math
+                _ = xs.Select(x => x * 2).Count();  // core-linq
+                _ = xs.Select(x => Log(x));         // notcore-lambda
+                _ = xs.Where(x => x > 0).ToList();  // notcore-tolist
+                _ = lazy.Value;                     // notcore-lazy
+                _ = $"{a}";                         // notcore-hole
+                _ = d + 1;                          // notcore-dynamic
+                _ = DateTime.Now;                   // notcore-clock
+            }
+        }
+        """
 
 [<Fact>]
 let ``isPureExpression accepts reads and built-in operators and refuses calls and writes`` () =
@@ -144,7 +145,16 @@ let ``under warnings as errors an edit that leaves a field unread is answered as
     // answer alike; should Roslyn ever report it per file, the member-local
     // check must still answer as the whole file does
     let source =
-        "class C\n{\n    private int _x;\n    public void Set() { _x = 1; }\n    public int M() { return _x; }\n}\n"
+        csharp
+            """
+            class C
+            {
+                private int _x;
+                public void Set() { _x = 1; }
+                public int M() { return _x; }
+            }
+
+            """
 
     let compilation, tree = compileClean source
 
@@ -178,7 +188,19 @@ let ``an edit inside a body that splits the member is judged on the whole file``
     // outside the edited member. The member-local path must give way to the
     // whole file, which sees the new error
     let source =
-        "class C\n{\n    void M()\n    {\n        int x = 1;\n    }\n\n    void Other() { }\n}\n"
+        csharp
+            """
+            class C
+            {
+                void M()
+                {
+                    int x = 1;
+                }
+
+                void Other() { }
+            }
+
+            """
 
     let compilation, tree = compileClean source
     let model = compilation.GetSemanticModel(tree, false)
@@ -186,7 +208,18 @@ let ``an edit inside a body that splits the member is judged on the whole file``
 
     let split =
         [
-            Suggestion.insert at "\n    }\n\n    void Other() { }\n\n    void M2()\n    {"
+            Suggestion.insert
+                at
+                (csharp
+                    """
+
+                        }
+
+                        void Other() { }
+
+                        void M2()
+                        {
+                    """)
         ]
 
     Assert.False(Guards.speculativeCheck model split)
@@ -239,20 +272,21 @@ let ``knobs read integers and booleans in the ini spellings and fail open`` () =
 [<Fact>]
 let ``an indexer on a type parameter or a user type is a call, and never a crash`` () =
     let source =
-        """
-using System.Collections.Generic;
-class Box { public int this[int i] => i; }
-class C
-{
-    static void M<T>(T xs, Box b, List<int> ys, int[] arr) where T : IList<int>
-    {
-        _ = xs[0];      // typeparam
-        _ = b[0];       // user
-        _ = ys[0];      // list
-        _ = arr[0];     // array
-    }
-}
-"""
+        csharp
+            """
+            using System.Collections.Generic;
+            class Box { public int this[int i] => i; }
+            class C
+            {
+                static void M<T>(T xs, Box b, List<int> ys, int[] arr) where T : IList<int>
+                {
+                    _ = xs[0];      // typeparam
+                    _ = b[0];       // user
+                    _ = ys[0];      // list
+                    _ = arr[0];     // array
+                }
+            }
+            """
 
     let model, e = expressionsOf source
     Assert.False(Guards.isPureExpression model e.["typeparam"], "typeparam")

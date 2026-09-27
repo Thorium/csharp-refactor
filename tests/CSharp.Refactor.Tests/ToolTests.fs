@@ -66,7 +66,17 @@ let private tempDir () =
 let ``create-config writes a block with every rule and keeps existing keys`` () =
     let dir = tempDir ()
     let path = Path.Combine(dir, ".editorconfig")
-    File.WriteAllText(path, "root = true\n[*.cs]\ndotnet_diagnostic.CR0103.severity = none\n")
+
+    File.WriteAllText(
+        path,
+        csharp
+            """
+            root = true
+            [*.cs]
+            dotnet_diagnostic.CR0103.severity = none
+
+            """
+    )
 
     match ConfigFile.writeInto dir with
     | Ok written ->
@@ -90,7 +100,7 @@ let ``create-config writes a block with every rule and keeps existing keys`` () 
 let ``a source file resolves to the project whose directory holds it`` () =
     let dir = tempDir ()
     let project = Path.Combine(dir, "Lib.csproj")
-    File.WriteAllText(project, "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>")
+    File.WriteAllText(project, """<Project Sdk="Microsoft.NET.Sdk"></Project>""")
     Directory.CreateDirectory(Path.Combine(dir, "Sub")) |> ignore
     let source = Path.Combine(dir, "Sub", "A.cs")
     File.WriteAllText(source, "class A { }")
@@ -108,12 +118,12 @@ let ``a directory takes its solution's C# projects, a glob everything it matches
     let b = Path.Combine(dir, "B", "B.fsproj")
     Directory.CreateDirectory(Path.GetDirectoryName a) |> ignore
     Directory.CreateDirectory(Path.GetDirectoryName b) |> ignore
-    File.WriteAllText(a, "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>")
-    File.WriteAllText(b, "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>")
+    File.WriteAllText(a, """<Project Sdk="Microsoft.NET.Sdk"></Project>""")
+    File.WriteAllText(b, """<Project Sdk="Microsoft.NET.Sdk"></Project>""")
 
     File.WriteAllText(
         Path.Combine(dir, "All.slnx"),
-        "<Solution><Project Path=\"A/A.csproj\" /><Project Path=\"B/B.fsproj\" /></Solution>"
+        """<Solution><Project Path="A/A.csproj" /><Project Path="B/B.fsproj" /></Solution>"""
     )
 
     match Targets.resolveTargets dir with
@@ -127,21 +137,23 @@ let ``a directory takes its solution's C# projects, a glob everything it matches
 // ---- end to end ----
 
 let private sampleSource =
-    """using System;
-namespace Sample;
-public static class Demo
-{
-    public static Guid Empty() => new Guid();
-    public static Guid FromBytes(byte[] b) => new Guid(b);
-    public static string NoHoles() => $"no holes here";
-    public static string WithHole(int x) => $"value {x}";
-}
-"""
+    csharp
+        """
+        using System;
+        namespace Sample;
+        public static class Demo
+        {
+            public static Guid Empty() => new Guid();
+            public static Guid FromBytes(byte[] b) => new Guid(b);
+            public static string NoHoles() => $"no holes here";
+            public static string WithHole(int x) => $"value {x}";
+        }
+        """
 
 let private writeProject (dir: string) =
     File.WriteAllText(
         Path.Combine(dir, "Sample.csproj"),
-        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><Nullable>enable</Nullable></PropertyGroup></Project>"
+        """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><Nullable>enable</Nullable></PropertyGroup></Project>"""
     )
 
     File.WriteAllText(Path.Combine(dir, "Program.cs"), sampleSource)
@@ -178,8 +190,8 @@ type EndToEnd() =
         let after = File.ReadAllText(Path.Combine(dir, "Program.cs"))
         Assert.Contains("=> Guid.Empty;", after)
         Assert.Contains("=> new Guid(b);", after)
-        Assert.Contains("=> \"no holes here\";", after)
-        Assert.Contains("$\"value {x}\";", after)
+        Assert.Contains("""=> "no holes here";""", after)
+        Assert.Contains("""$"value {x}";""", after)
         Assert.Equal(2, Sweep.runTotalApplied)
 
         // idempotent
@@ -195,7 +207,15 @@ type EndToEnd() =
 
         File.WriteAllText(
             Path.Combine(dir, "Quiet.cs"),
-            "namespace Sample;\npublic static class Quiet\n{\n    public static int One() => 1;\n}\n"
+            csharp
+                """
+                namespace Sample;
+                public static class Quiet
+                {
+                    public static int One() => 1;
+                }
+
+                """
         )
 
         use captured = new StringWriter()
@@ -228,13 +248,41 @@ type EndToEnd() =
         ()
         =
         let dir = tempDir ()
-        File.WriteAllText(Path.Combine(dir, "helpers.csx"), "public static int Twice(int x) => x * 2;\n")
+
+        File.WriteAllText(
+            Path.Combine(dir, "helpers.csx"),
+            csharp
+                """
+                public static int Twice(int x) => x * 2;
+
+                """
+        )
 
         let script = Path.Combine(dir, "build.csx")
 
         File.WriteAllText(
             script,
-            "#r \"System.Xml.dll\"\n#load \"helpers.csx\"\nusing System.Xml;\n\nvar items = new List<string> { \"a\", \"\", \"b\" };\nforeach (var item in items)\n{\n    if (item.Length == 0) items.Remove(item);\n}\nvar actions = new List<Action>();\nfor (int i = 0; i < 3; i++)\n{\n    actions.Add(() => Console.WriteLine(Twice(i)));\n}\nvar doc = new XmlDocument();\nvar empty = new Guid();\nConsole.WriteLine(doc.OuterXml + empty + actions.Count);\n"
+            csharp
+                """
+                #r "System.Xml.dll"
+                #load "helpers.csx"
+                using System.Xml;
+
+                var items = new List<string> { "a", "", "b" };
+                foreach (var item in items)
+                {
+                    if (item.Length == 0) items.Remove(item);
+                }
+                var actions = new List<Action>();
+                for (int i = 0; i < 3; i++)
+                {
+                    actions.Add(() => Console.WriteLine(Twice(i)));
+                }
+                var doc = new XmlDocument();
+                var empty = new Guid();
+                Console.WriteLine(doc.OuterXml + empty + actions.Count);
+
+                """
         )
 
         let run (args: string[]) =
@@ -257,7 +305,16 @@ type EndToEnd() =
         let after = File.ReadAllText script
         Assert.Contains("#load \"helpers.csx\"", after)
         Assert.Contains("items.RemoveAll(item => item.Length == 0);", after)
-        Assert.Contains("var i1 = i;\n    actions.Add(() => Console.WriteLine(Twice(i1)));", after)
+
+        Assert.Contains(
+            csharp
+                """
+                var i1 = i;
+                    actions.Add(() => Console.WriteLine(Twice(i1)));
+                """,
+            after
+        )
+
         Assert.Contains("var empty = Guid.Empty;", after)
 
         // the directory form picks the loose scripts up too
@@ -278,17 +335,41 @@ type EndToEnd() =
 
         File.WriteAllText(
             Path.Combine(dir, "Sample.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
         )
 
         File.WriteAllText(
             Path.Combine(dir, "Service.cs"),
-            "using System.Threading.Tasks;\nnamespace Sample;\ninternal static class Service\n{\n    static Task<int> Source() => Task.FromResult(1);\n    internal static int Load() { var x = Source().Result; return x; }\n}\n"
+            csharp
+                """
+                using System.Threading.Tasks;
+                namespace Sample;
+                internal static class Service
+                {
+                    static Task<int> Source() => Task.FromResult(1);
+                    internal static int Load() { var x = Source().Result; return x; }
+                }
+
+                """
         )
 
         File.WriteAllText(
             Path.Combine(dir, "Caller.cs"),
-            "using System.Threading.Tasks;\nnamespace Sample;\nclass Caller\n{\n    async Task<int> Run()\n    {\n        var x = Service.Load();\n        var y = Service.Load();\n        return x + y;\n    }\n}\n"
+            csharp
+                """
+                using System.Threading.Tasks;
+                namespace Sample;
+                class Caller
+                {
+                    async Task<int> Run()
+                    {
+                        var x = Service.Load();
+                        var y = Service.Load();
+                        return x + y;
+                    }
+                }
+
+                """
         )
 
         let project = Path.Combine(dir, "Sample.csproj")
@@ -317,26 +398,59 @@ type EndToEnd() =
 
         File.WriteAllText(
             Path.Combine(dir, "Sample.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup></Project>"
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><TreatWarningsAsErrors>true</TreatWarningsAsErrors></PropertyGroup></Project>"""
         )
 
         // a custom hint is its author's to aim: this one writes the Any()
         // CA1860 forbids on an array
-        File.WriteAllText(Path.Combine(dir, "hints.txt"), "x.Length > 0 ===> x.Any()\n")
+        File.WriteAllText(
+            Path.Combine(dir, "hints.txt"),
+            csharp
+                """
+                x.Length > 0 ===> x.Any()
+
+                """
+        )
 
         File.WriteAllText(
             Path.Combine(dir, ".editorconfig"),
-            "root = true\n[*.cs]\ndotnet_diagnostic.CA1860.severity = warning\ncsharp_refactor.hints = hints.txt\n"
+            csharp
+                """
+                root = true
+                [*.cs]
+                dotnet_diagnostic.CA1860.severity = warning
+                csharp_refactor.hints = hints.txt
+
+                """
         )
 
         File.WriteAllText(
             Path.Combine(dir, "Arrays.cs"),
-            "using System.Linq;\nnamespace Sample;\npublic static class Arrays\n{\n    public static bool HasAny(int[] xs) => xs.Length > 0;\n}\n"
+            csharp
+                """
+                using System.Linq;
+                namespace Sample;
+                public static class Arrays
+                {
+                    public static bool HasAny(int[] xs) => xs.Length > 0;
+                }
+
+                """
         )
 
         File.WriteAllText(
             Path.Combine(dir, "Sequences.cs"),
-            "using System.Collections.Generic;\nusing System.Linq;\nnamespace Sample;\npublic static class Sequences\n{\n    public static bool HasAny(IEnumerable<int> xs) => xs.Count() > 0;\n}\n"
+            csharp
+                """
+                using System.Collections.Generic;
+                using System.Linq;
+                namespace Sample;
+                public static class Sequences
+                {
+                    public static bool HasAny(IEnumerable<int> xs) => xs.Count() > 0;
+                }
+
+                """
         )
 
         let project = Path.Combine(dir, "Sample.csproj")
@@ -360,27 +474,50 @@ type EndToEnd() =
 
         File.WriteAllText(
             Path.Combine(dir, "A", "A.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><InternalsVisibleTo Include=\"B\" /></ItemGroup></Project>"
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><InternalsVisibleTo Include="B" /></ItemGroup></Project>"""
         )
 
         File.WriteAllText(
             Path.Combine(dir, "A", "Service.cs"),
-            "using System.Threading.Tasks;\nnamespace A;\ninternal static class Service\n{\n    static Task<int> Source() => Task.FromResult(1);\n    internal static int Load() { var x = Source().Result; return x; }\n}\n"
+            csharp
+                """
+                using System.Threading.Tasks;
+                namespace A;
+                internal static class Service
+                {
+                    static Task<int> Source() => Task.FromResult(1);
+                    internal static int Load() { var x = Source().Result; return x; }
+                }
+
+                """
         )
 
         File.WriteAllText(
             Path.Combine(dir, "B", "B.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><ProjectReference Include=\"../A/A.csproj\" /></ItemGroup></Project>"
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><ProjectReference Include="../A/A.csproj" /></ItemGroup></Project>"""
         )
 
         File.WriteAllText(
             Path.Combine(dir, "B", "Caller.cs"),
-            "using System.Threading.Tasks;\nnamespace B;\nclass Caller\n{\n    async Task<int> Run()\n    {\n        var x = A.Service.Load();\n        return x;\n    }\n}\n"
+            csharp
+                """
+                using System.Threading.Tasks;
+                namespace B;
+                class Caller
+                {
+                    async Task<int> Run()
+                    {
+                        var x = A.Service.Load();
+                        return x;
+                    }
+                }
+
+                """
         )
 
         File.WriteAllText(
             Path.Combine(dir, "All.slnx"),
-            "<Solution><Project Path=\"A/A.csproj\" /><Project Path=\"B/B.csproj\" /></Solution>"
+            """<Solution><Project Path="A/A.csproj" /><Project Path="B/B.csproj" /></Solution>"""
         )
 
         let run (args: string[]) =
@@ -410,7 +547,7 @@ type EndToEnd() =
 
         File.WriteAllText(
             Path.Combine(dir, "Sample.csproj"),
-            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
         )
 
         // Windows-1252: `×` is the single byte 0xD7, which is not valid UTF-8 —
@@ -420,9 +557,22 @@ type EndToEnd() =
         let original =
             Array.concat
                 [
-                    ascii "using System;\n// a 3"
+                    ascii (
+                        csharp
+                            """
+                            using System;
+                            // a 3
+                            """
+                    )
                     [| 0xD7uy |]
-                    ascii "3 matrix\nclass C { Guid A() => new Guid(); }\n"
+                    ascii (
+                        csharp
+                            """
+                            3 matrix
+                            class C { Guid A() => new Guid(); }
+
+                            """
+                    )
                 ]
 
         let path = Path.Combine(dir, "Program.cs")
@@ -461,12 +611,18 @@ let ``a project naming its SDK in an Sdk element is not legacy`` () =
     let element =
         write
             "Element.csproj"
-            "<Project>\n  <Sdk Name=\"Microsoft.NET.Sdk\" />\n  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>\n</Project>"
+            (csharp
+                """
+                <Project>
+                  <Sdk Name="Microsoft.NET.Sdk" />
+                  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+                </Project>
+                """)
 
     let legacy =
         write
             "Legacy.csproj"
-            "<Project ToolsVersion=\"15.0\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\"><ItemGroup><Compile Include=\"A.cs\" /></ItemGroup></Project>"
+            """<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003"><ItemGroup><Compile Include="A.cs" /></ItemGroup></Project>"""
 
     Assert.False(LegacyProjects.isLegacy element)
     Assert.True(LegacyProjects.isLegacy legacy)
@@ -514,7 +670,7 @@ let ``a legacy project's file that is not UTF-8 is read in the system code page,
         do!
             File.WriteAllTextAsync(
                 Path.Combine(dir, "Legacy.csproj"),
-                "<Project ToolsVersion=\"15.0\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\"><PropertyGroup><TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion><OutputType>Library</OutputType></PropertyGroup><ItemGroup><Compile Include=\"A.cs\" /></ItemGroup></Project>"
+                """<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003"><PropertyGroup><TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion><OutputType>Library</OutputType></PropertyGroup><ItemGroup><Compile Include="A.cs" /></ItemGroup></Project>"""
             )
 
         // Windows-1252: `×` is the single byte 0xD7, not valid UTF-8
@@ -550,7 +706,7 @@ let ``the MCP server answers the handshake, lists its tools and rules, and analy
         do!
             File.WriteAllTextAsync(
                 Path.Combine(dir, "Sample.csproj"),
-                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"
+                """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
             )
 
         let source = "using System;\nclass C { Guid A() => new Guid(); }\n"

@@ -9,30 +9,31 @@ let private code = "CR0011"
 [<Fact>]
 let ``negations, bool literals, CompareTo and LINQ shapes rewrite, bracketed where precedence needs it`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    bool A(int a, int b) => !(a == b);
-    bool B(int a, int b) => !(a < b) && !(b >= 3);
-    bool D(bool x) => x == true;
-    bool E(bool x, bool y) => (x == false) == y;
-    bool F(int a, int b) => a.CompareTo(b) < 0;
-    bool G(List<int> xs) => xs.Where(v => v > 1).Count() > 0;
-    int H(List<int> xs) => xs.Select(v => v * 2).Sum();
-    int I(List<int> xs) => xs.Where(v => v > 1).First();
-    bool J(string a, string b) => string.Compare(a, b, StringComparison.Ordinal) == 0;
-    bool K(object o) => !(o is string);
-    bool L(int a, int b, int c) => !(a + b == c);
-    int N(int a, int b) => (!(a == b) ? 1 : 0);
-    int O(List<int> xs) => xs
-        .Select(v => v + 1)
-        .Where(v => v > 1)
-        .First();
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                bool A(int a, int b) => !(a == b);
+                bool B(int a, int b) => !(a < b) && !(b >= 3);
+                bool D(bool x) => x == true;
+                bool E(bool x, bool y) => (x == false) == y;
+                bool F(int a, int b) => a.CompareTo(b) < 0;
+                bool G(List<int> xs) => xs.Where(v => v > 1).Count() > 0;
+                int H(List<int> xs) => xs.Select(v => v * 2).Sum();
+                int I(List<int> xs) => xs.Where(v => v > 1).First();
+                bool J(string a, string b) => string.Compare(a, b, StringComparison.Ordinal) == 0;
+                bool K(object o) => !(o is string);
+                bool L(int a, int b, int c) => !(a + b == c);
+                int N(int a, int b) => (!(a == b) ? 1 : 0);
+                int O(List<int> xs) => xs
+                    .Select(v => v + 1)
+                    .Where(v => v > 1)
+                    .First();
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal(14, fired.Length)
@@ -51,7 +52,12 @@ class C
     Assert.Contains("int N(int a, int b) => (a != b ? 1 : 0);", fixedSource)
     // a chain laid out one call per line keeps its line breaks
     Assert.Contains(
-        "int O(List<int> xs) => xs\n        .Select(v => v + 1)\n        .First(v => v > 1);",
+        csharp
+            """
+            int O(List<int> xs) => xs
+                    .Select(v => v + 1)
+                    .First(v => v > 1);
+            """,
         normalize fixedSource
     )
 
@@ -60,28 +66,29 @@ let ``floating orderings, nullable bools, user-defined operators, own extension 
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Linq.Expressions;
-struct Money { public static bool operator ==(Money a, Money b) => true; public static bool operator !=(Money a, Money b) => false; public override bool Equals(object o) => true; public override int GetHashCode() => 0; }
-static class Own { public static bool Any(this List<int> xs) => false; public static int Count(this IEnumerable<int> xs, int dummy = 0) => 0; }
-class MyAttr : Attribute { public MyAttr(bool b) { } }
-class C
-{
-    bool A(double a, double b) => !(a < b);
-    bool A2(decimal? a) => !(a > 0);
-    bool B(bool? x) => x == true;
-    bool D(Money a, Money b) => !(a == b);
-    bool E(List<int> xs) => xs.Count() > 0;
-    bool F(string a, string b) => a.CompareTo(b) == 0;
-    [MyAttr(!(1 == 2))]
-    bool G() => true;
-    Expression<Func<int, bool>> H(int b) => a => !(a == b);
-    bool I(dynamic d) => !(d == 1);
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            using System.Linq.Expressions;
+            struct Money { public static bool operator ==(Money a, Money b) => true; public static bool operator !=(Money a, Money b) => false; public override bool Equals(object o) => true; public override int GetHashCode() => 0; }
+            static class Own { public static bool Any(this List<int> xs) => false; public static int Count(this IEnumerable<int> xs, int dummy = 0) => 0; }
+            class MyAttr : Attribute { public MyAttr(bool b) { } }
+            class C
+            {
+                bool A(double a, double b) => !(a < b);
+                bool A2(decimal? a) => !(a > 0);
+                bool B(bool? x) => x == true;
+                bool D(Money a, Money b) => !(a == b);
+                bool E(List<int> xs) => xs.Count() > 0;
+                bool F(string a, string b) => a.CompareTo(b) == 0;
+                [MyAttr(!(1 == 2))]
+                bool G() => true;
+                Expression<Func<int, bool>> H(int b) => a => !(a == b);
+                bool I(dynamic d) => !(d == 1);
+            }
+            """
 
     Assert.Equal<string list>([], firedText source (suggestCode code source))
 
@@ -90,19 +97,20 @@ let ``Count() > 0 becomes Any() only where the receiver has no size of its own``
     // on a sized receiver CA1829 asks for `.Length > 0`, and the `Any()`
     // would be CA1860's error under TreatWarningsAsErrors
     let source =
-        """
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    bool A(int[] xs) => xs.Count() > 0;
-    bool B(List<int> xs) => xs.Count() != 0;
-    bool D(IReadOnlyCollection<int> xs) => xs.Count() == 0;
-    bool E(string s) => s.Count() > 0;
-    bool F(IEnumerable<int> xs) => xs.Count() > 0;
-    bool G(List<int> xs) => xs.Distinct().Count() > 0;
-}
-"""
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                bool A(int[] xs) => xs.Count() > 0;
+                bool B(List<int> xs) => xs.Count() != 0;
+                bool D(IReadOnlyCollection<int> xs) => xs.Count() == 0;
+                bool E(string s) => s.Count() > 0;
+                bool F(IEnumerable<int> xs) => xs.Count() > 0;
+                bool G(List<int> xs) => xs.Distinct().Count() > 0;
+            }
+            """
 
     let fixedSource = fixAll code source
     Assert.Contains("bool A(int[] xs) => xs.Count() > 0;", fixedSource)
@@ -115,31 +123,32 @@ class C
 [<Fact>]
 let ``Count to Any needs a total predicate and an eager source, else it is a note`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-class Person { public int Age { get; set; } public int Id; public string Name { get; set; } = ""; }
-record Item(int Id);
-class C
-{
-    static IEnumerable<int> Gen() { yield return 1; throw new InvalidOperationException(); }
-    bool A(List<int> list) => list.Count(x => x > 0) > 0;
-    bool B(Item[] arr, int id) => arr.Where(x => x.Id == id).Count() > 0;
-    bool D(Person[] arr, int id) => arr.Where(x => x.Id == id).Count() > 0;
-    bool E(List<Person> people) => people.Count(p => p.Age > 18) > 0;
-    bool F(List<string> names) => names.Count(n => n.Length > 3 && n != "x") != 0;
-    bool G(List<Person> people) => people.Select(p => p.Age).Count() > 0;
-    bool H(List<int> xs) => xs.Count(x => x % 2 == 0) == 0;
-    bool E1(int?[] xs) => xs.Count(x => x.Value > 0) > 0;
-    bool E2(int?[] xs) => xs.Where(x => x.Value > 0).Count() > 0;
-    bool E3() => Gen().Count() > 0;
-    bool E4(List<int> xs) { int seen = 0; return xs.Count(x => { seen++; return x > 0; }) > 0; }
-    bool E5(string?[] xs) => xs.Count(x => x!.Length > 0) > 0;
-    bool E6(IEnumerable<int> xs) => xs.Count(x => x > 0) > 0;
-    bool E7(List<int> xs) => xs.Count(x => 10 / x > 1) > 0;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class Person { public int Age { get; set; } public int Id; public string Name { get; set; } = ""; }
+            record Item(int Id);
+            class C
+            {
+                static IEnumerable<int> Gen() { yield return 1; throw new InvalidOperationException(); }
+                bool A(List<int> list) => list.Count(x => x > 0) > 0;
+                bool B(Item[] arr, int id) => arr.Where(x => x.Id == id).Count() > 0;
+                bool D(Person[] arr, int id) => arr.Where(x => x.Id == id).Count() > 0;
+                bool E(List<Person> people) => people.Count(p => p.Age > 18) > 0;
+                bool F(List<string> names) => names.Count(n => n.Length > 3 && n != "x") != 0;
+                bool G(List<Person> people) => people.Select(p => p.Age).Count() > 0;
+                bool H(List<int> xs) => xs.Count(x => x % 2 == 0) == 0;
+                bool E1(int?[] xs) => xs.Count(x => x.Value > 0) > 0;
+                bool E2(int?[] xs) => xs.Where(x => x.Value > 0).Count() > 0;
+                bool E3() => Gen().Count() > 0;
+                bool E4(List<int> xs) { int seen = 0; return xs.Count(x => { seen++; return x > 0; }) > 0; }
+                bool E5(string?[] xs) => xs.Count(x => x!.Length > 0) > 0;
+                bool E6(IEnumerable<int> xs) => xs.Count(x => x > 0) > 0;
+                bool E7(List<int> xs) => xs.Count(x => 10 / x > 1) > 0;
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal(14, fired.Length)
@@ -167,35 +176,36 @@ let ``Count to Any takes string comparisons, Contains, a comparer and an interfa
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-public sealed class Item { public List<string> Tags { get; } = new(); public Money Price { get; set; } }
-public readonly struct Money { public readonly int V; public static implicit operator int(Money m) => m.V; }
-public sealed class Bag : IEnumerable<int>
-{
-    public IEnumerator<int> GetEnumerator() { yield return 1; }
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-}
-public sealed class Holder { public ICollection<int> C { get; set; } = new List<int>(); }
-class C
-{
-    static IEnumerable<int> Gen() { yield return 1; }
-    bool C06(List<string> names) => names.Count(n => n.StartsWith("A")) > 0;
-    bool C09(List<Item> list) => list.Count(x => x.Tags.Contains("a")) > 0;
-    bool C18(List<string> names) => names.Count(n => string.Equals(n, "ann", StringComparison.OrdinalIgnoreCase)) > 0;
-    bool K01() => Gen().AsQueryable().Count() > 0;
-    bool K03() { var bag = new Bag(); return bag.Count(x => x > 0) > 0; }
-    bool K04(object[] objs) => objs.Cast<string>().Count() > 0;
-    bool K06(int[] xs, IEqualityComparer<int> cmp) => xs.Distinct(cmp).Count() > 0;
-    bool K07(List<Item> items) => items.Count(i => i.Price > 0) > 0;
-    bool K11(List<Holder> hs) => hs.Count(h => h.C.Count > 0) > 0;
-    bool K12(string path) => File.ReadLines(path).Count() > 0;
-    bool K13(StringComparison how, List<string> names) => names.Count(n => n.Equals("a", how)) > 0;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.IO;
+            using System.Linq;
+            public sealed class Item { public List<string> Tags { get; } = new(); public Money Price { get; set; } }
+            public readonly struct Money { public readonly int V; public static implicit operator int(Money m) => m.V; }
+            public sealed class Bag : IEnumerable<int>
+            {
+                public IEnumerator<int> GetEnumerator() { yield return 1; }
+                System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+            }
+            public sealed class Holder { public ICollection<int> C { get; set; } = new List<int>(); }
+            class C
+            {
+                static IEnumerable<int> Gen() { yield return 1; }
+                bool C06(List<string> names) => names.Count(n => n.StartsWith("A")) > 0;
+                bool C09(List<Item> list) => list.Count(x => x.Tags.Contains("a")) > 0;
+                bool C18(List<string> names) => names.Count(n => string.Equals(n, "ann", StringComparison.OrdinalIgnoreCase)) > 0;
+                bool K01() => Gen().AsQueryable().Count() > 0;
+                bool K03() { var bag = new Bag(); return bag.Count(x => x > 0) > 0; }
+                bool K04(object[] objs) => objs.Cast<string>().Count() > 0;
+                bool K06(int[] xs, IEqualityComparer<int> cmp) => xs.Distinct(cmp).Count() > 0;
+                bool K07(List<Item> items) => items.Count(i => i.Price > 0) > 0;
+                bool K11(List<Holder> hs) => hs.Count(h => h.C.Count > 0) > 0;
+                bool K12(string path) => File.ReadLines(path).Count() > 0;
+                bool K13(StringComparison how, List<string> names) => names.Count(n => n.Equals("a", how)) > 0;
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal(11, fired.Length)
@@ -220,22 +230,23 @@ let ``Count to Any takes clock reads, method groups, case folds, conditional acc
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-public sealed class P { public DateTime When { get; set; } public string[] Tags { get; set; } = { "a" }; public string? Name { get; set; } }
-public sealed class Db { public IQueryable<P> Users { get; set; } = new List<P>().AsQueryable(); }
-class C
-{
-    bool T04(List<P> xs) => xs.Count(p => p.When < DateTime.UtcNow) > 0;
-    bool T05(string s) => s.Count(char.IsDigit) > 0;
-    bool T06(List<string> names) => names.Count(n => n.ToLower() == "ann") > 0;
-    bool T07(Db db) => db.Users.Count(u => u.When > DateTime.MinValue) > 0;
-    bool T11(List<P> xs) => xs.Count(p => p.Tags.Contains("a")) > 0;
-    bool Y01(List<P> xs) => xs.Count(p => p.Name?.Length > 0) > 0;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            public sealed class P { public DateTime When { get; set; } public string[] Tags { get; set; } = { "a" }; public string? Name { get; set; } }
+            public sealed class Db { public IQueryable<P> Users { get; set; } = new List<P>().AsQueryable(); }
+            class C
+            {
+                bool T04(List<P> xs) => xs.Count(p => p.When < DateTime.UtcNow) > 0;
+                bool T05(string s) => s.Count(char.IsDigit) > 0;
+                bool T06(List<string> names) => names.Count(n => n.ToLower() == "ann") > 0;
+                bool T07(Db db) => db.Users.Count(u => u.When > DateTime.MinValue) > 0;
+                bool T11(List<P> xs) => xs.Count(p => p.Tags.Contains("a")) > 0;
+                bool Y01(List<P> xs) => xs.Count(p => p.Name?.Length > 0) > 0;
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal(6, fired.Length)
@@ -253,23 +264,24 @@ let ``Count to Any takes a variable string argument, a user element's Equals or 
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-public sealed class K { public int V; }
-public sealed class P { public string Name { get; set; } = ""; public string? Sub { get; set; } public K Key { get; set; } = new K(); }
-class C
-{
-    bool T01(List<P> xs) => xs.Count(p => p.Name.Contains(p.Sub!)) > 0;
-    bool T03(P[] xs) => xs.Where(p => p.Name.IndexOf(p.Sub!) >= 0).Count() > 0;
-    bool T18(List<K> ks, K k) => ks.Count(x => new List<K> { k }.Contains(x)) > 0;
-    bool T18b(List<List<K>> xs, K k) => xs.Count(l => l.Contains(k)) > 0;
-    bool U01(List<K> xs) => xs.Distinct().Count() > 0;
-    bool U02(List<P> xs) => xs.GroupBy(p => p.Key).Count() > 0;
-    bool Kept(List<P> xs) => xs.GroupBy(p => p.Name).Count() > 0;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            public sealed class K { public int V; }
+            public sealed class P { public string Name { get; set; } = ""; public string? Sub { get; set; } public K Key { get; set; } = new K(); }
+            class C
+            {
+                bool T01(List<P> xs) => xs.Count(p => p.Name.Contains(p.Sub!)) > 0;
+                bool T03(P[] xs) => xs.Where(p => p.Name.IndexOf(p.Sub!) >= 0).Count() > 0;
+                bool T18(List<K> ks, K k) => ks.Count(x => new List<K> { k }.Contains(x)) > 0;
+                bool T18b(List<List<K>> xs, K k) => xs.Count(l => l.Contains(k)) > 0;
+                bool U01(List<K> xs) => xs.Distinct().Count() > 0;
+                bool U02(List<P> xs) => xs.GroupBy(p => p.Key).Count() > 0;
+                bool Kept(List<P> xs) => xs.GroupBy(p => p.Name).Count() > 0;
+            }
+            """
 
     // nothing here is positively known to throw after the first match: a null
     // argument to Contains, a user Equals or GetHashCode are the residual
@@ -295,27 +307,28 @@ let private allWithFailures (source: string) =
 [<Fact>]
 let ``a char divisor, dynamic, default, sizeof, checked, tuple and with operands do not silence the file's hints`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-record R(int A);
-class C
-{
-    bool CharDiv(List<int> xs) => xs.Count(x => x % 'a' == 0) > 0;
-    bool CharDiv2(List<int> xs) => xs.Count(x => x / 'A' > 1) > 0;
-    bool Dyn(List<dynamic> xs) => xs.Count(x => x > 1) > 0;
-    bool Def(List<int> xs) => xs.Count(x => x == default) > 0;
-    bool Size(List<int> xs) => xs.Count(x => x > sizeof(long)) > 0;
-    bool Name(List<string> xs) => xs.Count(x => x == nameof(xs)) > 0;
-    bool Chk(List<int> xs) => xs.Count(x => checked(x + 1) > 0) > 0;
-    bool Tup(List<(int, int)> xs) => xs.Count(x => x == (1, 2)) > 0;
-    bool With(List<R> xs) => xs.Count(x => (x with { A = 1 }).A > 0) > 0;
-    bool Alloc(List<int> xs) { Span<int> s = stackalloc int[1]; int n = s.Length; return xs.Count(x => x > n) > 0; }
-    bool Plain(List<int> xs) => xs.Count(x => x > 0) > 0;
-    bool Flag(int[] xs) { bool found = false; foreach (var x in xs) if (x % 'a' == 0) found = true; return found; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            record R(int A);
+            class C
+            {
+                bool CharDiv(List<int> xs) => xs.Count(x => x % 'a' == 0) > 0;
+                bool CharDiv2(List<int> xs) => xs.Count(x => x / 'A' > 1) > 0;
+                bool Dyn(List<dynamic> xs) => xs.Count(x => x > 1) > 0;
+                bool Def(List<int> xs) => xs.Count(x => x == default) > 0;
+                bool Size(List<int> xs) => xs.Count(x => x > sizeof(long)) > 0;
+                bool Name(List<string> xs) => xs.Count(x => x == nameof(xs)) > 0;
+                bool Chk(List<int> xs) => xs.Count(x => checked(x + 1) > 0) > 0;
+                bool Tup(List<(int, int)> xs) => xs.Count(x => x == (1, 2)) > 0;
+                bool With(List<R> xs) => xs.Count(x => (x with { A = 1 }).A > 0) > 0;
+                bool Alloc(List<int> xs) { Span<int> s = stackalloc int[1]; int n = s.Length; return xs.Count(x => x > n) > 0; }
+                bool Plain(List<int> xs) => xs.Count(x => x > 0) > 0;
+                bool Flag(int[] xs) { bool found = false; foreach (var x in xs) if (x % 'a' == 0) found = true; return found; }
+            }
+            """
 
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
@@ -334,37 +347,38 @@ class C
 [<Fact>]
 let ``Count to Any follows a source to its visible origin and a predicate's user method to its effects`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-public sealed class Col : IEnumerable<int>
-{
-    public IEnumerator<int> GetEnumerator() => new En();
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
-    sealed class En : IEnumerator<int> { int _i; public int Current => _i; object System.Collections.IEnumerator.Current => _i; public bool MoveNext() { Console.Write(_i); return ++_i <= 2; } public void Reset() { } public void Dispose() { } }
-}
-class C
-{
-    static int calls;
-    static readonly List<object> objs = new() { 1, "two" };
-    static IEnumerable<int> Gen() { yield return 1; yield return 2; }
-    static IEnumerable<int> Items => Gen();
-    static IEnumerable<int> Casted => objs.Cast<int>();
-    static bool Check(int x) { calls++; return x > 0; }
-    static bool IsValid(int x) => x > 0;
-    bool C01() => Items.Count(x => x > 0) > 0;
-    bool C02() { var xs = Gen(); return xs.Count(x => x > 0) > 0; }
-    bool C03() => Casted.Count(x => x > 0) > 0;
-    bool C04(List<int> xs) => xs.Count(x => Check(x)) > 0;
-    bool C05(List<int> xs) => xs.Count(Check) > 0;
-    bool C07() => new Col().Count(x => x > 0) > 0;
-    bool C10() { var xs = Gen(); return xs.Where(x => x > 0).Count() > 0; }
-    bool K01(List<int> xs) => xs.Count(IsValid) > 0;
-    bool C08(List<int> xs) => xs.Count(x => IsValid(x)) > 0;
-    bool C11(IEnumerable<int> xs) => xs.Count(x => x > 0) > 0;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            public sealed class Col : IEnumerable<int>
+            {
+                public IEnumerator<int> GetEnumerator() => new En();
+                System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+                sealed class En : IEnumerator<int> { int _i; public int Current => _i; object System.Collections.IEnumerator.Current => _i; public bool MoveNext() { Console.Write(_i); return ++_i <= 2; } public void Reset() { } public void Dispose() { } }
+            }
+            class C
+            {
+                static int calls;
+                static readonly List<object> objs = new() { 1, "two" };
+                static IEnumerable<int> Gen() { yield return 1; yield return 2; }
+                static IEnumerable<int> Items => Gen();
+                static IEnumerable<int> Casted => objs.Cast<int>();
+                static bool Check(int x) { calls++; return x > 0; }
+                static bool IsValid(int x) => x > 0;
+                bool C01() => Items.Count(x => x > 0) > 0;
+                bool C02() { var xs = Gen(); return xs.Count(x => x > 0) > 0; }
+                bool C03() => Casted.Count(x => x > 0) > 0;
+                bool C04(List<int> xs) => xs.Count(x => Check(x)) > 0;
+                bool C05(List<int> xs) => xs.Count(Check) > 0;
+                bool C07() => new Col().Count(x => x > 0) > 0;
+                bool C10() { var xs = Gen(); return xs.Where(x => x > 0).Count() > 0; }
+                bool K01(List<int> xs) => xs.Count(IsValid) > 0;
+                bool C08(List<int> xs) => xs.Count(x => IsValid(x)) > 0;
+                bool C11(IEnumerable<int> xs) => xs.Count(x => x > 0) > 0;
+            }
+            """
 
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
@@ -386,57 +400,58 @@ let ``Count to Any takes a materialised source, a callee's own values and an in 
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-public sealed class Tag { public int N { get; set; } public int M; }
-public sealed class Col : IEnumerable<int>
-{
-    public int Calls;
-    IEnumerator<int> IEnumerable<int>.GetEnumerator() { Calls++; yield return 1; Calls++; yield return 2; }
-    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
-}
-public record P(string Name, int N);
-public sealed class Bag
-{
-    public int Calls;
-    static int _limit = 1;
-    readonly IEnumerable<int>? _items;
-    readonly HashSet<int> _set;
-    IEnumerable<int> Gen() { Calls++; yield return 1; Calls++; yield return 2; }
-    public Bag() { _items = Gen(); _set = Gen().ToHashSet(); }
-    public IEnumerable<int> Lazy { get { Calls++; yield return 1; } }
-    public IEnumerable<int> Either => Calls >= 0 ? Gen() : new List<int>();
-    public List<int> Snapshot => Gen().ToList();
-    static bool Fresh(int x) { var t = new Tag(); t.N = x; var u = new Tag { M = x }; var sb = new StringBuilder(); sb.Length = 0; return t.N + u.M > 2; }
-    static bool Touch(Tag t) { t.N = 1; return t.N > 0; }
-    static bool TryLookup(string k, out int v) { v = k.Length; return v > 0; }
-    static void Bump(ref int n) => n++;
-    static bool ViaRef(int x) { var n = x; Bump(ref n); return n > 2; }
-    static bool Inner(int x, in int limit) => x > limit;
-    static bool Check(int x) => Inner(x, in _limit);
-    bool A01() { var list = Gen().ToList(); return list.Count(x => x > 1) > 0; }
-    bool A02() => Gen().ToList().Count(x => x > 1) > 0;
-    bool A03() => Snapshot.Count(x => x > 1) > 0;
-    bool A04() => _set.Count(x => x > 1) > 0;
-    bool B01(List<int> xs) => xs.Count(x => Fresh(x)) > 0;
-    bool B02(List<string> xs) => xs.Count(k => TryLookup(k, out var v) && v > 1) > 0;
-    bool B03(List<int> xs) => xs.Count(x => ViaRef(x)) > 0;
-    bool B04(List<int> xs) => xs.Count(x => Check(x)) > 0;
-    bool B05(List<P> xs) => xs.Count(p => (p with { N = 3 }).N == 3) > 0;
-    bool B06(List<int> xs) => xs.Count(x => new Tag { N = x }.N > 1) > 0;
-    bool K01(List<Tag> xs) => xs.Count(t => Touch(t)) > 0;
-    bool K02(List<string> xs) => xs.Count(k => TryLookup(k, out Calls)) > 0;
-    bool K03() => Lazy.Count(x => x > 0) > 0;
-    bool K04() => Either.Count(x => x > 0) > 0;
-    bool K05() => _items!.Count(x => x > 0) > 0;
-    bool K06() => (_items ?? Enumerable.Empty<int>()).Count(x => x > 0) > 0;
-    bool K07() { var xs = Calls >= 0 ? Gen() : new List<int>(); return xs.Count(x => x > 0) > 0; }
-    bool K08() => new Col().Count(x => x > 0) > 0;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            using System.Text;
+            public sealed class Tag { public int N { get; set; } public int M; }
+            public sealed class Col : IEnumerable<int>
+            {
+                public int Calls;
+                IEnumerator<int> IEnumerable<int>.GetEnumerator() { Calls++; yield return 1; Calls++; yield return 2; }
+                System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => ((IEnumerable<int>)this).GetEnumerator();
+            }
+            public record P(string Name, int N);
+            public sealed class Bag
+            {
+                public int Calls;
+                static int _limit = 1;
+                readonly IEnumerable<int>? _items;
+                readonly HashSet<int> _set;
+                IEnumerable<int> Gen() { Calls++; yield return 1; Calls++; yield return 2; }
+                public Bag() { _items = Gen(); _set = Gen().ToHashSet(); }
+                public IEnumerable<int> Lazy { get { Calls++; yield return 1; } }
+                public IEnumerable<int> Either => Calls >= 0 ? Gen() : new List<int>();
+                public List<int> Snapshot => Gen().ToList();
+                static bool Fresh(int x) { var t = new Tag(); t.N = x; var u = new Tag { M = x }; var sb = new StringBuilder(); sb.Length = 0; return t.N + u.M > 2; }
+                static bool Touch(Tag t) { t.N = 1; return t.N > 0; }
+                static bool TryLookup(string k, out int v) { v = k.Length; return v > 0; }
+                static void Bump(ref int n) => n++;
+                static bool ViaRef(int x) { var n = x; Bump(ref n); return n > 2; }
+                static bool Inner(int x, in int limit) => x > limit;
+                static bool Check(int x) => Inner(x, in _limit);
+                bool A01() { var list = Gen().ToList(); return list.Count(x => x > 1) > 0; }
+                bool A02() => Gen().ToList().Count(x => x > 1) > 0;
+                bool A03() => Snapshot.Count(x => x > 1) > 0;
+                bool A04() => _set.Count(x => x > 1) > 0;
+                bool B01(List<int> xs) => xs.Count(x => Fresh(x)) > 0;
+                bool B02(List<string> xs) => xs.Count(k => TryLookup(k, out var v) && v > 1) > 0;
+                bool B03(List<int> xs) => xs.Count(x => ViaRef(x)) > 0;
+                bool B04(List<int> xs) => xs.Count(x => Check(x)) > 0;
+                bool B05(List<P> xs) => xs.Count(p => (p with { N = 3 }).N == 3) > 0;
+                bool B06(List<int> xs) => xs.Count(x => new Tag { N = x }.N > 1) > 0;
+                bool K01(List<Tag> xs) => xs.Count(t => Touch(t)) > 0;
+                bool K02(List<string> xs) => xs.Count(k => TryLookup(k, out Calls)) > 0;
+                bool K03() => Lazy.Count(x => x > 0) > 0;
+                bool K04() => Either.Count(x => x > 0) > 0;
+                bool K05() => _items!.Count(x => x > 0) > 0;
+                bool K06() => (_items ?? Enumerable.Empty<int>()).Count(x => x > 0) > 0;
+                bool K07() { var xs = Calls >= 0 ? Gen() : new List<int>(); return xs.Count(x => x > 0) > 0; }
+                bool K08() => new Col().Count(x => x > 0) > 0;
+            }
+            """
 
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
@@ -475,7 +490,17 @@ public sealed class Bag
 [<Fact>]
 let ``error types in a predicate do not silence the file's hints`` () =
     let source =
-        "using System.Collections.Generic;\nusing System.Linq;\nclass C\n{\n    bool Broken(List<Missing> xs) => xs.Count(x => x.Value > 0) > 0;\n    bool Plain(List<int> xs) => xs.Count(x => x > 0) > 0;\n}\n"
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                bool Broken(List<Missing> xs) => xs.Count(x => x.Value > 0) > 0;
+                bool Plain(List<int> xs) => xs.Count(x => x > 0) > 0;
+            }
+
+            """
 
     let compilation, tree =
         compileRaw Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest source
@@ -497,15 +522,16 @@ let ``error types in a predicate do not silence the file's hints`` () =
 [<Fact>]
 let ``Count to Any takes CountBy with or without a comparer`` () =
     let source =
-        """
-using System.Collections.Generic;
-using System.Linq;
-class C
-{
-    bool A(List<string> xs) => xs.CountBy(x => x.Length).Count() > 0;
-    bool B(List<string> xs, IEqualityComparer<int> cmp) => xs.CountBy(x => x.Length, cmp).Count() > 0;
-}
-"""
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                bool A(List<string> xs) => xs.CountBy(x => x.Length).Count() > 0;
+                bool B(List<string> xs, IEqualityComparer<int> cmp) => xs.CountBy(x => x.Length, cmp).Count() > 0;
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal(2, fired.Length)
@@ -517,22 +543,23 @@ class C
 [<Fact>]
 let ``Count to Any keeps the fix in a nullable-disabled file and on stored sequences`` () =
     let source =
-        """
-#nullable disable
-using System.Collections.Generic;
-using System.Linq;
-class Person { public int Age { get; set; } }
-class C
-{
-    IEnumerable<Person> people = new List<Person>();
-    IEnumerable<int> Numbers { get; } = new List<int>();
-    static List<int> Load() => new List<int>();
-    bool A() => people.Count(p => p.Age > 18) > 0;
-    bool B(List<string> names) => names.Count(s => s.Length > 3) > 0;
-    bool D() => this.Numbers.Count() > 0;
-    bool E() => Load().Count(x => x > 0) > 0;
-}
-"""
+        csharp
+            """
+            #nullable disable
+            using System.Collections.Generic;
+            using System.Linq;
+            class Person { public int Age { get; set; } }
+            class C
+            {
+                IEnumerable<Person> people = new List<Person>();
+                IEnumerable<int> Numbers { get; } = new List<int>();
+                static List<int> Load() => new List<int>();
+                bool A() => people.Count(p => p.Age > 18) > 0;
+                bool B(List<string> names) => names.Count(s => s.Length > 3) > 0;
+                bool D() => this.Numbers.Count() > 0;
+                bool E() => Load().Count(x => x > 0) > 0;
+            }
+            """
 
     let fired = suggestCode code source
     Assert.Equal(4, fired.Length)
@@ -546,16 +573,17 @@ class C
 [<Fact>]
 let ``only the outermost of nested matches fires and effectful bindings are not duplicated`` () =
     let source =
-        """
-using System;
-class C
-{
-    int calls;
-    int Next() => ++calls;
-    bool A(int a) => !(!(a == 1) == false);
-    bool B() => !(Next() == 1);
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                int calls;
+                int Next() => ++calls;
+                bool A(int a) => !(!(a == 1) == false);
+                bool B() => !(Next() == 1);
+            }
+            """
 
     let fired = suggestCode code source
     // A: one suggestion for the whole expression, not one per nested match
@@ -573,17 +601,28 @@ let ``a custom hints file adds rules without BCL checks`` () =
 
     System.IO.Directory.CreateDirectory dir |> ignore
     let hints = System.IO.Path.Combine(dir, "hints.txt")
-    System.IO.File.WriteAllText(hints, "# own helpers\nOwn.IsNull(x) ===> x is null\nOwn.Twice(a) ===> a * 2\n")
+
+    System.IO.File.WriteAllText(
+        hints,
+        csharp
+            """
+            # own helpers
+            Own.IsNull(x) ===> x is null
+            Own.Twice(a) ===> a * 2
+
+            """
+    )
 
     let source =
-        """
-static class Own { public static bool IsNull(object o) => o == null; public static int Twice(int a) => a * 2; }
-class C
-{
-    bool A(object o) => Own.IsNull(o);
-    int B(int a) => Own.Twice(a + 1);
-}
-"""
+        csharp
+            """
+            static class Own { public static bool IsNull(object o) => o == null; public static int Twice(int a) => a * 2; }
+            class C
+            {
+                bool A(object o) => Own.IsNull(o);
+                int B(int a) => Own.Twice(a + 1);
+            }
+            """
 
     let options =
         Some(

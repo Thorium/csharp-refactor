@@ -170,17 +170,18 @@ let ``CR0125 comments a retired protocol out of the flags in the editor, and a s
 [<Fact>]
 let ``CR0109 per_call false keeps only the hoists out of loops and per-element lambdas`` () =
     let source =
-        """
-using System.Collections.Generic;
-using System.Linq;
-using System.Text.RegularExpressions;
-class C
-{
-    bool Once(string s) => Regex.IsMatch(s, @"^\d+$");
-    int Looped(List<string> xs) { var n = 0; foreach (var x in xs) if (Regex.IsMatch(x, @"^\w+$")) n++; return n; }
-    int Mapped(List<string> xs) => xs.Count(x => Regex.IsMatch(x, @"^\s+$"));
-}
-"""
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Linq;
+            using System.Text.RegularExpressions;
+            class C
+            {
+                bool Once(string s) => Regex.IsMatch(s, @"^\d+$");
+                int Looped(List<string> xs) { var n = 0; foreach (var x in xs) if (Regex.IsMatch(x, @"^\w+$")) n++; return n; }
+                int Mapped(List<string> xs) => xs.Count(x => Regex.IsMatch(x, @"^\s+$"));
+            }
+            """
 
     Assert.Equal(3, (suggestCode "CR0109" source).Length)
 
@@ -198,27 +199,28 @@ let ``CR0040 swaps only to a sibling the call binds to, and never under a catch 
     // would take the rewritten call; `.Result` wraps the fault the catch
     // expects, the sibling throws it bare
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-class Base
-{
-    public Task<string> LoadAsync(int id) => Task.FromResult("async");
-    public string Load(int id) => "base";
-}
-class Derived : Base { public string Load(object id) => "derived"; }
-class Svc
-{
-    public Task<string> FetchAsync(int id) => Task.FromResult("async");
-    public string Fetch(int id) => "member";
-    public Task<string> ReadAsync(int id) => Task.FromResult("async");
-    public string Read(int id) => "read";
-    string A(Derived d) => d.LoadAsync(1).Result;
-    string B() { string Fetch(int y) => "local"; return FetchAsync(1).Result + Fetch(0); }
-    string D(int x) { try { return ReadAsync(x).Result; } catch (AggregateException) { return "handled"; } }
-    string E(Base b) => b.LoadAsync(2).Result;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            class Base
+            {
+                public Task<string> LoadAsync(int id) => Task.FromResult("async");
+                public string Load(int id) => "base";
+            }
+            class Derived : Base { public string Load(object id) => "derived"; }
+            class Svc
+            {
+                public Task<string> FetchAsync(int id) => Task.FromResult("async");
+                public string Fetch(int id) => "member";
+                public Task<string> ReadAsync(int id) => Task.FromResult("async");
+                public string Read(int id) => "read";
+                string A(Derived d) => d.LoadAsync(1).Result;
+                string B() { string Fetch(int y) => "local"; return FetchAsync(1).Result + Fetch(0); }
+                string D(int x) { try { return ReadAsync(x).Result; } catch (AggregateException) { return "handled"; } }
+                string E(Base b) => b.LoadAsync(2).Result;
+            }
+            """
 
     let swapped =
         fixAllWith (with' "csharp_refactor.CR0040.sync_swap" "true") "CR0040" source
@@ -232,17 +234,18 @@ class Svc
 [<Fact>]
 let ``CR0125 retires a protocol only from the flags being switched on, never from a mask or a test`` () =
     let source =
-        """
-using System.Net;
-class C
-{
-#pragma warning disable SYSLIB0014
-    void Off() { ServicePointManager.SecurityProtocol &= ~(SecurityProtocolType.Ssl3 | SecurityProtocolType.Tls11); }
-    bool Test() => (ServicePointManager.SecurityProtocol & (SecurityProtocolType.Tls | SecurityProtocolType.Tls11)) != 0;
-    void On() { ServicePointManager.SecurityProtocol = (SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11); }
-#pragma warning restore SYSLIB0014
-}
-"""
+        csharp
+            """
+            using System.Net;
+            class C
+            {
+            #pragma warning disable SYSLIB0014
+                void Off() { ServicePointManager.SecurityProtocol &= ~(SecurityProtocolType.Ssl3 | SecurityProtocolType.Tls11); }
+                bool Test() => (ServicePointManager.SecurityProtocol & (SecurityProtocolType.Tls | SecurityProtocolType.Tls11)) != 0;
+                void On() { ServicePointManager.SecurityProtocol = (SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11); }
+            #pragma warning restore SYSLIB0014
+            }
+            """
 
     let dropped =
         fixAllWith (with' "csharp_refactor.CR0125.drop_legacy_protocols" "true") "CR0125" source

@@ -8,27 +8,28 @@ open CSharp.Refactor.Tests.Harness
 [<Fact>]
 let ``blocking drains inside an async body become awaits, complete tasks and no-bind zones stay`` () =
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-class C
-{
-    readonly object gate = new();
-    async Task<int> A(Task<int> t) { var x = t.Result; return x + 1; }
-    async Task B(Task t) { t.Wait(); }
-    async Task<int> D(Task<int> t) => t.GetAwaiter().GetResult() + 1;
-    async Task E(Task a, Task b) { Task.WaitAll(a, b); }
-    async Task<int> F(Task<int> t) => (await Task.Run(() => t.Result)) + 1;
-    async Task<int> G(Task<int> t) => t.Result.ToString().Length;
-    async Task<int> H(Task<int> t) { if (t.IsCompleted) return t.Result; return await t; }
-    async Task<int> I() { var t = Task.FromResult(1); return t.Result; }
-    async Task<int> J(Task<int> t) { lock (gate) { return t.Result; } }
-    async Task<int> K(Task<int> t) { try { return t.Result; } catch (AggregateException) { return 0; } }
-    async Task<int> L(Task<int> t) { Func<int> f = () => t.Result; return f(); }
-    async Task M(Task a, Task b) { Task.WaitAll(new[] { a, b }, 100); }
-    async Task<int> N(Task<int> a, Task<int> b) { await Task.WhenAll(a, b); return a.Result + b.Result; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            class C
+            {
+                readonly object gate = new();
+                async Task<int> A(Task<int> t) { var x = t.Result; return x + 1; }
+                async Task B(Task t) { t.Wait(); }
+                async Task<int> D(Task<int> t) => t.GetAwaiter().GetResult() + 1;
+                async Task E(Task a, Task b) { Task.WaitAll(a, b); }
+                async Task<int> F(Task<int> t) => (await Task.Run(() => t.Result)) + 1;
+                async Task<int> G(Task<int> t) => t.Result.ToString().Length;
+                async Task<int> H(Task<int> t) { if (t.IsCompleted) return t.Result; return await t; }
+                async Task<int> I() { var t = Task.FromResult(1); return t.Result; }
+                async Task<int> J(Task<int> t) { lock (gate) { return t.Result; } }
+                async Task<int> K(Task<int> t) { try { return t.Result; } catch (AggregateException) { return 0; } }
+                async Task<int> L(Task<int> t) { Func<int> f = () => t.Result; return f(); }
+                async Task M(Task a, Task b) { Task.WaitAll(new[] { a, b }, 100); }
+                async Task<int> N(Task<int> a, Task<int> b) { await Task.WhenAll(a, b); return a.Result + b.Result; }
+            }
+            """
 
     let fired = suggestCode "CR0040" source
     let fixedSource = fixAll "CR0040" source
@@ -57,37 +58,38 @@ class C
 [<Fact>]
 let ``a drain behind a completion test in the same condition, or a WhenAny winner, is a read`` () =
     let source =
-        """
-using System.Threading.Tasks;
-class C
-{
-    async Task<bool> A(Task<bool> work, Task timer)
-    {
-        var winner = await Task.WhenAny(work, timer);
-        if (winner == work && work.IsCompleted && work.Result) return true;
-        return false;
-    }
-    async Task<bool> B(Task<bool> work, Task timer)
-    {
-        var winner = await Task.WhenAny(work, timer).ConfigureAwait(false);
-        return winner == work && work.Result;
-    }
-    async Task<int> D(Task<int> t) => !t.IsCompleted ? 0 : t.Result;
-    async Task<int> E(Task<int> t) => !t.IsCompleted || t.Result > 0 ? 1 : 2;
-    async Task<int> F(Task<int> t) { if (!t.IsCompleted) { return t.Result; } return 0; }
-    async Task<bool> G(Task<bool> work, Task timer)
-    {
-        var winner = await Task.WhenAny(work, timer);
-        winner = timer;
-        return winner == work && work.Result;
-    }
-    async Task<bool> H(Task<bool> work, Task timer)
-    {
-        var winner = await Task.WhenAny(work, timer);
-        return winner != work && work.Result;
-    }
-}
-"""
+        csharp
+            """
+            using System.Threading.Tasks;
+            class C
+            {
+                async Task<bool> A(Task<bool> work, Task timer)
+                {
+                    var winner = await Task.WhenAny(work, timer);
+                    if (winner == work && work.IsCompleted && work.Result) return true;
+                    return false;
+                }
+                async Task<bool> B(Task<bool> work, Task timer)
+                {
+                    var winner = await Task.WhenAny(work, timer).ConfigureAwait(false);
+                    return winner == work && work.Result;
+                }
+                async Task<int> D(Task<int> t) => !t.IsCompleted ? 0 : t.Result;
+                async Task<int> E(Task<int> t) => !t.IsCompleted || t.Result > 0 ? 1 : 2;
+                async Task<int> F(Task<int> t) { if (!t.IsCompleted) { return t.Result; } return 0; }
+                async Task<bool> G(Task<bool> work, Task timer)
+                {
+                    var winner = await Task.WhenAny(work, timer);
+                    winner = timer;
+                    return winner == work && work.Result;
+                }
+                async Task<bool> H(Task<bool> work, Task timer)
+                {
+                    var winner = await Task.WhenAny(work, timer);
+                    return winner != work && work.Result;
+                }
+            }
+            """
 
     let fixedSource = fixAll "CR0040" source
     Assert.Contains("if (winner == work && work.IsCompleted && work.Result) return true;", fixedSource)
@@ -97,21 +99,31 @@ class C
     // a negated test proves nothing in its then-branch, a reassigned winner
     // nothing, and `!=` nothing in the right operand of `&&`
     Assert.Contains("if (!t.IsCompleted) { return await t; }", fixedSource)
-    Assert.Contains("winner = timer;\n        return winner == work && await work;", fixedSource.Replace("\r\n", "\n"))
+
+    Assert.Contains(
+        csharp
+            """
+            winner = timer;
+                    return winner == work && await work;
+            """,
+        fixedSource.Replace("\r\n", "\n")
+    )
+
     Assert.Contains("return winner != work && await work;", fixedSource)
 
 [<Fact>]
 let ``a drain outside an async body is the boundary note, except on Main's spine`` () =
     let source =
-        """
-using System.Threading.Tasks;
-class C
-{
-    int A(Task<int> t) => t.Result;
-    static void Main() { var r = Task.FromResult(1).Result; Compute().Wait(); }
-    static Task Compute() => Task.CompletedTask;
-}
-"""
+        csharp
+            """
+            using System.Threading.Tasks;
+            class C
+            {
+                int A(Task<int> t) => t.Result;
+                static void Main() { var r = Task.FromResult(1).Result; Compute().Wait(); }
+                static Task Compute() => Task.CompletedTask;
+            }
+            """
 
     let fired = suggestCode "CR0040" source
     Assert.Equal<string list>([ "t.Result" ], firedText source fired)
@@ -122,36 +134,37 @@ class C
 [<Fact>]
 let ``forgotten tasks, async void lambdas and single-task combinators are noted; a token in scope is passed`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-class C
-{
-    Task SaveAsync(CancellationToken ct = default) => Task.CompletedTask;
-    void A() { SaveAsync(); }
-    void B() { _ = SaveAsync(); }
-    void D() { SaveAsync().ContinueWith(t => Console.WriteLine(t.Exception), TaskContinuationOptions.OnlyOnFaulted); }
-    void E() { Task.Run(async () => { try { await SaveAsync(); } catch (Exception) { } }); }
-    async Task F() { SaveAsync(); }
-    void G(List<int> xs) { xs.ForEach(async x => await SaveAsync()); }
-    void H() { Task.Run(async () => await SaveAsync()); }
-    Task I(Task t) => Task.WhenAll(new[] { t });
-    Task J(Task a, Task b) => Task.WhenAll(a, b);
-    Task K(CancellationToken ct) => SaveAsync(CancellationToken.None);
-    Task L(CancellationToken ct) => SaveAsync(default);
-    Task M(CancellationToken ct) => Task.Run(() => 1, CancellationToken.None);
-    async Task N(CancellationToken ct) { try { await SaveAsync(ct); } finally { await SaveAsync(CancellationToken.None); } }
-    Task O(CancellationToken a, CancellationToken b) => SaveAsync(CancellationToken.None);
-    async Task P(CancellationToken ct)
-    {
-        // None on purpose: a client disconnect must not cancel this cleanup
-        await SaveAsync(CancellationToken.None);
-        try { await SaveAsync(CancellationToken.None); } catch (Exception) { }
-    }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                Task SaveAsync(CancellationToken ct = default) => Task.CompletedTask;
+                void A() { SaveAsync(); }
+                void B() { _ = SaveAsync(); }
+                void D() { SaveAsync().ContinueWith(t => Console.WriteLine(t.Exception), TaskContinuationOptions.OnlyOnFaulted); }
+                void E() { Task.Run(async () => { try { await SaveAsync(); } catch (Exception) { } }); }
+                async Task F() { SaveAsync(); }
+                void G(List<int> xs) { xs.ForEach(async x => await SaveAsync()); }
+                void H() { Task.Run(async () => await SaveAsync()); }
+                Task I(Task t) => Task.WhenAll(new[] { t });
+                Task J(Task a, Task b) => Task.WhenAll(a, b);
+                Task K(CancellationToken ct) => SaveAsync(CancellationToken.None);
+                Task L(CancellationToken ct) => SaveAsync(default);
+                Task M(CancellationToken ct) => Task.Run(() => 1, CancellationToken.None);
+                async Task N(CancellationToken ct) { try { await SaveAsync(ct); } finally { await SaveAsync(CancellationToken.None); } }
+                Task O(CancellationToken a, CancellationToken b) => SaveAsync(CancellationToken.None);
+                async Task P(CancellationToken ct)
+                {
+                    // None on purpose: a client disconnect must not cancel this cleanup
+                    await SaveAsync(CancellationToken.None);
+                    try { await SaveAsync(CancellationToken.None); } catch (Exception) { }
+                }
+            }
+            """
 
     let texts (code: string) =
         firedText source (suggestCode code source)
@@ -169,46 +182,48 @@ let ``CR0044 leaves a background receipt mail whose started body catches its own
     ()
     =
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-interface IMailer { Task SendReceiptAsync(string email, string orderId); }
-interface IErrorLog { void Write(Exception ex); }
-class CheckoutService
-{
-    readonly IMailer mailer;
-    readonly IErrorLog errors;
-    public CheckoutService(IMailer mailer, IErrorLog errors) { this.mailer = mailer; this.errors = errors; }
-    public void CompleteOrder(string orderId, string email)
-    {
-        Task.Run(async () =>
-        {
-            try { await mailer.SendReceiptAsync(email, orderId); }
-            catch (Exception ex) { errors.Write(ex); }
-        });
-    }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            interface IMailer { Task SendReceiptAsync(string email, string orderId); }
+            interface IErrorLog { void Write(Exception ex); }
+            class CheckoutService
+            {
+                readonly IMailer mailer;
+                readonly IErrorLog errors;
+                public CheckoutService(IMailer mailer, IErrorLog errors) { this.mailer = mailer; this.errors = errors; }
+                public void CompleteOrder(string orderId, string email)
+                {
+                    Task.Run(async () =>
+                    {
+                        try { await mailer.SendReceiptAsync(email, orderId); }
+                        catch (Exception ex) { errors.Write(ex); }
+                    });
+                }
+            }
+            """
 
     Assert.Empty(suggestCode "CR0044" source)
 
 [<Fact>]
 let ``CR0054 never sweeps WhenAll of one download: the array's Length would silently become the text's`` () =
     let source =
-        """
-using System.Threading.Tasks;
-interface IDocumentStore { Task<string> DownloadAsync(string id); }
-class ExportJob
-{
-    readonly IDocumentStore store;
-    public ExportJob(IDocumentStore store) { this.store = store; }
-    public async Task<int> CountExportedAsync(string id)
-    {
-        var documents = await Task.WhenAll(new[] { store.DownloadAsync(id) });
-        return documents.Length;
-    }
-}
-"""
+        csharp
+            """
+            using System.Threading.Tasks;
+            interface IDocumentStore { Task<string> DownloadAsync(string id); }
+            class ExportJob
+            {
+                readonly IDocumentStore store;
+                public ExportJob(IDocumentStore store) { this.store = store; }
+                public async Task<int> CountExportedAsync(string id)
+                {
+                    var documents = await Task.WhenAll(new[] { store.DownloadAsync(id) });
+                    return documents.Length;
+                }
+            }
+            """
 
     let fired = suggestCode "CR0054" source
     Assert.Single fired |> ignore
@@ -218,27 +233,28 @@ class ExportJob
 [<Fact>]
 let ``CR0054 leaves WhenAny and WaitAny of one upload: a failed upload must not start throwing at the caller`` () =
     let source =
-        """
-using System.Threading.Tasks;
-interface IUploader { Task UploadAsync(string path); }
-class BackupJob
-{
-    readonly IUploader uploader;
-    public BackupJob(IUploader uploader) { this.uploader = uploader; }
-    public async Task<bool> FinishedAsync(string path)
-    {
-        var upload = uploader.UploadAsync(path);
-        var first = await Task.WhenAny(new[] { upload });
-        return first == upload;
-    }
-    public int WaitFor(string path)
-    {
-        var upload = uploader.UploadAsync(path);
-        return Task.WaitAny(new[] { upload });
-    }
-    public Task WaitAllFor(string path) => Task.WhenAll(new[] { uploader.UploadAsync(path) });
-}
-"""
+        csharp
+            """
+            using System.Threading.Tasks;
+            interface IUploader { Task UploadAsync(string path); }
+            class BackupJob
+            {
+                readonly IUploader uploader;
+                public BackupJob(IUploader uploader) { this.uploader = uploader; }
+                public async Task<bool> FinishedAsync(string path)
+                {
+                    var upload = uploader.UploadAsync(path);
+                    var first = await Task.WhenAny(new[] { upload });
+                    return first == upload;
+                }
+                public int WaitFor(string path)
+                {
+                    var upload = uploader.UploadAsync(path);
+                    return Task.WaitAny(new[] { upload });
+                }
+                public Task WaitAllFor(string path) => Task.WhenAll(new[] { uploader.UploadAsync(path) });
+            }
+            """
 
     Assert.Equal<string list>(
         [ "Task.WhenAll(new[] { uploader.UploadAsync(path) })" ],
@@ -248,33 +264,34 @@ class BackupJob
 [<Fact>]
 let ``CR0055 leaves CancellationToken.None in a catch block: a cancelled payment must still roll back`` () =
     let source =
-        """
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-interface ILedger
-{
-    Task PostAsync(Guid batch, decimal amount, CancellationToken ct);
-    Task RollbackAsync(Guid batch, CancellationToken ct);
-}
-class PaymentBatch
-{
-    readonly ILedger ledger;
-    public PaymentBatch(ILedger ledger) { this.ledger = ledger; }
-    public async Task CommitAsync(Guid batch, decimal amount, CancellationToken ct)
-    {
-        try
-        {
-            await ledger.PostAsync(batch, amount, ct);
-        }
-        catch (Exception)
-        {
-            await ledger.RollbackAsync(batch, CancellationToken.None);
-            throw;
-        }
-    }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading;
+            using System.Threading.Tasks;
+            interface ILedger
+            {
+                Task PostAsync(Guid batch, decimal amount, CancellationToken ct);
+                Task RollbackAsync(Guid batch, CancellationToken ct);
+            }
+            class PaymentBatch
+            {
+                readonly ILedger ledger;
+                public PaymentBatch(ILedger ledger) { this.ledger = ledger; }
+                public async Task CommitAsync(Guid batch, decimal amount, CancellationToken ct)
+                {
+                    try
+                    {
+                        await ledger.PostAsync(batch, amount, ct);
+                    }
+                    catch (Exception)
+                    {
+                        await ledger.RollbackAsync(batch, CancellationToken.None);
+                        throw;
+                    }
+                }
+            }
+            """
 
     Assert.Empty(suggestCode "CR0055" source)
 
@@ -283,24 +300,25 @@ class PaymentBatch
 [<Fact>]
 let ``a method that only awaits an async call returns the task, one with a using or ConfigureAwait stays`` () =
     let source =
-        """
-using System;
-using System.IO;
-using System.Threading.Tasks;
-class C
-{
-    async Task<int> Inner(int x) { await Task.Yield(); return x; }
-    async Task<int> A(int x) { return await Inner(x); }
-    async Task<int> B(int x) => await Inner(x);
-    async Task Plain() { await Task.Yield(); }
-    async Task D() { await Plain(); }
-    async Task<int> E(int x) { return await Inner(x).ConfigureAwait(false); }
-    async Task<int> F(int x) { using var s = new MemoryStream(); return await Inner(x); }
-    async Task<int> G(int x) { return await Inner(x) + 1; }
-    Task<int> Sync(int x) => Task.FromResult(x);
-    async Task<int> H(int x) { return await Sync(x); }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.IO;
+            using System.Threading.Tasks;
+            class C
+            {
+                async Task<int> Inner(int x) { await Task.Yield(); return x; }
+                async Task<int> A(int x) { return await Inner(x); }
+                async Task<int> B(int x) => await Inner(x);
+                async Task Plain() { await Task.Yield(); }
+                async Task D() { await Plain(); }
+                async Task<int> E(int x) { return await Inner(x).ConfigureAwait(false); }
+                async Task<int> F(int x) { using var s = new MemoryStream(); return await Inner(x); }
+                async Task<int> G(int x) { return await Inner(x) + 1; }
+                Task<int> Sync(int x) => Task.FromResult(x);
+                async Task<int> H(int x) { return await Sync(x); }
+            }
+            """
 
     let fired = suggestCode "CR0046" source
     Assert.Equal(3, fired.Length)
@@ -326,10 +344,29 @@ let ``CR0047 notes a top-level lock on a literal or a Type without a gate offer,
 
     for body in
         [
-            "lock (\"gate\") { Console.Write(\"x\"); }\n"
-            "lock (typeof(string)) { Console.Write(\"x\"); }\n"
-            "Run();\nvoid Run() { lock (\"gate\") { Console.Write(\"x\"); } }\n"
-            "lock (\"gate\") { Console.Write(\"x\"); }\nvar _gate = 1;\nConsole.Write(_gate);\n"
+            csharp
+                """
+                lock ("gate") { Console.Write("x"); }
+
+                """
+            csharp
+                """
+                lock (typeof(string)) { Console.Write("x"); }
+
+                """
+            csharp
+                """
+                Run();
+                void Run() { lock ("gate") { Console.Write("x"); } }
+
+                """
+            csharp
+                """
+                lock ("gate") { Console.Write("x"); }
+                var _gate = 1;
+                Console.Write(_gate);
+
+                """
         ] do
         let suggestions, failures = run ("using System;\n" + body)
         Assert.Empty failures
@@ -340,7 +377,14 @@ let ``CR0047 notes a top-level lock on a literal or a Type without a gate offer,
 
     // a class member keeps the editor's gate
     let suggestions, failures =
-        run "using System;\nclass C { void M() { lock (\"gate\") { Console.Write(\"x\"); } } }\n"
+        run (
+            csharp
+                """
+                using System;
+                class C { void M() { lock ("gate") { Console.Write("x"); } } }
+
+                """
+        )
 
     Assert.Empty failures
     let weak = suggestions |> List.filter (fun s -> s.Code = "CR0047")
@@ -350,33 +394,34 @@ let ``CR0047 notes a top-level lock on a literal or a Type without a gate offer,
 [<Fact>]
 let ``weak locks are noted with a gate offer, Monitor.Enter with try/finally becomes lock`` () =
     let source =
-        """
-using System;
-using System.Threading;
-class C
-{
-    readonly object gate = new();
-    int count;
-    void A() { lock (this) { count++; } }
-    void B() { lock ("cache") { count++; } }
-    void D() { lock (typeof(C)) { count++; } }
-    void E() { lock (gate) { count++; } }
-    void F()
-    {
-        Monitor.Enter(gate);
-        try
-        {
-            count++;
-        }
-        finally
-        {
-            Monitor.Exit(gate);
-        }
-    }
-    void G() { Monitor.Enter(gate); count++; Monitor.Exit(gate); }
-    void H() { bool taken = false; Monitor.Enter(gate, ref taken); try { count++; } finally { if (taken) Monitor.Exit(gate); } }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading;
+            class C
+            {
+                readonly object gate = new();
+                int count;
+                void A() { lock (this) { count++; } }
+                void B() { lock ("cache") { count++; } }
+                void D() { lock (typeof(C)) { count++; } }
+                void E() { lock (gate) { count++; } }
+                void F()
+                {
+                    Monitor.Enter(gate);
+                    try
+                    {
+                        count++;
+                    }
+                    finally
+                    {
+                        Monitor.Exit(gate);
+                    }
+                }
+                void G() { Monitor.Enter(gate); count++; Monitor.Exit(gate); }
+                void H() { bool taken = false; Monitor.Enter(gate, ref taken); try { count++; } finally { if (taken) Monitor.Exit(gate); } }
+            }
+            """
 
     Assert.Equal<string list>([ "this"; "\"cache\""; "typeof(C)" ], firedText source (suggestCode "CR0047" source))
     let weak = suggestCode "CR0047" source
@@ -391,14 +436,18 @@ class C
     let fixedSource = fixAll "CR0048" source
 
     Assert.Contains(
-        normalize
-            """    void F()
-    {
-        lock (gate)
-        {
-            count++;
-        }
-    }""",
+        normalize (
+            csharp
+                """
+                    void F()
+                    {
+                        lock (gate)
+                        {
+                            count++;
+                        }
+                    }
+                """
+        ),
         fixedSource
     )
 
@@ -410,44 +459,49 @@ class C
 [<Fact>]
 let ``a check-then-store on a ConcurrentDictionary takes GetOrAdd on the miss; a Task value is a note`` () =
     let source =
-        """
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Threading.Tasks;
-class C
-{
-    readonly ConcurrentDictionary<string, int> cache = new();
-    readonly ConcurrentDictionary<string, Task<int>> tasks = new();
-    readonly Dictionary<string, int> plain = new();
-    int Compute(string k) => k.Length;
-    int A(string k)
-    {
-        if (!cache.TryGetValue(k, out var v))
-        {
-            v = Compute(k);
-            cache[k] = v;
-        }
-        return v;
-    }
-    int B(string k) { if (!cache.TryGetValue(k, out var v)) { v = k.Length; cache.TryAdd(k, v); } return v; }
-    int D(string k) { if (!plain.TryGetValue(k, out var v)) { v = k.Length; plain[k] = v; } return v; }
-    Task<int> E(string k) { if (!tasks.TryGetValue(k, out var t)) { t = Task.FromResult(1); tasks[k] = t; } return t; }
-    Task<int> F(string k) => tasks.GetOrAdd(k, key => Task.FromResult(key.Length));
-    int G(string k) => cache.GetOrAdd(k, key => key.Length);
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Concurrent;
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            class C
+            {
+                readonly ConcurrentDictionary<string, int> cache = new();
+                readonly ConcurrentDictionary<string, Task<int>> tasks = new();
+                readonly Dictionary<string, int> plain = new();
+                int Compute(string k) => k.Length;
+                int A(string k)
+                {
+                    if (!cache.TryGetValue(k, out var v))
+                    {
+                        v = Compute(k);
+                        cache[k] = v;
+                    }
+                    return v;
+                }
+                int B(string k) { if (!cache.TryGetValue(k, out var v)) { v = k.Length; cache.TryAdd(k, v); } return v; }
+                int D(string k) { if (!plain.TryGetValue(k, out var v)) { v = k.Length; plain[k] = v; } return v; }
+                Task<int> E(string k) { if (!tasks.TryGetValue(k, out var t)) { t = Task.FromResult(1); tasks[k] = t; } return t; }
+                Task<int> F(string k) => tasks.GetOrAdd(k, key => Task.FromResult(key.Length));
+                int G(string k) => cache.GetOrAdd(k, key => key.Length);
+            }
+            """
 
     let fired = suggestCode "CR0049" source
     Assert.Equal(3, fired.Length)
     let fixedSource = fixAll "CR0049" source
 
     Assert.Contains(
-        normalize
-            """        if (!cache.TryGetValue(k, out var v))
-        {
-            v = cache.GetOrAdd(k, _ => Compute(k));
-        }""",
+        normalize (
+            csharp
+                """
+                        if (!cache.TryGetValue(k, out var v))
+                        {
+                            v = cache.GetOrAdd(k, _ => Compute(k));
+                        }
+                """
+        ),
         fixedSource
     )
 
@@ -470,26 +524,27 @@ let ``CR0049 closes the race on a token-task cache: the store kept a failed fetc
     ()
     =
     let source =
-        """
-using System.Collections.Concurrent;
-using System.Threading.Tasks;
-interface ITokenClient { Task<string> FetchTokenAsync(string tenant); }
-class TokenCache
-{
-    readonly ConcurrentDictionary<string, Task<string>> tokens = new();
-    readonly ITokenClient client;
-    public TokenCache(ITokenClient client) { this.client = client; }
-    public Task<string> GetTokenAsync(string tenant)
-    {
-        if (!tokens.TryGetValue(tenant, out var token))
-        {
-            token = client.FetchTokenAsync(tenant);
-            tokens[tenant] = token;
-        }
-        return token;
-    }
-}
-"""
+        csharp
+            """
+            using System.Collections.Concurrent;
+            using System.Threading.Tasks;
+            interface ITokenClient { Task<string> FetchTokenAsync(string tenant); }
+            class TokenCache
+            {
+                readonly ConcurrentDictionary<string, Task<string>> tokens = new();
+                readonly ITokenClient client;
+                public TokenCache(ITokenClient client) { this.client = client; }
+                public Task<string> GetTokenAsync(string tenant)
+                {
+                    if (!tokens.TryGetValue(tenant, out var token))
+                    {
+                        token = client.FetchTokenAsync(tenant);
+                        tokens[tenant] = token;
+                    }
+                    return token;
+                }
+            }
+            """
 
     let fired = suggestCode "CR0049" source
     Assert.Single fired |> ignore
@@ -505,20 +560,21 @@ class TokenCache
 [<Fact>]
 let ``CR0050 leaves a GetOrAdd whose factory only throws: an unknown country caches no failed gateway`` () =
     let source =
-        """
-using System;
-using System.Collections.Concurrent;
-using System.Threading.Tasks;
-interface IPaymentGateway { Task ChargeAsync(decimal amount); }
-class GatewayRegistry
-{
-    readonly ConcurrentDictionary<string, Lazy<IPaymentGateway>> gateways = new();
-    public void Register(string country, Func<IPaymentGateway> create) =>
-        gateways[country] = new Lazy<IPaymentGateway>(create);
-    public IPaymentGateway For(string country) =>
-        gateways.GetOrAdd(country, c => throw new NotSupportedException("No payment gateway registered for " + c)).Value;
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Concurrent;
+            using System.Threading.Tasks;
+            interface IPaymentGateway { Task ChargeAsync(decimal amount); }
+            class GatewayRegistry
+            {
+                readonly ConcurrentDictionary<string, Lazy<IPaymentGateway>> gateways = new();
+                public void Register(string country, Func<IPaymentGateway> create) =>
+                    gateways[country] = new Lazy<IPaymentGateway>(create);
+                public IPaymentGateway For(string country) =>
+                    gateways.GetOrAdd(country, c => throw new NotSupportedException("No payment gateway registered for " + c)).Value;
+            }
+            """
 
     Assert.Empty(suggestCode "CR0050" source)
 
@@ -527,27 +583,28 @@ class GatewayRegistry
 [<Fact>]
 let ``a using outlived by the returned task is awaited; a this-capturing handler on a static publisher is noted`` () =
     let source =
-        """
-using System;
-using System.IO;
-using System.Threading.Tasks;
-class C
-{
-    event Action Own;
-    Task<int> Read(Stream s) => Task.FromResult(1);
-    Task<int> A(string path) { using var f = File.OpenRead(path); return Read(f); }
-    Task<int> B(string path) { using (var f = File.OpenRead(path)) { return Read(f); } }
-    Task<int> D(string path) { using var f = File.OpenRead(path); var n = f.ReadByte(); return Task.FromResult(n); }
-    void Flush() { }
-    void E() { AppDomain.CurrentDomain.ProcessExit += (s, e) => Flush(); }
-    void F() { AppDomain.CurrentDomain.ProcessExit += OnExit2; }
-    void OnExit(object s, EventArgs e) { }
-    void OnExit2(object s, EventArgs e) { }
-    void G() { AppDomain.CurrentDomain.ProcessExit += (s, e) => Console.WriteLine("bye"); }
-    void H() { Own += Flush; }
-    void I() { AppDomain.CurrentDomain.ProcessExit += OnExit; AppDomain.CurrentDomain.ProcessExit -= OnExit; }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.IO;
+            using System.Threading.Tasks;
+            class C
+            {
+                event Action Own;
+                Task<int> Read(Stream s) => Task.FromResult(1);
+                Task<int> A(string path) { using var f = File.OpenRead(path); return Read(f); }
+                Task<int> B(string path) { using (var f = File.OpenRead(path)) { return Read(f); } }
+                Task<int> D(string path) { using var f = File.OpenRead(path); var n = f.ReadByte(); return Task.FromResult(n); }
+                void Flush() { }
+                void E() { AppDomain.CurrentDomain.ProcessExit += (s, e) => Flush(); }
+                void F() { AppDomain.CurrentDomain.ProcessExit += OnExit2; }
+                void OnExit(object s, EventArgs e) { }
+                void OnExit2(object s, EventArgs e) { }
+                void G() { AppDomain.CurrentDomain.ProcessExit += (s, e) => Console.WriteLine("bye"); }
+                void H() { Own += Flush; }
+                void I() { AppDomain.CurrentDomain.ProcessExit += OnExit; AppDomain.CurrentDomain.ProcessExit -= OnExit; }
+            }
+            """
 
     let fired = suggestCode "CR0051" source
     Assert.Equal(2, fired.Length)
@@ -576,39 +633,41 @@ class C
 [<Fact>]
 let ``CR0051 leaves a using that returns Task.FromResult: the template is read before the file closes`` () =
     let source =
-        """
-using System.IO;
-using System.Threading.Tasks;
-interface ITemplateSource { Task<string> LoadAsync(string path); }
-class FileTemplateSource : ITemplateSource
-{
-    public Task<string> LoadAsync(string path)
-    {
-        using var reader = File.OpenText(path);
-        return Task.FromResult(reader.ReadToEnd());
-    }
-}
-"""
+        csharp
+            """
+            using System.IO;
+            using System.Threading.Tasks;
+            interface ITemplateSource { Task<string> LoadAsync(string path); }
+            class FileTemplateSource : ITemplateSource
+            {
+                public Task<string> LoadAsync(string path)
+                {
+                    using var reader = File.OpenText(path);
+                    return Task.FromResult(reader.ReadToEnd());
+                }
+            }
+            """
 
     Assert.Empty(suggestCode "CR0051" source)
 
 [<Fact>]
 let ``CR0052 leaves a static flush handler on ProcessExit: it pins no audit trail instance`` () =
     let source =
-        """
-using System;
-using System.Collections.Concurrent;
-using System.IO;
-class AuditTrail
-{
-    static readonly ConcurrentQueue<string> pending = new();
-    readonly string user;
-    static AuditTrail() { AppDomain.CurrentDomain.ProcessExit += FlushPending; }
-    public AuditTrail(string user) { this.user = user; }
-    public void Record(string action) => pending.Enqueue(user + ": " + action);
-    static void FlushPending(object sender, EventArgs e) => File.AppendAllLines("audit.log", pending);
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Concurrent;
+            using System.IO;
+            class AuditTrail
+            {
+                static readonly ConcurrentQueue<string> pending = new();
+                readonly string user;
+                static AuditTrail() { AppDomain.CurrentDomain.ProcessExit += FlushPending; }
+                public AuditTrail(string user) { this.user = user; }
+                public void Record(string action) => pending.Enqueue(user + ": " + action);
+                static void FlushPending(object sender, EventArgs e) => File.AppendAllLines("audit.log", pending);
+            }
+            """
 
     Assert.Empty(suggestCode "CR0052" source)
 
@@ -617,21 +676,22 @@ class AuditTrail
 [<Fact>]
 let ``a private method draining a task whose callers are all async becomes async and awaited`` () =
     let source =
-        """
-using System.Threading.Tasks;
-class C
-{
-    Task<int> Load() => Task.FromResult(1);
-    private int Fetch(int n) { var x = Load().Result; return x + n; }
-    async Task<int> A() { var r = Fetch(1); return r; }
-    async Task<int> B() { return Fetch(2); }
-    private int Sync(int n) => Load().Result + n;
-    int D() => Sync(1);
-    async Task<int> E() => Sync(2);
-    public int Pub(int n) => Load().Result + n;
-    async Task<int> F() => Pub(1);
-}
-"""
+        csharp
+            """
+            using System.Threading.Tasks;
+            class C
+            {
+                Task<int> Load() => Task.FromResult(1);
+                private int Fetch(int n) { var x = Load().Result; return x + n; }
+                async Task<int> A() { var r = Fetch(1); return r; }
+                async Task<int> B() { return Fetch(2); }
+                private int Sync(int n) => Load().Result + n;
+                int D() => Sync(1);
+                async Task<int> E() => Sync(2);
+                public int Pub(int n) => Load().Result + n;
+                async Task<int> F() => Pub(1);
+            }
+            """
 
     let fired = suggestCode "CR0041" source
     Assert.Equal<string list>([ "Fetch" ], firedText source fired)
@@ -646,21 +706,22 @@ class C
 [<Fact>]
 let ``async void becomes async Task when every caller is async, a handler or a sync caller keeps a note`` () =
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-class C
-{
-    event EventHandler Fired;
-    async void Work() { await Task.Yield(); }
-    async Task A() { Work(); }
-    async void OnFired(object s, EventArgs e) { await Task.Yield(); }
-    async void Sub() { await Task.Yield(); }
-    void B() { Sub(); }
-    async void Handler(object s, string e) { await Task.Yield(); }
-    void D() { Fired += (s, e) => Handler(s, ""); }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            class C
+            {
+                event EventHandler Fired;
+                async void Work() { await Task.Yield(); }
+                async Task A() { Work(); }
+                async void OnFired(object s, EventArgs e) { await Task.Yield(); }
+                async void Sub() { await Task.Yield(); }
+                void B() { Sub(); }
+                async void Handler(object s, string e) { await Task.Yield(); }
+                void D() { Fired += (s, e) => Handler(s, ""); }
+            }
+            """
 
     let fired = suggestCode "CR0043" source
     // Work is fixed; Sub (a sync caller) and Handler (called from a lambda) are notes
@@ -681,28 +742,29 @@ class C
 [<Fact>]
 let ``a sync call with an Async twin inside an async body awaits the twin; Dispose and sync bodies stay`` () =
     let source =
-        """
-using System;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-class C
-{
-    async Task<string> A(StreamReader reader) { var line = reader.ReadLine(); return line; }
-    async Task B(Stream s) { s.Flush(); }
-    async Task<string> D(string path) { return File.ReadAllText(path); }
-    async Task E() { Thread.Sleep(100); }
-    async Task F(Stream s) { s.Dispose(); }
-    string G(StreamReader reader) => reader.ReadLine();
-    // an EF-shaped twin over IQueryable<T>: only an async query provider can run it
-    async Task<int> I(System.Linq.IQueryable<int> q) { var xs = q.ToList(); return xs.Count; }
-}
-static class QueryableExtensions
-{
-    public static Task<System.Collections.Generic.List<T>> ToListAsync<T>(this System.Linq.IQueryable<T> source) => Task.FromResult(System.Linq.Enumerable.ToList(source));
-}
-"""
+        csharp
+            """
+            using System;
+            using System.IO;
+            using System.Linq;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                async Task<string> A(StreamReader reader) { var line = reader.ReadLine(); return line; }
+                async Task B(Stream s) { s.Flush(); }
+                async Task<string> D(string path) { return File.ReadAllText(path); }
+                async Task E() { Thread.Sleep(100); }
+                async Task F(Stream s) { s.Dispose(); }
+                string G(StreamReader reader) => reader.ReadLine();
+                // an EF-shaped twin over IQueryable<T>: only an async query provider can run it
+                async Task<int> I(System.Linq.IQueryable<int> q) { var xs = q.ToList(); return xs.Count; }
+            }
+            static class QueryableExtensions
+            {
+                public static Task<System.Collections.Generic.List<T>> ToListAsync<T>(this System.Linq.IQueryable<T> source) => Task.FromResult(System.Linq.Enumerable.ToList(source));
+            }
+            """
 
     let fired = suggestCode "CR0042" source
     Assert.Equal(4, fired.Length)
@@ -720,26 +782,27 @@ static class QueryableExtensions
 [<Fact>]
 let ``a blocking xUnit test becomes async, the throw assert its async form; shared state holds`` () =
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-using Xunit;
-public class Tests
-{
-    static Task<int> Load() => Task.FromResult(1);
-    static Task Fail() => Task.FromException(new InvalidOperationException());
-    [Fact]
-    public void A() { var r = Load().Result; Assert.Equal(1, r); }
-    [Fact]
-    public void B() { Assert.Throws<InvalidOperationException>(() => Fail().Wait()); }
-    [Fact]
-    public void D() { Environment.SetEnvironmentVariable("X", "1"); var r = Load().Result; Assert.Equal(1, r); }
-    [Fact]
-    public void E() { Assert.Equal(1, 1); }
-    [Fact]
-    public void F() { Assert.Throws<AggregateException>(() => Fail().Wait()); }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            using Xunit;
+            public class Tests
+            {
+                static Task<int> Load() => Task.FromResult(1);
+                static Task Fail() => Task.FromException(new InvalidOperationException());
+                [Fact]
+                public void A() { var r = Load().Result; Assert.Equal(1, r); }
+                [Fact]
+                public void B() { Assert.Throws<InvalidOperationException>(() => Fail().Wait()); }
+                [Fact]
+                public void D() { Environment.SetEnvironmentVariable("X", "1"); var r = Load().Result; Assert.Equal(1, r); }
+                [Fact]
+                public void E() { Assert.Equal(1, 1); }
+                [Fact]
+                public void F() { Assert.Throws<AggregateException>(() => Fail().Wait()); }
+            }
+            """
 
     let fired = suggestCode "CR0045" source
     Assert.Equal<string list>([ "A"; "B" ], firedText source fired)
@@ -756,17 +819,18 @@ public class Tests
 [<Fact>]
 let ``a handler that can catch the AggregateException and reads its inner exceptions holds the await fix`` () =
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-class C
-{
-    void Log(string s) { }
-    async Task<int> A(Task<int> t) { try { return t.Result; } catch (Exception ex) { Log(ex.InnerException!.Message); return 0; } }
-    async Task<int> B(Task<int> t) { try { return t.Result; } catch (Exception ex) when (ex is AggregateException) { return 0; } }
-    async Task<int> D(Task<int> t) { try { return t.Result; } catch (Exception ex) { Log(ex.Message); return 0; } }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            class C
+            {
+                void Log(string s) { }
+                async Task<int> A(Task<int> t) { try { return t.Result; } catch (Exception ex) { Log(ex.InnerException!.Message); return 0; } }
+                async Task<int> B(Task<int> t) { try { return t.Result; } catch (Exception ex) when (ex is AggregateException) { return 0; } }
+                async Task<int> D(Task<int> t) { try { return t.Result; } catch (Exception ex) { Log(ex.Message); return 0; } }
+            }
+            """
 
     let fixedSource = fixAll "CR0040" source
     Assert.Contains("try { return t.Result; } catch (Exception ex) { Log(ex.InnerException!.Message);", fixedSource)
@@ -776,16 +840,17 @@ class C
 [<Fact>]
 let ``async void with no caller, or public in a library, keeps the note`` () =
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-public class C
-{
-    async void Orphan() { await Task.Yield(); }
-    public async void Go() { await Task.Yield(); }
-    async Task A() { Go(); }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            public class C
+            {
+                async void Orphan() { await Task.Yield(); }
+                public async void Go() { await Task.Yield(); }
+                async Task A() { Go(); }
+            }
+            """
 
     let fired = suggestCode "CR0043" source
     Assert.Equal(2, fired.Length)
@@ -794,15 +859,16 @@ public class C
 [<Fact>]
 let ``a caller's own AggregateException handler holds the taskify fix`` () =
     let source =
-        """
-using System;
-using System.Threading.Tasks;
-class C
-{
-    Task<int> Source() => Task.FromResult(1);
-    private int Load() { var x = Source().Result; return x; }
-    async Task<int> A() { try { var r = Load(); return r; } catch (AggregateException) { return 0; } }
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Threading.Tasks;
+            class C
+            {
+                Task<int> Source() => Task.FromResult(1);
+                private int Load() { var x = Source().Result; return x; }
+                async Task<int> A() { try { var r = Load(); return r; } catch (AggregateException) { return 0; } }
+            }
+            """
 
     Assert.Empty(suggestCode "CR0041" source |> List.filter (fun s -> not s.Fixes.IsEmpty))

@@ -16,26 +16,27 @@ let ``a setter only used while constructing becomes init; a later write, a seria
     ()
     =
     let source =
-        """
-using System;
-using System.Text.Json.Serialization;
-class Db { public DbSet<Row> Rows { get; set; } }
-class DbSet<T> { }
-class Row { public int Id { get; set; } }
-class Dto { [JsonPropertyName("n")] public string Name { get; set; } }
-class Point
-{
-    public int X { get; set; }
-    public int Y { get; set; }
-    public int Z { get; set; }
-    private int W { get; set; }
-    public Point() { X = 1; }
-    void Move() { Y = 2; }
-    static Point Make() => new Point { Z = 3 };
-    static void Other(Point p) { p.W = 4; }
-}
-class Copy { public int X { get; set; } public Copy(Copy other) { other.X = 1; } }
-"""
+        csharp
+            """
+            using System;
+            using System.Text.Json.Serialization;
+            class Db { public DbSet<Row> Rows { get; set; } }
+            class DbSet<T> { }
+            class Row { public int Id { get; set; } }
+            class Dto { [JsonPropertyName("n")] public string Name { get; set; } }
+            class Point
+            {
+                public int X { get; set; }
+                public int Y { get; set; }
+                public int Z { get; set; }
+                private int W { get; set; }
+                public Point() { X = 1; }
+                void Move() { Y = 2; }
+                static Point Make() => new Point { Z = 3 };
+                static void Other(Point p) { p.W = 4; }
+            }
+            class Copy { public int X { get; set; } public Copy(Copy other) { other.X = 1; } }
+            """
 
     // Point.X (constructor via this), Point.Z (initializer); Y is written by a method, W by another
     // instance in a method, Copy.X through another instance in the constructor; the leaf compilation opens the public shape
@@ -52,41 +53,42 @@ let ``an immutable class becomes a record and a small record a readonly record s
     ()
     =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-class Money
-{
-    public decimal Amount { get; }
-    public string Currency { get; }
-    public Money(decimal amount, string currency) { Amount = amount; Currency = currency; }
-}
-class Service
-{
-    public int Rate { get; }
-    public Service(int rate) { Rate = rate; }
-    public int Apply(int x) => x * Rate;
-}
-class Counter
-{
-    public int Value { get; private set; }
-    public void Bump() => Value++;
-}
-class Keyed
-{
-    public int Id { get; }
-    public Keyed(int id) { Id = id; }
-    static readonly Dictionary<Keyed, int> Index = new Dictionary<Keyed, int>();
-}
-class Parent { public int A { get; } }
-class Child : Parent { public int B { get; } }
-record Point(int X, int Y);
-record Named(string Name);
-record Big(long A, long B, long C, long D, long E);
-record Boxed(int X);
-class Uses { object O() => new Boxed(1); Point? P() => null; }
-record Small(int X);
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            class Money
+            {
+                public decimal Amount { get; }
+                public string Currency { get; }
+                public Money(decimal amount, string currency) { Amount = amount; Currency = currency; }
+            }
+            class Service
+            {
+                public int Rate { get; }
+                public Service(int rate) { Rate = rate; }
+                public int Apply(int x) => x * Rate;
+            }
+            class Counter
+            {
+                public int Value { get; private set; }
+                public void Bump() => Value++;
+            }
+            class Keyed
+            {
+                public int Id { get; }
+                public Keyed(int id) { Id = id; }
+                static readonly Dictionary<Keyed, int> Index = new Dictionary<Keyed, int>();
+            }
+            class Parent { public int A { get; } }
+            class Child : Parent { public int B { get; } }
+            record Point(int X, int Y);
+            record Named(string Name);
+            record Big(long A, long B, long C, long D, long E);
+            record Boxed(int X);
+            class Uses { object O() => new Boxed(1); Point? P() => null; }
+            record Small(int X);
+            """
 
     Assert.Equal<string list>([ "Money" ], firedText source (suggestCode "CR0080" source))
     Assert.Contains("record Money", fixAll "CR0080" source)
@@ -102,10 +104,26 @@ let ``CR0081 holds a record another file uses by null, as, coalesce, conditional
 
     for other in
         [
-            "#nullable disable\nclass U { Small M() { Small s = null; return s; } }"
-            "#nullable disable\nclass U { Small M(object o) => o as Small; }"
-            "#nullable disable\nclass U { Small M(Small a, Small b) => a ?? b; }"
-            "#nullable disable\nclass U { int? M(Small s) => s?.X; }"
+            csharp
+                """
+                #nullable disable
+                class U { Small M() { Small s = null; return s; } }
+                """
+            csharp
+                """
+                #nullable disable
+                class U { Small M(object o) => o as Small; }
+                """
+            csharp
+                """
+                #nullable disable
+                class U { Small M(Small a, Small b) => a ?? b; }
+                """
+            csharp
+                """
+                #nullable disable
+                class U { int? M(Small s) => s?.X; }
+                """
             "class U { static T Id<T>(T x) where T : class => x; Small M(Small s) => Id<Small>(s); }"
         ] do
         Assert.Empty(suggestInProject false false "CR0081" [ "Small.cs", small; "U.cs", other ])
@@ -115,39 +133,41 @@ let ``CR0081 holds a record another file uses by null, as, coalesce, conditional
 [<Fact>]
 let ``a reference tuple in private shapes becomes a value tuple; a null test or a nested generic holds`` () =
     let source =
-        """
-using System;
-using System.Collections.Generic;
-class C
-{
-    private Tuple<int, string> Pair() => Tuple.Create(1, "a");
-    private int Use() { var p = Pair(); return p.Item1 + p.Item2.Length; }
-    private Tuple<int, int> Checked() { Tuple<int, int> t = new Tuple<int, int>(1, 2); return t == null ? null : t; }
-    private List<Tuple<bool, bool>> Many() => new List<Tuple<bool, bool>>();
-    private Tuple<bool, bool> First() => Many()[0];
-}
-"""
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            class C
+            {
+                private Tuple<int, string> Pair() => Tuple.Create(1, "a");
+                private int Use() { var p = Pair(); return p.Item1 + p.Item2.Length; }
+                private Tuple<int, int> Checked() { Tuple<int, int> t = new Tuple<int, int>(1, 2); return t == null ? null : t; }
+                private List<Tuple<bool, bool>> Many() => new List<Tuple<bool, bool>>();
+                private Tuple<bool, bool> First() => Many()[0];
+            }
+            """
 
     let fired = suggestCode "CR0082" source
     Assert.Equal(1, fired.Length)
     let fixedSource = fixAll "CR0082" source
-    Assert.Contains("private (int, string) Pair() => (1, \"a\");", fixedSource)
+    Assert.Contains("""private (int, string) Pair() => (1, "a");""", fixedSource)
     Assert.Contains("Tuple<int, int> Checked()", fixedSource)
     Assert.Contains("Tuple<bool, bool> First()", fixedSource)
 
 [<Fact>]
 let ``CR0082 holds a reference tuple compared with == or !=`` () =
     let source =
-        """
-using System;
-class C
-{
-    private Tuple<int, int> _last = Tuple.Create(0, 0);
-    private bool Changed(int a, int b) { var t = Tuple.Create(a, b); var changed = t != _last; _last = t; return changed; }
-    private Tuple<string, string> Pair() => Tuple.Create("a", "b");
-    private bool Same() { var p = Pair(); var q = Pair(); return p == q; }
-}
-"""
+        csharp
+            """
+            using System;
+            class C
+            {
+                private Tuple<int, int> _last = Tuple.Create(0, 0);
+                private bool Changed(int a, int b) { var t = Tuple.Create(a, b); var changed = t != _last; _last = t; return changed; }
+                private Tuple<string, string> Pair() => Tuple.Create("a", "b");
+                private bool Same() { var p = Pair(); var q = Pair(); return p == q; }
+            }
+            """
 
     Assert.Empty(suggestCode "CR0082" source)
 
@@ -158,35 +178,36 @@ let ``a private type's clock slot read through parity members migrates to DateTi
     ()
     =
     let source =
-        """
-using System;
-class Outer
-{
-    private class Session
-    {
-        DateTime started = DateTime.UtcNow;
-        public DateTime LastSeen { get; set; }
-        public void Touch() { LastSeen = DateTime.UtcNow; }
-        public bool Stale() => DateTime.UtcNow - LastSeen > TimeSpan.FromMinutes(5) && started.Year > 2000;
-    }
-    private class Calendar
-    {
-        DateTime day = DateTime.Now;
-        public int Today() => day.Date.Day;
-    }
-    private class Mixed
-    {
-        DateTime a = DateTime.Now;
-        DateTime b = DateTime.UtcNow;
-        public bool Later() => a > b;
-    }
-    private class Passed
-    {
-        DateTime when = DateTime.UtcNow;
-        public void Log() => Console.WriteLine(when);
-    }
-}
-"""
+        csharp
+            """
+            using System;
+            class Outer
+            {
+                private class Session
+                {
+                    DateTime started = DateTime.UtcNow;
+                    public DateTime LastSeen { get; set; }
+                    public void Touch() { LastSeen = DateTime.UtcNow; }
+                    public bool Stale() => DateTime.UtcNow - LastSeen > TimeSpan.FromMinutes(5) && started.Year > 2000;
+                }
+                private class Calendar
+                {
+                    DateTime day = DateTime.Now;
+                    public int Today() => day.Date.Day;
+                }
+                private class Mixed
+                {
+                    DateTime a = DateTime.Now;
+                    DateTime b = DateTime.UtcNow;
+                    public bool Later() => a > b;
+                }
+                private class Passed
+                {
+                    DateTime when = DateTime.UtcNow;
+                    public void Log() => Console.WriteLine(when);
+                }
+            }
+            """
 
     let fired = suggestCode "CR0089" source
     Assert.Equal(1, fired.Length)
@@ -199,18 +220,19 @@ class Outer
 [<Fact>]
 let ``CR0089 holds a clock slot printed through ToString()`` () =
     let source =
-        """
-using System;
-class Outer
-{
-    private class Stamp
-    {
-        DateTime at = DateTime.Now;
-        public string Show() => at.ToString();
-        public int Year() => at.Year;
-    }
-}
-"""
+        csharp
+            """
+            using System;
+            class Outer
+            {
+                private class Stamp
+                {
+                    DateTime at = DateTime.Now;
+                    public string Show() => at.ToString();
+                    public int Year() => at.Year;
+                }
+            }
+            """
 
     Assert.Empty(suggestCode "CR0089" source)
 
@@ -221,24 +243,25 @@ let ``a static readonly field of a constant becomes const; a public one only und
     ()
     =
     let source =
-        """
-using System;
-public class C
-{
-    static readonly string Prefix = "v";
-    private static readonly int Retries = 3, Timeout = 30;
-    internal static readonly double Ratio = 1.5;
-    public static readonly string PublicName = "pub";
-    protected static readonly string ProtectedName = "prot";
-    static readonly string Rewritten = "a";
-    [ThreadStatic] static readonly int Slotted = 1;
-    static readonly int[] Table = { 1, 2 };
-    static readonly string Empty = string.Empty;
-    static readonly DateTime When = DateTime.MinValue;
-    static C() { Rewritten = "b"; }
-    string M() => Prefix + Retries + Timeout + Ratio + PublicName + ProtectedName + Rewritten + Slotted + Table.Length + Empty + When;
-}
-"""
+        csharp
+            """
+            using System;
+            public class C
+            {
+                static readonly string Prefix = "v";
+                private static readonly int Retries = 3, Timeout = 30;
+                internal static readonly double Ratio = 1.5;
+                public static readonly string PublicName = "pub";
+                protected static readonly string ProtectedName = "prot";
+                static readonly string Rewritten = "a";
+                [ThreadStatic] static readonly int Slotted = 1;
+                static readonly int[] Table = { 1, 2 };
+                static readonly string Empty = string.Empty;
+                static readonly DateTime When = DateTime.MinValue;
+                static C() { Rewritten = "b"; }
+                string M() => Prefix + Retries + Timeout + Ratio + PublicName + ProtectedName + Rewritten + Slotted + Table.Length + Empty + When;
+            }
+            """
 
     Assert.Equal<string list>(
         [
@@ -250,13 +273,13 @@ public class C
     )
 
     let fixedSource = fixAll "CR0172" source
-    Assert.Contains("    const string Prefix = \"v\";", fixedSource)
+    Assert.Contains("""    const string Prefix = "v";""", fixedSource)
     Assert.Contains("    private const int Retries = 3, Timeout = 30;", fixedSource)
     Assert.Contains("    internal const double Ratio = 1.5;", fixedSource)
-    Assert.Contains("    public static readonly string PublicName = \"pub\";", fixedSource)
-    Assert.Contains("    static readonly string Rewritten = \"a\";", fixedSource)
+    Assert.Contains("""    public static readonly string PublicName = "pub";""", fixedSource)
+    Assert.Contains("""    static readonly string Rewritten = "a";""", fixedSource)
 
     let opened = suggestCodeWith apiOpen "CR0172" source |> firedText source
     Assert.Contains("string PublicName = \"pub\"", opened)
     Assert.Contains("string ProtectedName = \"prot\"", opened)
-    Assert.Contains("    public const string PublicName = \"pub\";", fixAllWith apiOpen "CR0172" source)
+    Assert.Contains("""    public const string PublicName = "pub";""", fixAllWith apiOpen "CR0172" source)

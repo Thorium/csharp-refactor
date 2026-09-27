@@ -37,19 +37,32 @@ class C
     let fixedSource = fixAll "CR0006" source
 
     Assert.Contains(
-        normalize
-            """        if (!(ok && n > 0))
-        {
-            Console.WriteLine("no");
-            return;
-        }
+        normalize (
+            csharp
+                """
+                        if (!(ok && n > 0))
+                        {
+                            Console.WriteLine("no");
+                            return;
+                        }
 
-        Console.WriteLine(1);
-        Console.WriteLine(2);""",
+                        Console.WriteLine(1);
+                        Console.WriteLine(2);
+                """
+        ),
         fixedSource
     )
 
-    Assert.Contains(normalize "        Console.WriteLine(20);\n        Console.WriteLine(\"after\");", fixedSource)
+    Assert.Contains(
+        normalize (
+            csharp
+                """
+                        Console.WriteLine(20);
+                        Console.WriteLine("after");
+                """
+        ),
+        fixedSource
+    )
 
 [<Fact>]
 let ``a short then, a non-exiting else, a chain, a comment on the else line and a clashing local stand down`` () =
@@ -148,45 +161,46 @@ class C
 [<Fact>]
 let ``a flag raised with statements still to run is noted, a raise at the end is not`` () =
     let source =
-        """
-using System;
-class C
-{
-    void A(int[] xs)
-    {
-        bool done = false;
-        int i = 0;
-        while (!done && i < xs.Length)
-        {
-            if (xs[i] < 0)
+        csharp
+            """
+            using System;
+            class C
             {
-                done = true;
+                void A(int[] xs)
+                {
+                    bool done = false;
+                    int i = 0;
+                    while (!done && i < xs.Length)
+                    {
+                        if (xs[i] < 0)
+                        {
+                            done = true;
+                        }
+                        Console.WriteLine(xs[i]);
+                        i++;
+                    }
+                }
+                void B(int[] xs)
+                {
+                    bool done = false;
+                    for (int i = 0; !(done || xs.Length == 0); i++)
+                    {
+                        Console.WriteLine(xs[i]);
+                        if (xs[i] < 0) done = true;
+                    }
+                }
+                void D(int[] xs)
+                {
+                    bool stop = false;
+                    int i = 0;
+                    while (i < xs.Length && !stop)
+                    {
+                        if (xs[i] < 0) { stop = true; Console.WriteLine("last"); }
+                        i++;
+                    }
+                }
             }
-            Console.WriteLine(xs[i]);
-            i++;
-        }
-    }
-    void B(int[] xs)
-    {
-        bool done = false;
-        for (int i = 0; !(done || xs.Length == 0); i++)
-        {
-            Console.WriteLine(xs[i]);
-            if (xs[i] < 0) done = true;
-        }
-    }
-    void D(int[] xs)
-    {
-        bool stop = false;
-        int i = 0;
-        while (i < xs.Length && !stop)
-        {
-            if (xs[i] < 0) { stop = true; Console.WriteLine("last"); }
-            i++;
-        }
-    }
-}
-"""
+            """
 
     let fired = suggestCode "CR0016" source
     Assert.Equal<string list>([ "done = true;"; "stop = true;" ], firedText source fired)

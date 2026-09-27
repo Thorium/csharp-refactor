@@ -245,6 +245,26 @@ the tool tests sweep a synthetic project through `MSBuildWorkspace`.
 `tests/run-tests.ps1` runs the lot. `benchmarks/PerfClaims` holds the
 before/after pair behind every performance claim.
 
+A multi-line input is an indented block through the `csharp` helper
+(tests/CSharp.Refactor.Tests/TestSource.fs): the closing quotes'
+indentation is cut from every line, so the rule sees the class at column 0,
+and Fantomas can move the block without changing it.
+
+```fsharp
+let source =
+    csharp
+        """
+        class C
+        {
+            int F(int x) => x + 1;
+        }
+        """
+```
+
+A literal that must be a constant (an attribute argument, a `[<Literal>]`,
+a printf format) or holds a tab, a `\r` or trailing whitespace stays an
+escaped `"...\n..."` string.
+
 Beside the example-based suite, `tests/CSharp.Refactor.PropertyTests` is an
 FsCheck suite over generated programs: a class of members each shaped for a
 rule, and method bodies around boolean terms over three integers, with an
