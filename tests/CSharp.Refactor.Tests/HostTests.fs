@@ -159,7 +159,7 @@ let ``the fix provider rewrites a method's callers in another document through t
         let suggestions =
             Rules.all tree model ctx |> List.filter (fun s -> s.Code = "CR0041")
 
-        Assert.Equal(1, suggestions.Length)
+        assertFired 1 source suggestions
         let fix = suggestions.Head.Fixes.Head
 
         Assert.Equal(
@@ -265,7 +265,7 @@ let ``a reference tuple spelled in two files of one compilation is retyped as on
         // B holds no declaration of its own that reports; A reports the set for both
         Assert.Empty(suggestionsIn b)
         let fromA = suggestionsIn a
-        Assert.Equal(1, fromA.Length)
+        assertFired 1 source fromA
         let fix = fromA.Head.Fixes.Head
         Assert.Contains(fix.Edits, fun e -> e.File = Some "C:/fake/B.cs")
 

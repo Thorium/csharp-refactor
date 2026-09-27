@@ -159,10 +159,10 @@ let ``weak crypto and certificate bypasses are noted; obsolete constructors beco
 
     let weak = suggestCode "CR0125" source
     // A (MD5), E (callback), F (Tls11); H's SHA1 has a stronger sibling
-    Assert.Equal(3, weak.Length)
+    assertFired 3 source weak
     let obsolete = suggestCode "CR0126" source
     // B and G; D mentions SHA512Managed as a declared type
-    Assert.Equal(2, obsolete.Length)
+    assertFired 2 source obsolete
     let fixedSource = fixAll "CR0126" source
     Assert.Contains("using var sha = SHA256.Create();", fixedSource)
     Assert.Contains("using var rng = RandomNumberGenerator.Create();", fixedSource)

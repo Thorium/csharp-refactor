@@ -41,8 +41,7 @@ let ``a default hiding two members is named in the editor, with a throwing defau
             }
             """
 
-    let fired = suggestCode "CR0013" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0013" source
     Assert.Empty(suggestCode "CR0014" source)
 
     let statement = editorFix source fired.[0]
@@ -100,8 +99,7 @@ let ``an exiting switch with no default and missing members is noted, the editor
             }
             """
 
-    let fired = suggestCode "CR0014" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0014" source
     Assert.Empty(suggestCode "CR0013" source)
     let result = editorFix source fired.[0]
 

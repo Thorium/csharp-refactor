@@ -28,7 +28,7 @@ let ``a concatenation of literals and values becomes an interpolated string; two
 
     let fired = suggestCode "CR0100" source
     // A, B, E, I, J, K (H has two operands once the numeric `+` is one)
-    Assert.Equal(6, fired.Length)
+    assertFired 6 source fired
     let fixedSource = fixAll "CR0100" source
     Assert.Contains("$\"Hello {name}!\"", fixedSource)
     Assert.Contains("$\"Total: {n} {unit}\"", fixedSource)
@@ -67,7 +67,7 @@ let ``string.Format with a literal template becomes an interpolated string; prov
 
     let fired = suggestCode "CR0101" source
     // A, B, G, I, J
-    Assert.Equal(5, fired.Length)
+    assertFired 5 source fired
     let fixedSource = fixAll "CR0101" source
     Assert.Contains("$\"{a} of {b:N2}\"", fixedSource)
     Assert.Contains("$\"{n,5}|{{x}}\"", fixedSource)
@@ -101,7 +101,7 @@ let ``a ToString inside a hole or under Join goes where the value cannot be null
 
     let fired = suggestCode "CR0102" source
     // A, E, G
-    Assert.Equal(3, fired.Length)
+    assertFired 3 source fired
     let fixedSource = fixAll "CR0102" source
     Assert.Contains("""$"{x} items";""", fixedSource)
     Assert.Contains("""$"{s}";""", fixedSource)
@@ -127,7 +127,7 @@ let ``a ToString in a FormattableString or a provider's handler stays: the hole 
 
     let fired = suggestCode "CR0102" source
     // only E, a plain string
-    Assert.Equal(1, fired.Length)
+    assertFired 1 source fired
 
 // ---- CR0104 ----
 
@@ -150,8 +150,7 @@ let ``spelled-out emptiness tests become IsNullOrEmpty or IsNullOrWhiteSpace; a 
             }
             """
 
-    let fired = suggestCode "CR0104" source
-    Assert.Equal(7, fired.Length)
+    let fired = fires 7 "CR0104" source
     let fixedSource = fixAll "CR0104" source
     Assert.Contains("bool A(string x) => string.IsNullOrEmpty(x);", fixedSource)
     Assert.Contains("bool B(string x) => string.IsNullOrEmpty(x);", fixedSource)
@@ -220,7 +219,7 @@ let ``DateTime.Now as an instant becomes UtcNow under the knob; calendar reads, 
 
     let fired = suggestCode "CR0106" source
     // A, B (fixes); D, E, I (notes)
-    Assert.Equal(5, fired.Length)
+    assertFired 5 source fired
     Assert.Contains("DateTime.Now;", fixAll "CR0106" source)
 
     let fixedSource =

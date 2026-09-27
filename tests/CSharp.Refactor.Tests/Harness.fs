@@ -178,6 +178,23 @@ let firedText (source: string) (suggestions: Suggestion list) =
     let source = normalize source
     suggestions |> List.map (fun s -> source.Substring(s.Span.Start, s.Span.Length))
 
+/// Exactly `count` suggestions: a mismatch lists the text each one fired
+/// on, so the failure names the site that was missed or the one that fired
+/// by mistake, where a bare count would not.
+let assertFired (count: int) (source: string) (suggestions: Suggestion list) : unit =
+    if suggestions.Length <> count then
+        let fired =
+            firedText source suggestions
+            |> List.map (fun t -> "  " + t.Replace("\n", "\n  "))
+
+        failwithf "expected %d suggestion(s), got %d:\n%s" count suggestions.Length (String.Join("\n", fired))
+
+/// One rule's suggestions, exactly `count` of them (see `assertFired`).
+let fires (count: int) (code: string) (source: string) : Suggestion list =
+    let fired = suggestCode code source
+    assertFired count source fired
+    fired
+
 /// Compile the source AS IS — its own line endings, at a chosen language
 /// version — for the properties that watch what a fix does to the file's
 /// conventions, which `compile`'s normalisation would hide.

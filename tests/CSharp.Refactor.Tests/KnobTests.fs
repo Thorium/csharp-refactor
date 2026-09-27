@@ -100,8 +100,7 @@ class C
 
 [<Fact>]
 let ``CR0040 offers a boundary drain's synchronous sibling in the editor, and a sweep takes it under sync_swap`` () =
-    let fired = suggestCode "CR0040" syncSource
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0040" syncSource
     // A and B have a sibling: an editor-only offer; D has none: a note
     Assert.Equal(
         2,
@@ -139,8 +138,7 @@ class C
 let ``CR0125 comments a retired protocol out of the flags in the editor, and a sweep does under drop_legacy_protocols``
     ()
     =
-    let fired = suggestCode "CR0125" protocolSource
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0125" protocolSource
 
     Assert.Equal(
         2,
@@ -188,7 +186,7 @@ let ``CR0109 per_call false keeps only the hoists out of loops and per-element l
     let loopsOnly =
         suggestCodeWith (with' "csharp_refactor.CR0109.per_call" "false") "CR0109" source
 
-    Assert.Equal(2, loopsOnly.Length)
+    assertFired 2 source loopsOnly
     Assert.DoesNotContain(loopsOnly, fun s -> source.Substring(s.Span.Start, s.Span.Length).Contains @"^\d+$")
 
 // ---- the review's reproductions: no swap or retirement where it would mean something else ----

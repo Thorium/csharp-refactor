@@ -20,7 +20,7 @@ let ``hole-free interpolation loses its dollar`` () =
             """
 
     let fired = suggestCode code source
-    Assert.Equal(3, fired.Length)
+    assertFired 3 source fired
 
     let fixedSource = fixAll code source
     Assert.Contains("""=> "no holes";""", fixedSource)

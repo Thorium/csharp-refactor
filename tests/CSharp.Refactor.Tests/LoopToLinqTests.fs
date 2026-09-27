@@ -27,8 +27,7 @@ let ``a copy before a consumer or a foreach goes, before a lazy stage it moves a
             }
             """
 
-    let fired = suggestCode "CR0020" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0020" source
     let fixedSource = fixAll "CR0020" source
     Assert.Contains("bool A(HashSet<int> xs) => xs.Any(x => x > 1);", fixedSource)
     Assert.Contains("void B(IEnumerable<int> xs) { foreach (var x in xs) Console.WriteLine(x); }", fixedSource)
@@ -80,8 +79,7 @@ let ``two Selects fuse and an identity Select goes, a duplicated impure stage or
             }
             """
 
-    let fired = suggestCode "CR0029" source
-    Assert.Equal(5, fired.Length)
+    let fired = fires 5 "CR0029" source
     let fixedSource = fixAll "CR0029" source
     Assert.Contains("ps.Select(p => p.Parent.Name);", fixedSource)
     Assert.Contains("ps.Select(p => p.Name.Length * p.Name.Length);", fixedSource)
@@ -115,8 +113,7 @@ class C
 }
 """
 
-    let fired = suggestCode "CR0021" source
-    Assert.Equal(5, fired.Length)
+    let fired = fires 5 "CR0021" source
     let fixedSource = fixAll "CR0021" source
     Assert.Contains("decimal A(List<Item> items) { return items.Sum(i => i.Price); }", fixedSource)
 
@@ -166,8 +163,7 @@ let ``a flag set or cleared by a loop is Any or All, an impure predicate or a mi
             }
             """
 
-    let fired = suggestCode "CR0022" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0022" source
     let fixedSource = fixAll "CR0022" source
     Assert.Contains("bool A(IEnumerable<int> xs) { bool found = xs.Any(x => x > 3); return found; }", fixedSource)
     Assert.Contains("bool B(IEnumerable<int> xs) { bool ok = xs.All(x => x >= 0); return ok; }", fixedSource)
@@ -201,7 +197,7 @@ let ``CR0022 without a break needs a total condition over an eager source and th
 
     let fired = suggestCode "CR0022" source
     // H1 (`x.Value`) and H3 (a user iterator walked to its end) are notes; H2's `x!` never fired
-    Assert.Equal(6, fired.Length)
+    assertFired 6 source fired
     Assert.Equal(4, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     let fixedSource = fixAll "CR0022" source
     Assert.Contains("bool found = xs.Any(x => x > 3); return found;", fixedSource)
@@ -233,8 +229,7 @@ let ``CR0022 without a break takes a string comparison, not a user collection or
             }
             """
 
-    let fired = suggestCode "CR0022" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0022" source
     Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
 
     Assert.Contains(
@@ -256,8 +251,7 @@ let ``CR0022 without a break takes a StartsWith of a variable: a null element ar
             }
             """
 
-    let fired = suggestCode "CR0022" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0022" source
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll "CR0022" source
     Assert.Contains("""bool found = xs.Any(p => p.Name.StartsWith(p.Sub!)); return found;""", fixedSource)
@@ -284,11 +278,9 @@ let ``CR0022 and CR0028 are notes where a repository extension would take the ca
             }
             """
 
-    let flags = suggestCode "CR0022" source
-    Assert.Equal(1, flags.Length)
+    let flags = fires 1 "CR0022" source
     Assert.Empty flags.[0].Fixes
-    let fills = suggestCode "CR0028" source
-    Assert.Equal(2, fills.Length)
+    let fills = fires 2 "CR0028" source
     Assert.Equal(1, fills |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     Assert.Contains("var r = xs.Where(x => x > 1).ToList(); return r;", fixAll "CR0028" source)
 
@@ -336,7 +328,7 @@ let ``CR0022 without a break follows the source to its visible origin and a Sele
 
     Assert.Empty failures
     let fired = suggestions |> List.filter (fun s -> s.Code = "CR0022")
-    Assert.Equal(6, fired.Length)
+    assertFired 6 source fired
     // the field a constructor fills with an iterator, the property and the
     // local holding one, `Cast<T>()` behind a getter, and `Log` counting its
     // calls under `Select`: notes; Y08 over a list takes the fix
@@ -384,7 +376,7 @@ let ``CR0022 without a break takes a materialised copy of an iterator, and sees 
 
     Assert.Empty failures
     let fired = suggestions |> List.filter (fun s -> s.Code = "CR0022")
-    Assert.Equal(3, fired.Length)
+    assertFired 3 source fired
     // `ToArray()` walked the iterator before the loop; a getter that yields
     // and an explicit `IEnumerable<T>.GetEnumerator()` that yields run code
     // per element
@@ -471,8 +463,7 @@ let ``a literal list probed per element becomes a set, other uses or a public fi
             }
             """
 
-    let fired = suggestCode "CR0023" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0023" source
     let fixedSource = fixAll "CR0023" source
 
     Assert.Contains(
@@ -549,8 +540,7 @@ let ``a fill loop that is then only read becomes the pipeline, a later mutation 
             }
             """
 
-    let fired = suggestCode "CR0028" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0028" source
     let fixedSource = fixAll "CR0028" source
 
     Assert.Contains(

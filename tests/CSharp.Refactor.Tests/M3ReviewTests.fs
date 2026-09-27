@@ -158,7 +158,7 @@ let ``CR0147 needs a subject the flow proves not null and var binders`` () =
 
     let fired = suggestCode "CR0147" source
     // A's subject may be null; B's binder is not var (the pattern would retype it); D converts
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     Assert.Contains("case [var a]:", fixAll "CR0147" source)
     Assert.Contains("long a = xs[0];", fixAll "CR0147" source)
 

@@ -261,6 +261,11 @@ let source =
         """
 ```
 
+`fires 3 "CR0046" source` returns a rule's suggestions and asserts their
+count, and `assertFired` does the same for a list filtered by hand. A
+mismatch lists the text each suggestion fired on, so the failure names the
+site that was missed, where a bare count would not.
+
 A literal that must be a constant (an attribute argument, a `[<Literal>]`,
 a printf format) or holds a tab, a `\r` or trailing whitespace stays an
 escaped `"...\n..."` string.

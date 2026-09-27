@@ -41,8 +41,7 @@ let ``a disposable that stays in scope becomes a using declaration`` () =
             }
             """
 
-    let fired = suggestCode "CR0060" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0060" source
     Assert.True(fired |> List.forall (fun s -> not s.Fixes.IsEmpty))
     let fixedSource = fixAll "CR0060" source
 
@@ -111,7 +110,7 @@ let ``an ownership transfer is silent, an unknown destination is a note naming i
     )
 
     let messages = notes |> List.map (fun s -> s.Message)
-    Assert.Equal(4, notes.Length)
+    assertFired 4 source notes
     Assert.Contains(messages, fun m -> m.Contains "handed to 'Keep'")
     Assert.Contains(messages, fun m -> m.Contains "captured by a lambda")
     Assert.Contains(messages, fun m -> m.Contains "('t') is still pending, handed to 'Register'")

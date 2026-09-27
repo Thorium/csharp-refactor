@@ -36,7 +36,7 @@ let ``negations, bool literals, CompareTo and LINQ shapes rewrite, bracketed whe
             """
 
     let fired = suggestCode code source
-    Assert.Equal(14, fired.Length)
+    assertFired 14 source fired
     let fixedSource = fixAll code source
     Assert.Contains("bool A(int a, int b) => a != b;", fixedSource)
     Assert.Contains("bool B(int a, int b) => a >= b && b < 3;", fixedSource)
@@ -151,9 +151,9 @@ let ``Count to Any needs a total predicate and an eager source, else it is a not
             """
 
     let fired = suggestCode code source
-    Assert.Equal(14, fired.Length)
+    assertFired 14 source fired
     let fixes = fired |> List.filter (fun s -> not s.Fixes.IsEmpty)
-    Assert.Equal(9, fixes.Length)
+    assertFired 9 source fixes
     let fixedSource = fixAll code source
     Assert.Contains("bool A(List<int> list) => list.Any(x => x > 0);", fixedSource)
     Assert.Contains("bool B(Item[] arr, int id) => arr.Any(x => x.Id == id);", fixedSource)
@@ -208,12 +208,12 @@ let ``Count to Any takes string comparisons, Contains, a comparer and an interfa
             """
 
     let fired = suggestCode code source
-    Assert.Equal(11, fired.Length)
+    assertFired 11 source fired
     let fixes = fired |> List.filter (fun s -> not s.Fixes.IsEmpty)
     // K01 (a visible iterator behind AsQueryable), K03 (a user collection whose
     // GetEnumerator yields), K04 (Cast), K07 (a user conversion) and K12
     // (File.ReadLines) are positively detected; the rest take the fix
-    Assert.Equal(6, fixes.Length)
+    assertFired 6 source fixes
     let fixedSource = fixAll code source
     Assert.Contains("""names.Any(n => n.StartsWith("A"));""", fixedSource)
     Assert.Contains("""list.Any(x => x.Tags.Contains("a"));""", fixedSource)
@@ -249,7 +249,7 @@ let ``Count to Any takes clock reads, method groups, case folds, conditional acc
             """
 
     let fired = suggestCode code source
-    Assert.Equal(6, fired.Length)
+    assertFired 6 source fired
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll code source
     Assert.Contains("xs.Any(p => p.When < DateTime.UtcNow);", fixedSource)
@@ -286,7 +286,7 @@ let ``Count to Any takes a variable string argument, a user element's Equals or 
     // nothing here is positively known to throw after the first match: a null
     // argument to Contains, a user Equals or GetHashCode are the residual
     let fired = suggestCode code source
-    Assert.Equal(7, fired.Length)
+    assertFired 7 source fired
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll code source
     Assert.Contains("bool T01(List<P> xs) => xs.Any(p => p.Name.Contains(p.Sub!));", fixedSource)
@@ -334,7 +334,7 @@ let ``a char divisor, dynamic, default, sizeof, checked, tuple and with operands
     Assert.Empty failures
     let hints = suggestions |> List.filter (fun s -> s.Code = code)
     // every Count shape is at least a note; the divisors and the plain ones take the fix
-    Assert.Equal(11, hints.Length)
+    assertFired 11 source hints
     let fixedSource = fixAll code source
     Assert.Contains("xs.Any(x => x % 'a' == 0);", fixedSource)
     Assert.Contains("xs.Any(x => x / 'A' > 1);", fixedSource)
@@ -383,7 +383,7 @@ let ``Count to Any follows a source to its visible origin and a predicate's user
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
     let hints = suggestions |> List.filter (fun s -> s.Code = code)
-    Assert.Equal(10, hints.Length)
+    assertFired 10 source hints
     // an iterator behind a property or a local, `Cast<T>()` behind a getter, a
     // hand-written enumerator writing its state, a `Check` counting its
     // calls: notes; a pure user predicate and a parameter's sequence: the fix
@@ -456,7 +456,7 @@ let ``Count to Any takes a materialised source, a callee's own values and an in 
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
     let hints = suggestions |> List.filter (fun s -> s.Code = code)
-    Assert.Equal(18, hints.Length)
+    assertFired 18 source hints
     // A: `ToList`/`ToHashSet` walked the iterator already, wherever the copy is
     // held; B: a store into a local the callee made, an out or ref landing in
     // a local, an `in` argument, an initializer's `N = x`: nothing outside
@@ -515,7 +515,7 @@ let ``error types in a predicate do not silence the file's hints`` () =
 
     Assert.Empty failures
     let hints = suggestions |> List.filter (fun s -> s.Code = code)
-    Assert.Equal(2, hints.Length)
+    assertFired 2 source hints
     // an unresolved `.Value` is nothing known to throw: both keep their fix
     Assert.All(hints, fun s -> Assert.NotEmpty s.Fixes)
 
@@ -534,7 +534,7 @@ let ``Count to Any takes CountBy with or without a comparer`` () =
             """
 
     let fired = suggestCode code source
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll code source
     Assert.Contains("bool A(List<string> xs) => xs.CountBy(x => x.Length).Any();", fixedSource)
@@ -562,7 +562,7 @@ let ``Count to Any keeps the fix in a nullable-disabled file and on stored seque
             """
 
     let fired = suggestCode code source
-    Assert.Equal(4, fired.Length)
+    assertFired 4 source fired
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll code source
     Assert.Contains("bool A() => people.Any(p => p.Age > 18);", fixedSource)
@@ -589,7 +589,7 @@ let ``only the outermost of nested matches fires and effectful bindings are not 
     // A: one suggestion for the whole expression, not one per nested match
     // (the next pass takes the rest); B: no metavariable is dropped or
     // repeated, so the call is fine
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     let fixedSource = fixAll code source
     Assert.Contains("bool A(int a) => !(a == 1) != false;", fixedSource)
     Assert.Contains("bool B() => Next() != 1;", fixedSource)
@@ -631,7 +631,7 @@ let ``a custom hints file adds rules without BCL checks`` () =
         )
 
     let fired = suggestCodeWith options code source
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     let fixedSource = fixAllWith options code source
     Assert.Contains("bool A(object o) => o is null;", fixedSource)
     Assert.Contains("int B(int a) => (a + 1) * 2;", fixedSource)

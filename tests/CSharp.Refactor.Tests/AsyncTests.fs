@@ -320,8 +320,7 @@ let ``a method that only awaits an async call returns the task, one with a using
             }
             """
 
-    let fired = suggestCode "CR0046" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0046" source
     let fixedSource = fixAll "CR0046" source
     Assert.Contains("Task<int> A(int x) { return Inner(x); }", fixedSource)
     Assert.Contains("Task<int> B(int x) => Inner(x);", fixedSource)
@@ -368,27 +367,27 @@ let ``CR0047 notes a top-level lock on a literal or a Type without a gate offer,
 
                 """
         ] do
-        let suggestions, failures = run ("using System;\n" + body)
+        let source = "using System;\n" + body
+        let suggestions, failures = run source
         Assert.Empty failures
         let weak = suggestions |> List.filter (fun s -> s.Code = "CR0047")
-        Assert.Equal(1, weak.Length)
+        assertFired 1 source weak
         // a field cannot be declared among top-level statements: a note
         Assert.Empty weak.Head.Fixes
 
     // a class member keeps the editor's gate
-    let suggestions, failures =
-        run (
-            csharp
-                """
-                using System;
-                class C { void M() { lock ("gate") { Console.Write("x"); } } }
+    let source =
+        csharp
+            """
+            using System;
+            class C { void M() { lock ("gate") { Console.Write("x"); } } }
 
-                """
-        )
+            """
 
+    let suggestions, failures = run source
     Assert.Empty failures
     let weak = suggestions |> List.filter (fun s -> s.Code = "CR0047")
-    Assert.Equal(1, weak.Length)
+    assertFired 1 source weak
     Assert.NotEmpty weak.Head.Fixes
 
 [<Fact>]
@@ -431,8 +430,7 @@ let ``weak locks are noted with a gate offer, Monitor.Enter with try/finally bec
     Assert.Contains("private readonly Lock _gate = new();", gated)
     Assert.Contains("void A() { lock (_gate) { count++; } }", gated)
 
-    let monitor = suggestCode "CR0048" source
-    Assert.Equal(2, monitor.Length)
+    let monitor = fires 2 "CR0048" source
     let fixedSource = fixAll "CR0048" source
 
     Assert.Contains(
@@ -488,8 +486,7 @@ let ``a check-then-store on a ConcurrentDictionary takes GetOrAdd on the miss; a
             }
             """
 
-    let fired = suggestCode "CR0049" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0049" source
     let fixedSource = fixAll "CR0049" source
 
     Assert.Contains(
@@ -606,8 +603,7 @@ let ``a using outlived by the returned task is awaited; a this-capturing handler
             }
             """
 
-    let fired = suggestCode "CR0051" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0051" source
     let fixedSource = fixAll "CR0051" source
 
     Assert.Contains(
@@ -725,7 +721,7 @@ let ``async void becomes async Task when every caller is async, a handler or a s
 
     let fired = suggestCode "CR0043" source
     // Work is fixed; Sub (a sync caller) and Handler (called from a lambda) are notes
-    Assert.Equal(3, fired.Length)
+    assertFired 3 source fired
     let fixedSource = fixAll "CR0043" source
     Assert.Contains("async Task Work() { await Task.Yield(); }", fixedSource)
     Assert.Contains("async Task A() { await Work(); }", fixedSource)
@@ -766,8 +762,7 @@ let ``a sync call with an Async twin inside an async body awaits the twin; Dispo
             }
             """
 
-    let fired = suggestCode "CR0042" source
-    Assert.Equal(4, fired.Length)
+    let fired = fires 4 "CR0042" source
     let fixedSource = fixAll "CR0042" source
     Assert.Contains("var line = await reader.ReadLineAsync(); return line;", fixedSource)
     Assert.Contains("async Task B(Stream s) { await s.FlushAsync(); }", fixedSource)
@@ -852,8 +847,7 @@ let ``async void with no caller, or public in a library, keeps the note`` () =
             }
             """
 
-    let fired = suggestCode "CR0043" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0043" source
     Assert.True(fired |> List.forall (fun s -> s.Fixes.IsEmpty))
 
 [<Fact>]

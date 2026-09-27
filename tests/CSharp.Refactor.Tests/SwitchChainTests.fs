@@ -35,8 +35,7 @@ let ``a type-test chain with casts becomes a switch, the cast declaration the bi
             }
             """
 
-    let fired = suggestCode "CR0003" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0003" source
     let fixedSource = fixAll "CR0003" source
 
     let expected =
@@ -227,8 +226,7 @@ let ``single-return arms become a switch expression`` () =
             }
             """
 
-    let fired = suggestCode "CR0002" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0002" source
     let fixedSource = fixAll "CR0002" source
 
     let expected =

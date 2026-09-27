@@ -33,8 +33,7 @@ class C
 }
 """
 
-    let fired = suggestCode "CR0024" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0024" source
     let fixedSource = fixAll "CR0024" source
     Assert.Contains("void A(int[] xs) { acc.AddRange(xs); }", fixedSource)
 
@@ -69,8 +68,7 @@ let ``a parameterless Random used for calls becomes Random.Shared, a seeded or s
             }
             """
 
-    let fired = suggestCode "CR0031" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0031" source
     let fixedSource = fixAll "CR0031" source
     Assert.Contains("int A() => Random.Shared.Next(10);", fixedSource)
     Assert.Contains("int B() { var r = Random.Shared; return r.Next(1, 6) + r.Next(); }", fixedSource)
@@ -100,8 +98,7 @@ let ``a Keys loop with a lookup per key enumerates the pairs, a writing loop sta
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0032" source
     let fixedSource = fixAll "CR0032" source
 
     Assert.Contains(
@@ -147,8 +144,7 @@ let ``CR0032 still enumerates the pairs when nothing before a lookup can write t
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(11, fired.Length)
+    let fired = fires 11 "CR0032" source
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll "CR0032" source
     Assert.Contains("""foreach (var (k, value) in d) Console.WriteLine($"{k}={value}");""", fixedSource)
@@ -190,8 +186,7 @@ let ``CR0032 is a note when something before the lookup may write the dictionary
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(10, fired.Length)
+    let fired = fires 10 "CR0032" source
     Assert.All(fired, fun s -> Assert.Empty s.Fixes)
 
 [<Fact>]
@@ -215,8 +210,7 @@ let ``CR0032 lets any call run before the lookup of a dictionary no other code c
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(4, fired.Length)
+    let fired = fires 4 "CR0032" source
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll "CR0032" source
 
@@ -253,8 +247,7 @@ let ``CR0032 is a note for a visible iterator, an alias store or a closure write
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(5, fired.Length)
+    let fired = fires 5 "CR0032" source
     // H03 and H05 call through interfaces whose implementations cannot be
     // seen: the accepted residual, fixed
     Assert.Equal(2, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
@@ -289,8 +282,7 @@ let ``CR0032 sweeps past calls whose bodies cannot be seen or touch no dictionar
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(7, fired.Length)
+    let fired = fires 7 "CR0032" source
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll "CR0032" source
     Assert.Contains("foreach (var (k, value) in d) { Note(k); total += value; }", fixedSource)
@@ -325,8 +317,7 @@ let ``CR0032 looks three calls deep into visible bodies for a dictionary touched
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0032" source
     // three deep is seen; five deep is beyond the look and the accepted residual
     Assert.Empty fired.[0].Fixes
     Assert.NotEmpty fired.[1].Fixes
@@ -367,8 +358,7 @@ let ``CR0032 counts a dictionary as confined only through its own members, BCL k
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(7, fired.Length)
+    let fired = fires 7 "CR0032" source
     Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     Assert.Contains("foreach (var (k, value) in d) { Sink.Poke(k); t += value; }", fixAll "CR0032" source)
 
@@ -392,22 +382,23 @@ let ``CR0032 in a top-level program sees a neighbouring statement that lets the 
             """
         + bump
 
-    let run (source: string) =
+    let run (count: int) (source: string) =
         let compilation, tree =
             compileRaw Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest source
 
-        suggestRawClean compilation tree |> List.filter (fun s -> s.Code = "CR0032")
+        let fired =
+            suggestRawClean compilation tree |> List.filter (fun s -> s.Code = "CR0032")
+
+        assertFired count source fired
+        fired
 
     // `var m = d;` in another top-level statement is an alias the local
     // function visibly writes through: the local is not confined, and the
     // call before the lookup touches a dictionary
-    let escaping = run (program "var m = d;\n" "void Bump(string k) => m[k] = 2;\n")
-
-    Assert.Equal(1, escaping.Length)
+    let escaping = run 1 (program "var m = d;\n" "void Bump(string k) => m[k] = 2;\n")
     Assert.Empty escaping.Head.Fixes
 
-    let confined = run (program "" "static void Bump(string k) { }\n")
-    Assert.Equal(1, confined.Length)
+    let confined = run 1 (program "" "static void Bump(string k) { }\n")
     Assert.NotEmpty confined.Head.Fixes
 
 [<Fact>]
@@ -430,8 +421,7 @@ let ``CR0032 sees a method group of a writer as an escape and an unbound call as
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(5, fired.Length)
+    let fired = fires 5 "CR0032" source
 
     let fixedNames =
         fired
@@ -465,7 +455,7 @@ let ``CR0032 sweeps past an unbound call: a baseline error is no detection`` () 
     // the unbound `Foo` is the point: raw, without the compile-clean check
     let fired = suggestRaw compilation tree |> List.filter (fun s -> s.Code = "CR0032")
 
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
 
 [<Fact>]
@@ -517,7 +507,7 @@ let ``CR0032 follows a partial method's implementation and a delegate a construc
 
     Assert.Empty failures
     let fired = suggestions |> List.filter (fun s -> s.Code = "CR0032")
-    Assert.Equal(7, fired.Length)
+    assertFired 7 source fired
     // P: every call before the lookup visibly writes `_d` — through the
     // partial implementation, the stored lambdas or the method group; Q: a
     // property receiver with a setter, and another property read, run only
@@ -572,7 +562,7 @@ let ``CR0032 follows a function pointer through a cast in parentheses to the met
 
     Assert.Empty failures
     let fired = suggestions |> List.filter (fun s -> s.Code = "CR0032")
-    Assert.Equal(3, fired.Length)
+    assertFired 3 source fired
     // `(delegate*<string, void>)(&Bump)` binds the method group through the
     // conversion: the pointer visibly writes `S`; `&Noop` through the same
     // cast writes nothing
@@ -621,8 +611,7 @@ let ``CR0032 times a compound store's getter before its right side, and formats 
             }
             """
 
-    let fired = suggestCode "CR0032" source
-    Assert.Equal(4, fired.Length)
+    let fired = fires 4 "CR0032" source
     // W1 and W2 keep the loop as notes; W3 and W4 are fixed
     Assert.Equal(2, fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
     let fixedSource = fixAll "CR0032" source
@@ -652,8 +641,7 @@ let ``an appended concatenation appends its pieces, splitting only string additi
             }
             """
 
-    let fired = suggestCode "CR0033" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0033" source
     let fixedSource = fixAll "CR0033" source
     Assert.Contains("sb.Append(a).Append(n).Append(b);", fixedSource)
     Assert.Contains("sb.Append(n + 1).Append(a);", fixedSource)
@@ -768,8 +756,7 @@ let ``a query per element of an outer loop is the N+1, a chunked outer loop is a
             }
             """
 
-    let fired = suggestCode "CR0034" source
-    Assert.Equal(2, fired.Length)
+    fires 2 "CR0034" source |> ignore
 
 [<Fact>]
 let ``CR0034 leaves one query per pre-split id batch alone`` () =

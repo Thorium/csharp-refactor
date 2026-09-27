@@ -32,8 +32,7 @@ class C
 }}
 """
 
-    let fired = suggestCode "CR0006" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0006" source
     let fixedSource = fixAll "CR0006" source
 
     Assert.Contains(

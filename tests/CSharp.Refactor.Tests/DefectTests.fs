@@ -26,8 +26,7 @@ let ``a for variable captured by an escaping closure gets a per-iteration copy``
             }
             """
 
-    let fired = suggestCode "CR0160" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0160" source
     Assert.True(fired |> List.forall (fun s -> not s.Fixes.IsEmpty))
     let fixedSource = fixAll "CR0160" source
 
@@ -131,7 +130,7 @@ let ``a closure handed to an unknown callee, a closure writing the variable, and
 
     let fired = suggestCode "CR0160" source
     // the unknown callee: a note; the writer: quiet; the stored lazy chain: a fix
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     let notes = fired |> List.filter (fun s -> s.Fixes.IsEmpty)
     Assert.Equal<string list>([ "() => Console.WriteLine(i)" ], firedText source notes)
     let fixedSource = fixAll "CR0160" source
@@ -164,8 +163,7 @@ let ``a straight-line local written after an escaped closure is a note`` () =
             }
             """
 
-    let fired = suggestCode "CR0160" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0160" source
     Assert.True(fired.Head.Fixes.IsEmpty)
 
 // ---- CR0161 ----
@@ -244,8 +242,7 @@ let ``a dropped or method-local timer is noted; a field-held or disposed one is 
             }
             """
 
-    let fired = suggestCode "CR0162" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0162" source
     Assert.True(fired |> List.forall (fun s -> s.Fixes.IsEmpty))
 
 // ---- CR0163 ----
@@ -274,8 +271,7 @@ let ``an unguarded semaphore region is wrapped in try-finally`` () =
             }
             """
 
-    let fired = suggestCode "CR0163" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0163" source
     let fixedSource = fixAll "CR0163" source
 
     let expected =
@@ -341,8 +337,7 @@ let ``a guarded region, a timeout wait and a between-declared local read after t
             }
             """
 
-    let fired = suggestCode "CR0163" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0163" source
     Assert.True(fired.Head.Fixes.IsEmpty)
 
 // ---- CR0164 ----
@@ -382,8 +377,7 @@ let ``a check-then-assign static cache becomes LazyInitializer; an instance fiel
             }
             """
 
-    let fired = suggestCode "CR0164" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0164" source
     let fixedSource = fixAll "CR0164" source
     Assert.Contains("return LazyInitializer.EnsureInitialized(ref _cache, () => new List<int>());", fixedSource)
     Assert.Contains("""static string Name => LazyInitializer.EnsureInitialized(ref _name, () => "x");""", fixedSource)
@@ -415,8 +409,7 @@ let ``CR0164 fills a settings cache whose loader may answer null by CompareExcha
             }
             """
 
-    let fired = suggestCode "CR0164" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0164" source
     Assert.All(fired, (fun s -> Assert.NotEmpty s.Fixes))
     let fixedSource = fixAll "CR0164" source
 
@@ -472,8 +465,7 @@ let ``a wrapping throw gains the caught exception as inner, naming an unnamed ca
             }
             """
 
-    let fired = suggestCode "CR0165" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0165" source
     let fixedSource = fixAll "CR0165" source
     Assert.Contains("""catch (Exception ex) { throw new SyncException($"sync {id} failed", ex); }""", fixedSource)
     Assert.Contains("""catch (InvalidOperationException ex) { throw new SyncException("failed", ex); }""", fixedSource)
@@ -586,7 +578,7 @@ let ``exception-driven parses become TryParse in the assignment, empty-catch and
 
     let fired = suggestCode "CR0166" source
     // A, A2, B2, B, D, E, F fire; A, B2, B, D carry the fix; B3's ArgumentException never caught a format error
-    Assert.Equal(7, fired.Length)
+    assertFired 7 source fired
     Assert.Equal(4, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     let fixedSource = fixAll "CR0166" source
 
@@ -696,8 +688,7 @@ let ``CR0166 takes a user getter or method evaluating the argument: one that thr
             }
             """
 
-    let fired = suggestCode "CR0166" source
-    Assert.Equal(6, fired.Length)
+    let fired = fires 6 "CR0166" source
     Assert.All(fired, fun s -> Assert.NotEmpty s.Fixes)
     let fixedSource = fixAll "CR0166" source
     Assert.Contains("if (!int.TryParse(Cfg.Raw, out port)) { port = 80; }", fixedSource)
@@ -804,7 +795,7 @@ let ``CR0166 follows a user method or getter three calls deep for a throwing sha
     // getter, and a null receiver the catch absorbed: kept (a nested parse
     // under a FormatException catch is the note); `Trim`, an auto-property,
     // a plain user method and a non-nullable receiver: the fix
-    Assert.Equal(5, fired.Length)
+    assertFired 5 source fired
     Assert.Equal(4, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     let fixedSource = fixAll "CR0166" source
     Assert.Contains("if (!int.TryParse(s.Trim(), out v)) { v = -1; }", fixedSource)
@@ -857,8 +848,7 @@ let ``CR0166 keeps the configured default port when the setting is bad: the pars
             }
             """
 
-    let fired = suggestCode "CR0166" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0166" source
     Assert.All(fired, (fun s -> Assert.NotEmpty s.Fixes))
     let fixedSource = fixAll "CR0166" source
 
@@ -1094,8 +1084,7 @@ let ``a working loop under an unobserved token gets the check; an observed loop 
             }
             """
 
-    let fired = suggestCode "CR0170" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0170" source
     let fixedSource = fixAll "CR0170" source
 
     Assert.Contains(
@@ -1149,8 +1138,7 @@ let ``a filter loop becomes RemoveAll, another mutation enumerates a snapshot, m
             }
             """
 
-    let fired = suggestCode "CR0171" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0171" source
     let fixedSource = fixAll "CR0171" source
     Assert.Contains("xs.RemoveAll(x => x < 0);", fixedSource)
     Assert.Contains("foreach (var name in names.ToList())", fixedSource)

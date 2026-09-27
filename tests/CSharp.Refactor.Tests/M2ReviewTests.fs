@@ -44,8 +44,7 @@ let ``CR0021 leaves a float sum alone and keeps commented statements`` () =
             }
             """
 
-    let fired = suggestCode "CR0021" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0021" source
     Assert.Contains("return xs.Sum();", fixAll "CR0021" source)
     Assert.Contains("// running total", fixAll "CR0021" source)
 
@@ -164,8 +163,7 @@ let ``CR0041 and CR0043 stand down on a method mentioned as a group`` () =
             """
 
     Assert.Empty(suggestCode "CR0041" source)
-    let voids = suggestCode "CR0043" source
-    Assert.Equal(1, voids.Length)
+    let voids = fires 1 "CR0043" source
     Assert.True(voids.Head.Fixes.IsEmpty)
 
 [<Fact>]
@@ -220,7 +218,7 @@ let ``CR0048 leaves a body that exits the monitor itself, or a commented finally
     let fired =
         suggestCode "CR0048" source |> List.filter (fun s -> not s.Fixes.IsEmpty)
 
-    Assert.Equal(1, fired.Length)
+    assertFired 1 source fired
 
 [<Fact>]
 let ``CR0051 binds every return of the method once it is async`` () =

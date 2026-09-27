@@ -27,8 +27,7 @@ let ``attribute lists on one line merge, targets and comments hold`` () =
             }
             """
 
-    let fired = suggestCode "CR0142" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0142" source
 
     Assert.Contains(
         csharp
@@ -64,8 +63,7 @@ let ``a trailing note on a public declaration becomes its summary, weak notes an
             }
             """
 
-    let fired = suggestCode "CR0146" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0146" source
     let fixedSource = fixAll "CR0146" source
 
     Assert.Contains(
@@ -108,8 +106,7 @@ let ``an enum member's trailing note becomes its summary, comma or not`` () =
             }
             """
 
-    let fired = suggestCode "CR0146" source
-    Assert.Equal(4, fired.Length)
+    let fired = fires 4 "CR0146" source
     let fixedSource = fixAll "CR0146" source
 
     Assert.Contains(
@@ -153,8 +150,7 @@ let ``a namespace spelled out often enough becomes a using, sorted into its fami
             }
             """
 
-    let fired = suggestCode "CR0145" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0145" source
     let fixedSource = fixAll "CR0145" source
 
     Assert.Contains(
@@ -192,7 +188,6 @@ let ``an imported namespace, a clashing name and a global alias stand down`` () 
             """
 
     // `Here` is imported (IDE0001's); `There` would clash with the imported `Helper`
-    let fired = suggestCode "CR0145" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0145" source
     Assert.Empty(fired.Head.Fixes)
     Assert.Contains("held", fired.Head.Message)

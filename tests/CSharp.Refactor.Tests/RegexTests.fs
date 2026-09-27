@@ -36,7 +36,7 @@ let ``an invalid pattern is noted; plain-text patterns become string operations`
     Assert.Equal<string list>([ "\"(unclosed\""; "\"[\"" ], firedText source (suggestCode "CR0107" source))
     let fired = suggestCode "CR0108" source
     // B, D, G, K, L, N..R: H carries a substitution, I an option, M a real pattern
-    Assert.Equal(10, fired.Length)
+    assertFired 10 source fired
     let fixedSource = fixAll "CR0108" source
     Assert.Contains("""s.StartsWith("abc", StringComparison.Ordinal)""", fixedSource)
     Assert.Contains("""s.Contains("abc")""", fixedSource)
@@ -118,7 +118,7 @@ let ``a regex built per call is hoisted to a generated regex, the type made part
 
     let fired = suggestCode "CR0109" source
     // A twice, B, D, E, G, H twice; F is CR0108's (plain text: no hoist, a string operation)
-    Assert.Equal(8, fired.Length)
+    assertFired 8 source fired
     Assert.True(fired |> List.forall (fun s -> not s.Fixes.IsEmpty))
     let fixedSource = fixAllAllowing [ "CS8795" ] None "CR0109" source
     Assert.Contains("partial class C", fixedSource)

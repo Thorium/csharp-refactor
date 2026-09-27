@@ -49,8 +49,7 @@ let ``an index that only reads becomes a foreach, the alias line naming the elem
             }
             """
 
-    let fired = suggestCode "CR0015" source
-    Assert.Equal(5, fired.Length)
+    let fired = fires 5 "CR0015" source
     let fixedSource = fixAll "CR0015" source
     Assert.Contains("foreach (var item in xs) total += item;", fixedSource)
     Assert.Contains("foreach (var page in pages) total += page.Length;", fixedSource)
@@ -180,7 +179,7 @@ let ``a stored, returned, threaded or deferred closure over the for variable is 
     let fired =
         suggest source |> List.filter (fun s -> s.Code = "CR0017" || s.Code = "CR0160")
 
-    Assert.Equal(7, fired.Length)
+    assertFired 7 source fired
     Assert.Empty(fired |> List.filter (fun s -> s.Code = "CR0017"))
 
 [<Fact>]

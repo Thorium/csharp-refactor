@@ -34,7 +34,7 @@ let ``a catch-all that never reads the exception is noted, the idioms and acknow
     let fired = suggestCode "CR0064" source
     let texts = firedText source fired
     // A, B, H (teardown), I (probe), L (a filter that never reads the exception)
-    Assert.Equal(5, fired.Length)
+    assertFired 5 source fired
     Assert.True(fired |> List.exists (fun s -> s.Message.Contains "teardown"))
     Assert.True(fired |> List.exists (fun s -> s.Message.Contains "probe"))
 
@@ -72,8 +72,7 @@ let ``a rethrowing guard becomes an exception filter, an effectful one stays`` (
             }
             """
 
-    let fired = suggestCode "CR0065" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0065" source
     let fixedSource = fixAll "CR0065" source
 
     Assert.Contains(
@@ -107,8 +106,7 @@ let ``CR0065 keeps a guard whose condition can throw as a note`` () =
             }
             """
 
-    let fired = suggestCode "CR0065" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0065" source
     // A reads through a possibly-null inner exception, B indexes and casts: notes
     Assert.Equal(2, fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
     let fixedSource = fixAll "CR0065" source
@@ -343,8 +341,7 @@ let ``ownerless disposables, unreleased fields and a fake Dispose are noted`` ()
         firedText source (suggestCode "CR0061" source)
     )
 
-    let unreleased = suggestCode "CR0062" source
-    Assert.Equal(2, unreleased.Length)
+    let unreleased = fires 2 "CR0062" source
     Assert.True(unreleased |> List.exists (fun s -> s.Message.Contains "Cancel frees nothing"))
     Assert.Equal<string list>([ "Dispose" ], firedText source (suggestCode "CR0063" source))
 
@@ -442,8 +439,7 @@ let ``CR0061 and CR0062 offer the interface and the release in the editor, never
     Assert.DoesNotContain("gate?.Dispose()", implemented)
     Assert.Equal(normalize source, fixAll "CR0061" source)
 
-    let unreleased = suggestCode "CR0062" source
-    Assert.Equal(2, unreleased.Length)
+    let unreleased = fires 2 "CR0062" source
 
     for s in unreleased do
         let release = s.Fixes |> List.exactlyOne

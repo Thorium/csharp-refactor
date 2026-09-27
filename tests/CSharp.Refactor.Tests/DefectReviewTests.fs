@@ -38,7 +38,7 @@ let ``CR0160 copies an outer loop's variable read from an inner loop, and leaves
 
     let fired = suggestCode "CR0160" source
     // i and j from the first nest; n is a shared cell the reset closure writes: quiet
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     let fixedSource = fixAll "CR0160" source
 
     Assert.Contains(
@@ -84,7 +84,7 @@ let ``CR0166 keeps a numeric parse under a FormatException catch, where an overf
 
     let fired = suggestCode "CR0166" source
     let fixes = fired |> List.filter (fun s -> not s.Fixes.IsEmpty)
-    Assert.Equal(1, fixes.Length)
+    assertFired 1 source fixes
     let fixedSource = fixAll "CR0166" source
     Assert.Contains("try { v = long.Parse(s); } catch (FormatException) { v = 0; }", fixedSource)
     Assert.Contains("if (!bool.TryParse(s, out v)) { v = false; }", fixedSource)
@@ -149,8 +149,7 @@ let ``CR0171 is a note where a repository ToList would take the snapshot call`` 
             }
             """
 
-    let fired = suggestCode "CR0171" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0171" source
     Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     Assert.Contains("foreach (var x in set.ToList())", fixAll "CR0171" source)
 

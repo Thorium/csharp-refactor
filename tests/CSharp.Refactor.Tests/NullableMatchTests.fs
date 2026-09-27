@@ -35,7 +35,7 @@ let ``the conditional, statement and chain shapes become patterns`` () =
             """
 
     let fired = suggestCode code source
-    Assert.Equal(7, fired.Length)
+    assertFired 7 source fired
     let fixedSource = fixAll code source
     Assert.Contains("int A(int? x) => x is { } v ? v + 1 : 0;", fixedSource)
     Assert.Contains("int B(int? x) => x is { } v ? v * 2 : 0;", fixedSource)

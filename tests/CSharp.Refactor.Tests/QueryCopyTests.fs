@@ -101,7 +101,7 @@ let ``where List<T> would bind differently from IEnumerable<T>, the move is the 
     let fixedSource = fixAll "CR0178" source
     // D's reassignment and E's Reverse() would not compile over a List:
     // the speculative check drops those two outright
-    Assert.Equal(4, fired.Length)
+    assertFired 4 source fired
     Assert.Contains("Print.Show(Orders.ToList().Where(o => o.Id > 0).Select(o => o.Id));", fixedSource)
     Assert.Contains("Print.Same(Orders.ToList().Where(o => o.Id > 0));", fixedSource)
     Assert.Contains("var r = Orders.ToList().Where(o => o.Id > 0); r = ", fixedSource)
@@ -148,8 +148,7 @@ let ``a string, decimal or nullable comparison is the editor's offer, never the 
             }
             """
 
-    let fired = suggestCode "CR0178" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0178" source
 
     for s in fired do
         Assert.All(s.Fixes, (fun f -> Assert.True f.EditorOnly))

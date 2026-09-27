@@ -147,8 +147,7 @@ let ``a reference tuple in private shapes becomes a value tuple; a null test or 
             }
             """
 
-    let fired = suggestCode "CR0082" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0082" source
     let fixedSource = fixAll "CR0082" source
     Assert.Contains("""private (int, string) Pair() => (1, "a");""", fixedSource)
     Assert.Contains("Tuple<int, int> Checked()", fixedSource)
@@ -209,8 +208,7 @@ let ``a private type's clock slot read through parity members migrates to DateTi
             }
             """
 
-    let fired = suggestCode "CR0089" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0089" source
     let fixedSource = fixAll "CR0089" source
     Assert.Contains("DateTimeOffset started = DateTimeOffset.UtcNow;", fixedSource)
     Assert.Contains("public DateTimeOffset LastSeen { get; set; }", fixedSource)

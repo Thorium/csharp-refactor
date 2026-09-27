@@ -246,8 +246,7 @@ let ``an exhaustive switch whose discard throws becomes UnreachableException; a 
             }
             """
 
-    let fired = suggestCode "CR0157" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0157" source
     Assert.Equal(1, fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
     let fixedSource = fixAll "CR0157" source
     Assert.Contains("Kind.B => 2, _ => throw new UnreachableException() }", fixedSource)
@@ -289,8 +288,7 @@ let ``a chain of length tests becomes a switch over list patterns, and CR0002 st
             }
             """
 
-    let fired = suggestCode "CR0147" source
-    Assert.Equal(1, fired.Length)
+    let fired = fires 1 "CR0147" source
     Assert.Empty(suggestCode "CR0002" source)
     let fixedSource = normalize (fixAll "CR0147" source)
 

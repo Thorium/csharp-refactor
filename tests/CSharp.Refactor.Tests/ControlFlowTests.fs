@@ -80,8 +80,7 @@ let ``if-return-true-return-false becomes return condition, negated where needed
             }
             """
 
-    let fired = suggestCode "CR0001" source
-    Assert.Equal(5, fired.Length)
+    let fired = fires 5 "CR0001" source
     let fixedSource = fixAll "CR0001" source
     Assert.Contains("bool A(int x) { return x > 0; }", fixedSource)
     Assert.Contains("bool B(int x) { return x <= 0; }", fixedSource)
@@ -148,8 +147,7 @@ let ``nested ifs merge with an identical else or with none, never with a lone ou
             }
             """
 
-    let fired = suggestCode "CR0005" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0005" source
     let fixedSource = fixAll "CR0005" source
 
     Assert.Contains(
@@ -260,7 +258,7 @@ let ``adjacent same-body sections stack their labels, non-adjacent and binding o
 
     let fired = suggestCode "CR0009" source
     // the discard arm is the expression's default: `4 or _` reads as a mistake
-    Assert.Equal(2, fired.Length)
+    assertFired 2 source fired
     let fixedSource = fixAll "CR0009" source
 
     Assert.Contains(

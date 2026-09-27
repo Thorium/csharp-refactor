@@ -10,8 +10,7 @@ let ``a hidden character in a literal is escaped, in a comment or identifier not
     let source =
         "\nclass C\n{\n    string A() => \"ab\u200Bc\";\n    // a comment with \u202E reversed text\n    string B() => \"family: ‍\";\n    string D() => @\"x\u200By\";\n}\n"
 
-    let fired = suggestCode "CR0112" source
-    Assert.Equal(3, fired.Length)
+    let fired = fires 3 "CR0112" source
     Assert.Equal(2, fired |> List.filter (fun s -> s.Fixes.IsEmpty) |> List.length)
     let fixedSource = fixAll "CR0112" source
     Assert.Contains("\"ab\\u200Bc\"", fixedSource)
@@ -102,7 +101,7 @@ let ``log templates that do not fit their arguments are noted`` () =
 
     let fired = suggestCode "CR0114" source
     // A (duplicate), B (arity), D (arity), E (interpolation)
-    Assert.Equal(4, fired.Length)
+    assertFired 4 source fired
 
 [<Fact>]
 let ``a log line inside a catch that drops the exception gains it first; a mention or an EventId first is not rewritten``
@@ -125,7 +124,6 @@ let ``a log line inside a catch that drops the exception gains it first; a menti
             """
         + loggerShim
 
-    let fired = suggestCode "CR0115" source
-    Assert.Equal(2, fired.Length)
+    let fired = fires 2 "CR0115" source
     Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     Assert.Contains("""log.LogError(ex, "sync failed {Id}", id);""", fixAll "CR0115" source)

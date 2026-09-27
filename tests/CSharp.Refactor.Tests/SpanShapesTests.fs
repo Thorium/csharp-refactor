@@ -219,8 +219,7 @@ let ``CR0175 sweeps only where the guard and the cut read the same string`` () =
             }
             """
 
-    let fired = suggestCode "CR0175" source
-    Assert.Equal(12, fired.Length)
+    let fired = fires 12 "CR0175" source
 
     let swept =
         fired
@@ -280,8 +279,7 @@ let ``CR0175 under an if ends the window at the cut; closures and awaits hold it
             }
             """
 
-    let fired = suggestCode "CR0175" source
-    Assert.Equal(8, fired.Length)
+    let fired = fires 8 "CR0175" source
 
     let swept =
         fired
@@ -337,8 +335,7 @@ let ``CR0175 holds to the editor a user conversion, operator or Deconstruct betw
             }
             """
 
-    let fired = suggestCode "CR0175" source
-    Assert.Equal(9, fired.Length)
+    let fired = fires 9 "CR0175" source
 
     // the operators, conversion and Deconstruct of `W` visibly assign `Name`;
     // `Benign`'s conversion does not, and `n += 1` is the built-in operator
@@ -367,7 +364,11 @@ let ``CR0175 in a top-level program sees a local reassigned in a neighbouring st
         let compilation, tree =
             compileRaw Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest source
 
-        suggestRawClean compilation tree |> List.filter (fun s -> s.Code = "CR0175")
+        let fired =
+            suggestRawClean compilation tree |> List.filter (fun s -> s.Code = "CR0175")
+
+        assertFired 1 source fired
+        fired
 
     let sweeps (found: CSharp.Refactor.Suggestion list) =
         found
@@ -375,11 +376,9 @@ let ``CR0175 in a top-level program sees a local reassigned in a neighbouring st
 
     // a lambda in another top-level statement writes the local: never proven
     let reassigned = run (program "Action reset = () => s = \"\";\nreset();\n")
-    Assert.Equal(1, reassigned.Length)
     Assert.False(sweeps reassigned)
 
     let plain = run (program "")
-    Assert.Equal(1, plain.Length)
     Assert.True(sweeps plain)
 
 [<Fact>]
@@ -420,8 +419,7 @@ let ``CR0175 sees a deconstruction, a ref alias and a primary constructor parame
             }
             """
 
-    let fired = suggestCode "CR0175" source
-    Assert.Equal(10, fired.Length)
+    let fired = fires 10 "CR0175" source
 
     let swept =
         fired
@@ -484,7 +482,7 @@ let ``CR0175 reads a property through its getter alone, and follows a partial me
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
     let fired = suggestions |> List.filter (fun s -> s.Code = "CR0175")
-    Assert.Equal(10, fired.Length)
+    assertFired 10 source fired
 
     let swept =
         fired
@@ -530,7 +528,7 @@ let ``CR0175 sees the Dispose a using runs and the ToString an interpolation or 
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
     let fired = suggestions |> List.filter (fun s -> s.Code = "CR0175")
-    Assert.Equal(6, fired.Length)
+    assertFired 6 source fired
 
     // a string's or an int's formatting and a BCL `Dispose` run nothing of the user's
     let swept =
@@ -569,7 +567,7 @@ let ``CR0175 takes a getter whose callee writes a field it never reads, or a mem
     let suggestions, failures = allWithFailures source
     Assert.Empty failures
     let fired = suggestions |> List.filter (fun s -> s.Code = "CR0175")
-    Assert.Equal(4, fired.Length)
+    assertFired 4 source fired
 
     let swept =
         fired
