@@ -764,7 +764,7 @@ let private analyzeProject
             0,
             perTree.Length,
             System.Threading.Tasks.ParallelOptions(MaxDegreeOfParallelism = opts.Jobs, CancellationToken = ct),
-            (fun i -> compute i)
+            Action<int> compute
         )
         |> ignore
 
