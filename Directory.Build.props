@@ -10,6 +10,10 @@
     <RepositoryUrl>https://github.com/Thorium/csharp-refactor</RepositoryUrl>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- a .snupkg beside every .nupkg: `dotnet nuget push *.nupkg` sends it
+         to the symbol server with its package -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
 </Project>
