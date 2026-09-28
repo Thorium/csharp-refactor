@@ -60,6 +60,11 @@ type CompilationIndex =
 
 let private comparer = SymbolEqualityComparer.Default
 
+/// Kept among the mentioned strings where the compilation names
+/// `IgnoreCase`; no string literal can hold a NUL-led spelling like it.
+[<Literal>]
+let private ignoreCaseMark = "\u0000IgnoreCase"
+
 let private build (compilation: Compilation) : CompilationIndex =
 
     // the names a shape rule may ask uses of, read off the declarations by
@@ -169,6 +174,23 @@ let private build (compilation: Compilation) : CompilationIndex =
             match n with
             | :? LiteralExpressionSyntax as lit when lit.IsKind SyntaxKind.StringLiteralExpression ->
                 mentionedStrings.Add(string lit.Token.Value) |> ignore
+            // `BindingFlags.IgnoreCase` anywhere: a name in any casing reaches a member
+            | :? IdentifierNameSyntax as id when id.Identifier.ValueText = "IgnoreCase" ->
+                mentionedStrings.Add ignoreCaseMark |> ignore
+            // a name spelled as a constant another way: `$"_name"`, `"_" + "name"`
+            | :? InterpolatedStringExpressionSyntax
+            | :? BinaryExpressionSyntax when
+                n.IsKind SyntaxKind.InterpolatedStringExpression
+                || (n.IsKind SyntaxKind.AddExpression
+                    && ((n :?> BinaryExpressionSyntax).Left.IsKind SyntaxKind.StringLiteralExpression
+                        || (n :?> BinaryExpressionSyntax).Right.IsKind SyntaxKind.StringLiteralExpression))
+                ->
+                match m.GetConstantValue n with
+                | v when v.HasValue ->
+                    match v.Value with
+                    | :? string as s -> mentionedStrings.Add s |> ignore
+                    | _ -> ()
+                | _ -> ()
             | :? IdentifierNameSyntax as id when candidateNames.Contains id.Identifier.ValueText ->
                 // only the symbols a shape rule asks about: tuple-typed slots, DateTime
                 // slots, public mutable statics
@@ -229,8 +251,11 @@ let private build (compilation: Compilation) : CompilationIndex =
                         else
                             match a.Parent with
                             | :? InitializerExpressionSyntax as i when
-                                i.IsKind SyntaxKind.ObjectInitializerExpression
-                                || i.IsKind SyntaxKind.WithInitializerExpression
+                                (i.IsKind SyntaxKind.ObjectInitializerExpression
+                                 || i.IsKind SyntaxKind.WithInitializerExpression)
+                                // a nested initializer, `Inner = { P = 5 }`, sets P on
+                                // an object that already exists
+                                && not (i.Parent :? AssignmentExpressionSyntax)
                                 ->
                                 Initializer
                             | _ ->
@@ -558,4 +583,13 @@ let namedByNameOf (index: CompilationIndex) (s: ISymbol) = index.NameOfTargets.C
 
 /// Is the name spelled as a string anywhere in the compilation — the
 /// shape of `GetField("name")`, `GetProperty("name")`, a binder's key?
-let mentionedAsString (index: CompilationIndex) (name: string) = index.MentionedStrings.Contains name
+/// A constant spelled as an interpolation or a concatenation counts, and any
+/// casing does where the compilation asks reflection to ignore case
+/// (`BindingFlags.IgnoreCase`) - elsewhere a `[DataMember(Name = "UserId")]`
+/// names the property, not a field `userId`. A name built at run time cannot
+/// be seen.
+let mentionedAsString (index: CompilationIndex) (name: string) =
+    index.MentionedStrings.Contains name
+    || (index.MentionedStrings.Contains ignoreCaseMark
+        && index.MentionedStrings
+           |> Seq.exists (fun s -> System.String.Equals(s, name, System.StringComparison.OrdinalIgnoreCase)))

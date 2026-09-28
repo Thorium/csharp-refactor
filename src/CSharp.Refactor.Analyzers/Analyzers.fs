@@ -85,6 +85,8 @@ module Context =
                 | :? CSharpParseOptions as o -> LanguageVersionFacts.MapSpecifiedToEffectiveVersion o.LanguageVersion
                 | _ -> LanguageVersionFacts.MapSpecifiedToEffectiveVersion LanguageVersion.Latest
             // the compiler sees one compilation; a host with a solution fills this in
+            // (an oracle a host lends the analyzer is asked by the rules that read
+            // only syntax of its sites: RuleContext.oracleFor)
             References = None
         }
 
@@ -120,6 +122,7 @@ module Rules =
             "TryPattern", TryPattern.analyze
             "FixedArray", FixedArray.analyze
             "ReadOnlyReturn", ReadOnlyReturn.analyze
+            "CaseCompare", CaseCompare.analyze
             "SpanShapes", SpanShapes.analyze
             "NestedIfMerge", NestedIfMerge.analyze
             "SwitchShapes", SwitchShapes.analyze
@@ -240,7 +243,7 @@ module Rules =
     /// `--categories`), or None. Set by the tool for the length of a run and
     /// cleared after it; an editor never sets it. A module none of whose
     /// codes is wanted is skipped outright: filtering only its diagnostics
-    /// afterwards ran every rule, twice per file, for a run of one code.
+    /// afterwards would run every rule, twice per file, for a run of one code.
     /// An AsyncLocal: it switches rules OFF, and a process-wide switch would
     /// take them from whatever runs beside the run - a test class in parallel
     /// with one driving the tool. It flows into the tasks the run starts
@@ -367,7 +370,11 @@ type CSharpRefactorAnalyzer() =
 
             // a path the repository told us to ignore (csharp_refactor.ignore_paths,
             // or the built-in generated-file globs) is neither analysed nor fixed
-            if not (Configuration.isIgnoredPath (Some options) tree.FilePath) then
+            // a tree the host run set aside is not analysed either
+            if
+                not (Configuration.isIgnoredPath (Some options) tree.FilePath)
+                && not (RuleContext.skippedByHost tree)
+            then
                 let ruleContext =
                     Context.forTree (Some options) ctx.SemanticModel.Compilation tree false
 

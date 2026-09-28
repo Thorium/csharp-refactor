@@ -1,7 +1,7 @@
 /// Turn whatever the user pointed at into the compilations to run: a
 /// project directly, every C# project in a solution, everything a glob
 /// matches, a directory's solution or projects, or a workspace of
-/// checkouts, each resolved on its own. Ported from fsharp-refactor.
+/// checkouts, each resolved on its own. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tool.Targets
 
 open System

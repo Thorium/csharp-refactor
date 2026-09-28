@@ -88,6 +88,9 @@ let FieldKeywordCode = "CR0153"
 let NullConditionalAssignCode = "CR0154"
 
 [<Literal>]
+let AutoPropertyCode = "CR0186"
+
+[<Literal>]
 let UnreachableCode = "CR0157"
 
 let private resolves (model: SemanticModel) (metadataName: string) =
@@ -279,33 +282,52 @@ let private withDerived (index: Index.CompilationIndex) (t: INamedTypeSymbol) =
 /// Is one of the types a type argument for a `new()`-constrained type
 /// parameter anywhere in the compilation (`Make<Options>()`, `List<T>` with
 /// the constraint, an inferred generic call)? A required member makes that
-/// argument CS9040.
+/// argument CS9040. The compilation's `new()`-constrained arguments are
+/// gathered once: every candidate property asks, and a walk of the whole
+/// compilation per property costs seconds a file.
+let private newConstrainedArguments =
+    System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, Lazy<System.Collections.Generic.HashSet<ISymbol>>>()
+
 let private newConstrainedArgument (compilation: Compilation) (types: ISymbol list) =
-    let isOne (t: ITypeSymbol) =
-        types
-        |> List.exists (fun x -> SymbolEqualityComparer.Default.Equals(x, t.OriginalDefinition))
+    let arguments =
+        newConstrainedArguments
+            .GetValue(
+                compilation,
+                fun compilation ->
+                    lazy
+                        (let found =
+                            System.Collections.Generic.HashSet<ISymbol>(SymbolEqualityComparer.Default)
 
-    let constrained
-        (parameters: System.Collections.Immutable.ImmutableArray<ITypeParameterSymbol>)
-        (arguments: System.Collections.Immutable.ImmutableArray<ITypeSymbol>)
-        =
-        Seq.zip parameters arguments
-        |> Seq.exists (fun (p, a) -> p.HasConstructorConstraint && isOne a)
+                         let add
+                             (parameters: System.Collections.Immutable.ImmutableArray<ITypeParameterSymbol>)
+                             (arguments: System.Collections.Immutable.ImmutableArray<ITypeSymbol>)
+                             =
+                             for p, a in Seq.zip parameters arguments do
+                                 if p.HasConstructorConstraint && not (isNull a) then
+                                     lock found (fun () -> found.Add a.OriginalDefinition |> ignore)
 
-    compilation.SyntaxTrees
-    |> Seq.exists (fun t ->
-        let m = compilation.GetSemanticModel t
+                         compilation.SyntaxTrees
+                         |> Array.ofSeq
+                         |> Array.Parallel.iter (fun t ->
+                             let m = compilation.GetSemanticModel t
 
-        t.GetRoot().DescendantNodes()
-        |> Seq.exists (fun n ->
-            match n with
-            | :? GenericNameSyntax
-            | :? InvocationExpressionSyntax ->
-                match m.GetSymbolInfo(n).Symbol with
-                | :? IMethodSymbol as ms when ms.IsGenericMethod -> constrained ms.TypeParameters ms.TypeArguments
-                | :? INamedTypeSymbol as nt when nt.IsGenericType -> constrained nt.TypeParameters nt.TypeArguments
-                | _ -> false
-            | _ -> false))
+                             for n in t.GetRoot().DescendantNodes() do
+                                 match n with
+                                 | :? GenericNameSyntax
+                                 | :? InvocationExpressionSyntax ->
+                                     match m.GetSymbolInfo(n).Symbol with
+                                     | :? IMethodSymbol as ms when ms.IsGenericMethod ->
+                                         add ms.TypeParameters ms.TypeArguments
+                                     | :? INamedTypeSymbol as nt when nt.IsGenericType ->
+                                         add nt.TypeParameters nt.TypeArguments
+                                     | _ -> ()
+                                 | _ -> ())
+
+                         found)
+            )
+            .Value
+
+    types |> List.exists arguments.Contains
 
 /// Does `required` leave every construction compiling: each construction of
 /// a DERIVED type sets the member too (`new Derived()` is CS9035), no type of
@@ -716,7 +738,162 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
             | _ -> None)
         |> List.ofSeq
 
-// ---- CR0153 ----
+// ---- CR0153 / CR0186 ----
+
+/// The one private field a property's accessors reference, when nothing else
+/// in the type reaches it: the backing field CR0153 names `field` and CR0186
+/// makes an auto-property's. Guards shared by both: unattributed, not
+/// `volatile`, declared alone, of the property's own type, referenced only
+/// inside this property's accessors in every part of the type, named by no
+/// `nameof` and no string (reflection by name), its initialiser pure (it
+/// moves among the initialisers), no comment on its declaration.
+/// A type part's identifiers by name, walked once: every property of the
+/// type asks for its field's, and a walk per property is quadratic in a DTO
+/// of hundreds of them.
+let private identifiersByName =
+    System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxNode, System.Linq.ILookup<string, IdentifierNameSyntax>>()
+
+let private identifiersNamed (part: SyntaxNode) (name: string) =
+    identifiersByName
+        .GetValue(
+            part,
+            fun part ->
+                System.Linq.Enumerable.ToLookup(
+                    part.DescendantNodes()
+                    |> Seq.choose (fun n ->
+                        match n with
+                        | :? IdentifierNameSyntax as id -> Some id
+                        | _ -> None),
+                    fun (id: IdentifierNameSyntax) -> id.Identifier.ValueText
+                )
+        )
+        .[name]
+
+let private soleBackingField (tree: SyntaxTree) (model: SemanticModel) (p: PropertyDeclarationSyntax) =
+    let accessorNodes = p.AccessorList.Accessors |> List.ofSeq
+
+    let referenced =
+        accessorNodes
+        |> List.collect (fun a ->
+            a.DescendantNodes()
+            |> Seq.choose (fun x ->
+                match x with
+                | :? IdentifierNameSyntax as id ->
+                    match model.GetSymbolInfo(id).Symbol with
+                    | :? IFieldSymbol as f when
+                        f.DeclaredAccessibility = Accessibility.Private
+                        && not f.IsStatic
+                        && not f.IsConst
+                        && SymbolEqualityComparer.Default.Equals(
+                            f.ContainingType,
+                            model.GetDeclaredSymbol(p).ContainingType
+                        )
+                        ->
+                        Some f
+                    | _ -> None
+                | _ -> None)
+            |> List.ofSeq)
+        |> List.distinct
+
+    match referenced with
+    | [ backing ] when
+        backing.GetAttributes().IsEmpty
+        && not backing.IsVolatile
+        && backing.DeclaringSyntaxReferences.Length = 1
+        ->
+        let declarator =
+            backing.DeclaringSyntaxReferences.[0].GetSyntax() :?> VariableDeclaratorSyntax
+
+        let fieldDecl = declarator.Parent.Parent :?> FieldDeclarationSyntax
+
+        // every reference to the field in the type — every PART of the type, a
+        // partial one being declared across files — is inside this property's
+        // accessors; a `nameof` or a string spelling the name (reflection by
+        // name) reaches the field too
+        let typeDecl = p.Parent :?> TypeDeclarationSyntax
+        let index = Index.ofCompilation model.Compilation
+
+        let outside =
+            backing.ContainingType.DeclaringSyntaxReferences
+            |> Seq.exists (fun part ->
+                let partNode = part.GetSyntax()
+
+                let partModel =
+                    if partNode.SyntaxTree = tree then
+                        model
+                    else
+                        model.Compilation.GetSemanticModel partNode.SyntaxTree
+
+                identifiersNamed partNode backing.Name
+                |> Seq.exists (fun id ->
+                    SymbolEqualityComparer.Default.Equals(partModel.GetSymbolInfo(id).Symbol, backing)
+                    && not (obj.ReferenceEquals(partNode, typeDecl) && p.AccessorList.Span.Contains id.Span)))
+            || Index.namedByNameOf index backing
+            || Index.mentionedAsString index backing.Name
+
+        if
+            outside
+            // the field goes with the fix: declared in another part of a partial
+            // type, it is in another file, which this file's edits cannot reach
+            || fieldDecl.SyntaxTree <> tree
+            || fieldDecl.Declaration.Variables.Count <> 1
+            || Text.holdsCommentOrDirective fieldDecl
+            // the property's type: a backing field of another type would change what
+            // the accessors compute
+            || not (SymbolEqualityComparer.Default.Equals(backing.Type, (model.GetDeclaredSymbol p).Type))
+            // the initialiser moves in textual order among the initialisers: one
+            // with effects, or reading other state, would run at another time
+            || (not (isNull declarator.Initializer)
+                && not (Guards.isPureExpression model declarator.Initializer.Value))
+        then
+            ValueNone
+        else
+            ValueSome(backing, declarator, fieldDecl, typeDecl)
+    | _ -> ValueNone
+
+/// Is every accessor trivial over the field - `get { return f; }`, `get =>
+/// f;`, `set { f = value; }`, `set => f = value;` (`init` too), `this.f`
+/// alike - with no attribute on an accessor?
+let private trivialAccessors (model: SemanticModel) (backing: IFieldSymbol) (p: PropertyDeclarationSyntax) =
+    let isField (e: ExpressionSyntax) =
+        let e =
+            match e with
+            | :? MemberAccessExpressionSyntax as ma when (ma.Expression :? ThisExpressionSyntax) ->
+                ma.Name :> ExpressionSyntax
+            | e -> e
+
+        e :? IdentifierNameSyntax
+        && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(e).Symbol, backing)
+
+    let body (a: AccessorDeclarationSyntax) : ExpressionSyntax option =
+        match a.ExpressionBody, a.Body with
+        | null, null -> None
+        | eb, null when not (isNull eb) -> Some eb.Expression
+        | null, b when b.Statements.Count = 1 ->
+            match b.Statements.[0] with
+            | :? ReturnStatementSyntax as r when not (isNull r.Expression) -> Some r.Expression
+            | :? ExpressionStatementSyntax as es -> Some es.Expression
+            | _ -> None
+        | _ -> None
+
+    p.AccessorList.Accessors.Count > 0
+    && p.AccessorList.Accessors
+       |> Seq.forall (fun a ->
+           a.AttributeLists.Count = 0
+           && (match a.Kind(), body a with
+               | SyntaxKind.GetAccessorDeclaration, Some e ->
+                   (match a.Body with
+                    | null -> true
+                    | b -> b.Statements.[0] :? ReturnStatementSyntax)
+                   && isField e
+               | (SyntaxKind.SetAccessorDeclaration | SyntaxKind.InitAccessorDeclaration),
+                 Some(:? AssignmentExpressionSyntax as asg) ->
+                   asg.IsKind SyntaxKind.SimpleAssignmentExpression
+                   && isField asg.Left
+                   && (match asg.Right with
+                       | :? IdentifierNameSyntax as v -> v.Identifier.ValueText = "value"
+                       | _ -> false)
+               | _ -> false))
 
 let private fieldKeyword (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     if not (RuleContext.languageAtLeast ctx 14) then
@@ -728,96 +905,20 @@ let private fieldKeyword (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCon
         |> Seq.choose (fun n ->
             match n with
             | :? PropertyDeclarationSyntax as p when not (isNull p.AccessorList) ->
-                // the backing field: the one private field the accessors reference
-                let accessorNodes = p.AccessorList.Accessors |> List.ofSeq
-
-                let referenced =
-                    accessorNodes
-                    |> List.collect (fun a ->
-                        a.DescendantNodes()
-                        |> Seq.choose (fun x ->
-                            match x with
-                            | :? IdentifierNameSyntax as id ->
-                                match model.GetSymbolInfo(id).Symbol with
-                                | :? IFieldSymbol as f when
-                                    f.DeclaredAccessibility = Accessibility.Private
-                                    && not f.IsStatic
-                                    && not f.IsConst
-                                    && SymbolEqualityComparer.Default.Equals(
-                                        f.ContainingType,
-                                        model.GetDeclaredSymbol(p).ContainingType
-                                    )
-                                    ->
-                                    Some f
-                                | _ -> None
-                            | _ -> None)
-                        |> List.ofSeq)
-                    |> List.distinct
-
-                match referenced with
-                | [ backing ] when
-                    backing.GetAttributes().IsEmpty
-                    && not backing.IsVolatile
-                    && backing.DeclaringSyntaxReferences.Length = 1
+                match soleBackingField tree model p with
+                // trivial accessors are an auto-property's: CR0186's, while it runs
+                | ValueSome(backing, _, _, _) when
+                    trivialAccessors model backing p
+                    && not (RuleContext.ruleConfiguredOff ctx AutoPropertyCode)
+                    && not (RuleContext.shadowedRuleOn ctx [ "IDE0032" ])
                     ->
-                    let declarator =
-                        backing.DeclaringSyntaxReferences.[0].GetSyntax() :?> VariableDeclaratorSyntax
-
-                    let fieldDecl = declarator.Parent.Parent :?> FieldDeclarationSyntax
-
-                    // every reference to the field in the type — every PART of the type, a
-                    // partial one being declared across files — is inside this property's
-                    // accessors; a `nameof` or a string spelling the name (reflection by
-                    // name) reaches the field too
-                    let typeDecl = p.Parent :?> TypeDeclarationSyntax
-                    let index = Index.ofCompilation model.Compilation
-
-                    let outside =
-                        backing.ContainingType.DeclaringSyntaxReferences
-                        |> Seq.exists (fun part ->
-                            let partNode = part.GetSyntax()
-
-                            let partModel =
-                                if partNode.SyntaxTree = tree then
-                                    model
-                                else
-                                    model.Compilation.GetSemanticModel partNode.SyntaxTree
-
-                            partNode.DescendantNodes()
-                            |> Seq.exists (fun x ->
-                                match x with
-                                | :? IdentifierNameSyntax as id when
-                                    id.Identifier.ValueText = backing.Name
-                                    && SymbolEqualityComparer.Default.Equals(
-                                        partModel.GetSymbolInfo(id).Symbol,
-                                        backing
-                                    )
-                                    ->
-                                    not (
-                                        obj.ReferenceEquals(partNode, typeDecl)
-                                        && p.AccessorList.Span.Contains id.Span
-                                    )
-                                | _ -> false))
-                        || Index.namedByNameOf index backing
-                        || Index.mentionedAsString index backing.Name
-
+                    None
+                | ValueSome(backing, declarator, fieldDecl, typeDecl) ->
                     let fieldNameTaken =
                         typeDecl.DescendantTokens()
                         |> Seq.exists (fun t -> t.IsKind SyntaxKind.IdentifierToken && t.ValueText = "field")
 
-                    if
-                        outside
-                        || fieldNameTaken
-                        || fieldDecl.Declaration.Variables.Count <> 1
-                        || Text.holdsCommentOrDirective fieldDecl
-                        // `field` takes the property's type: a backing field of another type
-                        // would change what the accessors compute
-                        || not (SymbolEqualityComparer.Default.Equals(backing.Type, (model.GetDeclaredSymbol p).Type))
-                        // the initialiser moves in textual order among the initialisers: one
-                        // with effects, or reading other state, would run at another time
-                        || (not (isNull declarator.Initializer)
-                            && not (Guards.isPureExpression model declarator.Initializer.Value))
-                    then
+                    if fieldNameTaken then
                         None
                     else
                         // the field's mentions in the accessors become `field`; the field goes,
@@ -865,9 +966,201 @@ let private fieldKeyword (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCon
                                 }
                         else
                             None
-                | _ -> None
+                | ValueNone -> None
             | _ -> None)
         |> List.ofSeq
+
+/// Type-level attributes known to read no private field by name: a type
+/// carrying any other one keeps its fields (CR0186).
+let private fieldBlindTypeAttributes =
+    set
+        [
+            "DataContractAttribute"
+            "CollectionDataContractAttribute"
+            "KnownTypeAttribute"
+            "ObsoleteAttribute"
+            "DebuggerDisplayAttribute"
+            "DebuggerTypeProxyAttribute"
+            "DebuggerStepThroughAttribute"
+            "DebuggerNonUserCodeAttribute"
+            "ExcludeFromCodeCoverageAttribute"
+            "CompilerGeneratedAttribute"
+            "NullableAttribute"
+            "NullableContextAttribute"
+            "DescriptionAttribute"
+            "DisplayNameAttribute"
+            "BrowsableAttribute"
+            "EditorBrowsableAttribute"
+            "CategoryAttribute"
+            "DefaultMemberAttribute"
+            "ComVisibleAttribute"
+            "GuidAttribute"
+            "XmlRootAttribute"
+            "XmlTypeAttribute"
+            "XmlIncludeAttribute"
+            "TableAttribute"
+        ]
+
+/// Does the compilation reach private fields without naming them - asking
+/// reflection for non-public members (`BindingFlags.NonPublic`,
+/// `GetRuntimeFields`, `DeclaredFields`), or a serializer for its private
+/// mode (Newtonsoft's `DefaultMembersSearchFlags = NonPublic`, MessagePack's
+/// `…AllowPrivate` resolvers)? A field walked that way turns into
+/// `<Name>k__BackingField` under CR0186 (CR0180's `SetValue` scan, for reads).
+let private enumeratesPrivateFields =
+    let cache = System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, obj>()
+
+    let names =
+        set
+            [
+                "NonPublic"
+                "GetRuntimeFields"
+                "DeclaredFields"
+                "StandardResolverAllowPrivate"
+                "ContractlessStandardResolverAllowPrivate"
+                "DynamicObjectResolverAllowPrivate"
+                "DynamicContractlessObjectResolverAllowPrivate"
+            ]
+
+    fun (compilation: Compilation) ->
+        cache.GetValue(
+            compilation,
+            fun c ->
+                c.SyntaxTrees
+                |> Seq.exists (fun t ->
+                    t.GetRoot().DescendantNodes()
+                    |> Seq.exists (fun n ->
+                        match n with
+                        | :? IdentifierNameSyntax as id -> names.Contains id.Identifier.ValueText
+                        | _ -> false))
+                |> box
+        )
+        |> unbox<bool>
+
+/// CR0186: a property whose accessors only return and store its private
+/// backing field is an auto-property - the F# side's FR0026 (`member val`).
+let private autoProperty (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
+    let text = tree.GetText()
+
+    tree.GetRoot().DescendantNodes()
+    |> Seq.choose (fun n ->
+        match n with
+        | :? PropertyDeclarationSyntax as p when not (isNull p.AccessorList) && isNull p.ExpressionBody ->
+            match soleBackingField tree model p with
+            | ValueSome(backing, declarator, fieldDecl, _) when trivialAccessors model backing p ->
+                let owner = backing.ContainingType
+
+                // the field's name is its identity to a binary serializer, and its
+                // place in the declaration order to a sequential layout - a struct's by
+                // default. A type-level attribute may say the same to a library -
+                // Newtonsoft's `[JsonObject(MemberSerialization.Fields)]` writes `_port`
+                // and then `<Port>k__BackingField` - so any but the few known to read
+                // no field stands the rule down, on the type and its bases. A private
+                // field without [DataMember] was never serialized by a data contract,
+                // and the auto-property's is not either
+                let fieldBound =
+                    let rec selfAndBases (t: INamedTypeSymbol) =
+                        seq {
+                            if not (isNull t) && t.SpecialType <> SpecialType.System_Object then
+                                yield t
+                                yield! selfAndBases t.BaseType
+                        }
+
+                    // a derived type's attribute serializes the inherited field too:
+                    // `[JsonObject(MemberSerialization.Fields)] class Derived : Base`
+                    let family =
+                        Seq.append
+                            (selfAndBases owner |> Seq.cast<ISymbol>)
+                            (withDerived (Index.ofCompilation model.Compilation) owner)
+
+                    owner.TypeKind = TypeKind.Struct
+                    || family
+                       |> Seq.exists (fun t ->
+                           t.GetAttributes()
+                           |> Seq.exists (fun a -> not (fieldBlindTypeAttributes.Contains a.AttributeClass.Name)))
+                    || owner.AllInterfaces |> Seq.exists (fun i -> i.Name = "ISerializable")
+                    || enumeratesPrivateFields model.Compilation
+
+                let initializerText =
+                    if isNull declarator.Initializer || not (isNull p.Initializer) then
+                        ""
+                    else
+                        " = " + declarator.Initializer.Value.ToString() + ";"
+
+                // the initialiser moves to the property's place among the initialisers:
+                // with another between them, it runs on the other side of it - which may
+                // change a primary constructor parameter it reads, or run a static
+                // constructor it triggers in another order. A constant runs nowhere
+                let noInitializerBetween () =
+                    let lo = min fieldDecl.SpanStart p.SpanStart
+                    let hi = max fieldDecl.Span.End p.Span.End
+
+                    (p.Parent :?> TypeDeclarationSyntax).Members
+                    |> Seq.forall (fun other ->
+                        other.SpanStart <= lo
+                        || other.SpanStart >= hi
+                        || obj.ReferenceEquals(other, fieldDecl)
+                        || obj.ReferenceEquals(other, p)
+                        || (match other with
+                            | :? BaseFieldDeclarationSyntax as f ->
+                                f.Declaration.Variables |> Seq.forall (fun v -> isNull v.Initializer)
+                            | :? PropertyDeclarationSyntax as q -> isNull q.Initializer
+                            | _ -> true))
+
+                let initializerStays =
+                    initializerText = ""
+                    || model.GetConstantValue(declarator.Initializer.Value).HasValue
+                    // the field in another part of a partial type: its part's
+                    // initializers run in an order the move would change unseen
+                    || (obj.ReferenceEquals(fieldDecl.Parent, p.Parent) && noInitializerBetween ())
+
+                // an auto-property initialiser is C# 6
+                let initializerAllowed =
+                    initializerText = "" || (RuleContext.languageAtLeast ctx 6 && initializerStays)
+
+                // the accessor list is replaced whole: a comment in it would go, and an
+                // `#if` around a setter would decide every configuration by the one
+                // analysed (`{ get; }` drops the setter another build has)
+                let accessorsHoldTrivia =
+                    p.AccessorList.DescendantTrivia(descendIntoTrivia = true)
+                    |> Seq.exists (fun t ->
+                        p.AccessorList.Span.Contains t.Span
+                        && (t.IsDirective
+                            || t.IsKind SyntaxKind.DisabledTextTrivia
+                            || t.IsKind SyntaxKind.SingleLineCommentTrivia
+                            || t.IsKind SyntaxKind.MultiLineCommentTrivia))
+
+                if fieldBound || not initializerAllowed || accessorsHoldTrivia then
+                    None
+                else
+                    let accessors =
+                        p.AccessorList.Accessors
+                        |> Seq.map (fun a ->
+                            let modifiers = a.Modifiers |> Seq.map (fun m -> m.Text + " ") |> String.concat ""
+
+                            $"{modifiers}{a.Keyword.Text};")
+                        |> String.concat " "
+
+                    let edits =
+                        [
+                            Suggestion.replace p.AccessorList.Span ("{ " + accessors + " }" + initializerText)
+                            Suggestion.replace (Text.statementLineSpan text fieldDecl) ""
+                        ]
+
+                    if Guards.speculativeCheck model edits then
+                        Some
+                            {
+                                Code = AutoPropertyCode
+                                Message =
+                                    $"'{backing.Name}' only backs this property's plain get and set: an auto-property says the same without the field"
+                                Span = p.Identifier.Span
+                                Fixes = [ Suggestion.fix "Make it an auto-property" AutoPropertyCode edits ]
+                            }
+                    else
+                        None
+            | _ -> None
+        | _ -> None)
+    |> List.ofSeq
 
 // ---- CR0154 ----
 
@@ -1123,5 +1416,6 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
     @ frozenCollections tree model ctx
     @ lockObjects tree model ctx
     @ fieldKeyword tree model ctx
+    @ autoProperty tree model ctx
     @ nullConditionalAssignments tree model ctx
     @ exhaustiveThrows tree model ctx

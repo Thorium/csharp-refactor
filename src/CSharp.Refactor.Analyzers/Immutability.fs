@@ -49,6 +49,14 @@
 /// refuses); no `FieldInfo.SetValue` in the compilation (a loader walking
 /// `GetFields()` reaches any static field); the scope gate of CR0080 - a public field is API; a private
 /// one is IDE0044's where that is on.
+///
+/// All three look past their compilation for a member visible outside it
+/// (public or protected, internal with friends), which the index cannot see
+/// but `--api-changes` opens: CR0083 keeps a setter another project writes
+/// outside an initializer, CR0180 a field another project writes, CR0080 a
+/// class another project uses at all (it may hash, compare or print it). The
+/// host's oracle answers, or the one the tool lends the analyzer; with none,
+/// such a member stays as it is.
 module CSharp.Refactor.Immutability
 
 open Microsoft.CodeAnalysis
@@ -148,28 +156,123 @@ let private reflectiveAttribute (compilation: Compilation) (s: ISymbol) =
 let private isEntity (model: SemanticModel) (t: INamedTypeSymbol) =
     Index.isEntity (Index.ofCompilation model.Compilation) t
 
+/// The effective accessibility: the least accessible of the symbol and its containers.
+let rec private effective (s: ISymbol) =
+    match s with
+    | null -> Accessibility.Public
+    | s ->
+        let own = s.DeclaredAccessibility
+        let outer = effective s.ContainingType
+
+        if own = Accessibility.Private || outer = Accessibility.Private then
+            Accessibility.Private
+        elif own = Accessibility.Internal || outer = Accessibility.Internal then
+            Accessibility.Internal
+        else
+            own
+
 /// Does the scope gate let this declaration change shape?
 let private shapeOpen (ctx: RuleContext) (s: ISymbol) =
-    // the effective accessibility: the least accessible of the symbol and its containers
-    let rec effective (s: ISymbol) =
-        match s with
-        | null -> Accessibility.Public
-        | s ->
-            let own = s.DeclaredAccessibility
-            let outer = effective s.ContainingType
-
-            if own = Accessibility.Private || outer = Accessibility.Private then
-                Accessibility.Private
-            elif own = Accessibility.Internal || outer = Accessibility.Internal then
-                Accessibility.Internal
-            else
-                own
-
     match effective s with
     | Accessibility.Private -> true
     | Accessibility.Internal
     | Accessibility.ProtectedAndInternal -> RuleContext.internalShapeOpen ctx
     | _ -> RuleContext.publicShapeOpen ctx
+
+/// The references to a declaration from the rest of the host's solution. The
+/// compilation's own index sees its own trees only; a member other projects
+/// can see - public or protected, internal with friends - is written,
+/// compared and hashed there too, and `--api-changes` opens exactly those.
+/// `Some []` where nothing outside the compilation can see it; `None` where
+/// something can and the host lends no oracle (the compiler, an editor
+/// without a solution): the consumers are unknown, and a rule that must see
+/// them stands down. A leaf's public members count as unseen only there -
+/// with an oracle, a test project referencing the executable is asked too.
+///
+/// The oracle is the host's (`ctx.References`), or the one a host lent the
+/// analyzer for this tree. The lent one answers sites of the solution's own
+/// compilation, not the analyzer's copy: only their syntax and assembly are
+/// read here, never their symbols compared with this model's.
+let private consumerSites (ctx: RuleContext) (tree: SyntaxTree) (s: ISymbol) : ReferenceSite list option =
+    let visibleOutside =
+        match effective s with
+        | Accessibility.Private -> false
+        | Accessibility.Internal
+        | Accessibility.ProtectedAndInternal -> ctx.HasFriends
+        | _ -> true
+
+    if not visibleOutside then
+        Some []
+    else
+        match ctx.References |> Option.orElse (RuleContext.oracleFor tree) with
+        | Some find -> Some(find s)
+        | None -> if ctx.IsLeaf then Some [] else None
+
+/// What a reference site does to the member it names: `None` reads it,
+/// `Some Initializer` sets it in an object initialiser or a `with`, `Some
+/// Elsewhere` stores into it any other way - an assignment, `++`, `ref`/`out`,
+/// a deconstruction, a `nameof` a reflective write may follow - and so does a
+/// site nothing can be read of (a VB document, an oracle that failed).
+let private siteWrite (site: ReferenceSite) : Index.WriteKind option =
+    match site.Node with
+    | :? ExpressionSyntax as node when site.Editable && not (isNull site.Model) ->
+        let named: SyntaxNode =
+            match node.Parent with
+            | :? MemberAccessExpressionSyntax as ma when obj.ReferenceEquals(ma.Name, node) -> ma
+            | :? MemberBindingExpressionSyntax as mb -> mb
+            | _ -> node
+
+        let rec outer (x: SyntaxNode) =
+            match x.Parent with
+            | :? ParenthesizedExpressionSyntax as p -> outer p
+            | _ -> x
+
+        let e = outer named
+
+        let inNameOf =
+            e.Ancestors()
+            |> Seq.exists (fun a ->
+                match a with
+                | :? InvocationExpressionSyntax as inv -> inv.Expression.ToString() = "nameof"
+                | _ -> false)
+
+        let deconstructed =
+            e.Parent :? ArgumentSyntax
+            && e.Ancestors()
+               |> Seq.exists (fun a ->
+                   match a with
+                   | :? AssignmentExpressionSyntax as asg -> asg.Left.Span.Contains e.Span
+                   | _ -> false)
+
+        match e.Parent with
+        | _ when inNameOf || deconstructed -> Some Index.Elsewhere
+        | :? AssignmentExpressionSyntax as a when obj.ReferenceEquals(a.Left, e) ->
+            if
+                a.IsKind SyntaxKind.SimpleAssignmentExpression
+                && (a.Parent.IsKind SyntaxKind.ObjectInitializerExpression
+                    || a.Parent.IsKind SyntaxKind.WithInitializerExpression)
+                // the initializer of a construction: a nested one, `Inner = { P = 5 }`,
+                // sets P on the object Inner already holds, which `init` refuses
+                && not (a.Parent.Parent :? AssignmentExpressionSyntax)
+            then
+                Some Index.Initializer
+            else
+                Some Index.Elsewhere
+        | :? PostfixUnaryExpressionSyntax as u when
+            u.IsKind SyntaxKind.PostIncrementExpression
+            || u.IsKind SyntaxKind.PostDecrementExpression
+            ->
+            Some Index.Elsewhere
+        | :? PrefixUnaryExpressionSyntax as u when
+            u.IsKind SyntaxKind.PreIncrementExpression
+            || u.IsKind SyntaxKind.PreDecrementExpression
+            || u.IsKind SyntaxKind.AddressOfExpression
+            ->
+            Some Index.Elsewhere
+        | :? ArgumentSyntax as arg when not (arg.RefKindKeyword.IsKind SyntaxKind.None) -> Some Index.Elsewhere
+        | :? RefExpressionSyntax -> Some Index.Elsewhere
+        | _ -> None
+    | _ -> Some Index.Elsewhere
 
 /// Every write to the property across the compilation is an object
 /// initialiser, a `with` expression, or `this.P = …` in a constructor of
@@ -220,6 +323,17 @@ let private initOnly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext
                     && shapeOpen ctx property
                     && not (isEntity model property.ContainingType)
                     && writesAreConstruction model property
+                    // and in the projects that see it: `filter.Currency = x` in another
+                    // project is CS8852 on an `init` setter
+                    && (match consumerSites ctx tree property with
+                        | Some sites ->
+                            sites
+                            |> List.forall (fun site ->
+                                match siteWrite site with
+                                | None
+                                | Some Index.Initializer -> true
+                                | _ -> false)
+                        | None -> false)
                     // a System.Text.Json DTO the generator fills by an object initializer: a
                     // constructor's value for a property missing from the JSON would be lost
                     && not (
@@ -256,8 +370,8 @@ let private initOnly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext
                 | _ -> None
             | _ -> None)
         |> List.ofSeq
-        // a DTO file of forty setters is one re-bind, not forty (a project of
-        // three hundred took half a minute of them)
+        // a DTO file of forty setters is one re-bind, not forty (three
+        // hundred re-binds cost half a minute)
         |> Guards.speculativeCheckEach model
 
 // ---- CR0080 ----
@@ -351,6 +465,15 @@ let private records (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext)
                         && not derived
                         && not printed
                         && not (identityUsed model self)
+                        // another project using the type may hash it, compare it or print
+                        // it, which the index does not see: a record changes all three
+                        && (match consumerSites ctx tree self with
+                            | Some sites ->
+                                sites
+                                |> List.forall (fun site ->
+                                    not (isNull site.Model)
+                                    && site.Model.Compilation.AssemblyName = model.Compilation.AssemblyName)
+                            | None -> false)
                     then
                         let edit = Suggestion.replace c.Keyword.Span "record"
 
@@ -466,6 +589,17 @@ let private staticReadonly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleC
                     || m.IsKind SyntaxKind.FixedKeyword)
             )
             && f.AttributeLists.Count = 0
+            // a comment saying why it stays mutable - `// not readonly: avoid
+            // constant folding` over a benchmark input - is the author's answer
+            // (FR0007's guard): readonly lets the JIT fold the value
+            && not (
+                Seq.append (f.GetLeadingTrivia()) (f.GetTrailingTrivia())
+                |> Seq.exists (fun t ->
+                    (t.IsKind SyntaxKind.SingleLineCommentTrivia
+                     || t.IsKind SyntaxKind.MultiLineCommentTrivia)
+                    && (let c = t.ToString().ToLowerInvariant()
+                        c.Contains "fold" || c.Contains "inline" || c.Contains "optimi"))
+            )
             ->
             match model.GetDeclaredSymbol f.Declaration.Variables.[0] with
             | :? IFieldSymbol as field when
@@ -490,6 +624,10 @@ let private staticReadonly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleC
                 && not (Index.mentionedAsString index.Value field.Name)
                 && not ((referenced model.Compilation).Contains field)
                 && not (writesFieldsByReflection model.Compilation)
+                // no write in the projects that see it either
+                && (match consumerSites ctx tree field with
+                    | Some sites -> sites |> List.forall (fun site -> (siteWrite site).IsNone)
+                    | None -> false)
                 ->
                 let staticToken =
                     f.Modifiers |> Seq.find (fun m -> m.IsKind SyntaxKind.StaticKeyword)

@@ -1,5 +1,5 @@
-/// The critical review of family J and the edit sets: each shape here
-/// was a wrong or half-applied rewrite before its guard.
+/// Family J and the edit sets: each shape here is one a rewrite gets wrong,
+/// or applies by half, without its guard.
 module CSharp.Refactor.Tests.DefectReviewTests
 
 open Xunit
@@ -328,7 +328,7 @@ let ``CR0100 and CR0101 leave an argument whose interpolated form would pick ano
     Assert.Contains("""db.ExecuteSqlCommand(string.Format("DELETE FROM {0} WHERE 1 = 1", table))""", fixedSource)
     Assert.Contains("""db.Plain($"DELETE FROM {table} WHERE 1 = 1")""", fixedSource)
 
-// ---- what the property suite's coverage pass found (2026-09-20) ----
+// ---- offers, hand-offs between rules, language-version gates ----
 
 [<Fact>]
 let ``CR0084 offers readonly only where every write is a constructor's`` () =

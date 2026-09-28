@@ -181,7 +181,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                     // field: a private one's are the trees declaring its type (this
                     // one, or the parts of a partial type); the rest only where the
                     // text spells the name at all — walking every tree's nodes per
-                    // candidate was a fifth of a second per file of literal tables
+                    // candidate costs a fifth of a second per file of literal tables
                     let candidateTrees =
                         if field.DeclaredAccessibility = Accessibility.Private then
                             field.ContainingType.DeclaringSyntaxReferences

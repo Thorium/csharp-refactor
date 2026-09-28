@@ -1,5 +1,5 @@
 /// Child processes — the verification builds — that can never hang the
-/// tool. Ported from fsharp-refactor.
+/// tool. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tool.Processes
 
 open System
@@ -46,8 +46,8 @@ let runProcessIn (workingDirectory: string option) (timeout: TimeSpan) (fileName
 
     // A child that cannot START is the fourth way: a blocked or missing
     // executable (a paket bootstrapper under application control, `mono`
-    // absent, `dotnet` not on the PATH) throws out of Process.Start, and
-    // that unwound the whole sweep from one checkout's restore. Reported
+    // absent, `dotnet` not on the PATH) throws out of Process.Start, which
+    // would unwind the whole sweep from one checkout's restore. Reported
     // the way a failed exit is, so the caller skips that target and the
     // run goes on.
     let started =
@@ -70,7 +70,7 @@ let runProcessIn (workingDirectory: string option) (timeout: TimeSpan) (fileName
         // Both pipes drain on their own callbacks. .NET raises each stream's
         // event in order, so a builder is never written from two threads at
         // once, and nothing here blocks on a task the child has to finish
-        // first — which is what made reading one pipe then the other deadlock.
+        // first — reading one pipe then the other deadlocks.
         let outText = Text.StringBuilder()
         let errText = Text.StringBuilder()
 
@@ -118,10 +118,6 @@ let runProcessIn (workingDirectory: string option) (timeout: TimeSpan) (fileName
             "",
             $"{TimeCapMark} '{fileName} {arguments}' had not finished after {minutes} minutes, so it was stopped."
 
-/// Long enough for a real build of a large project, short enough that a
-/// stuck one is reported rather than waited on forever. FSREF_BUILD_MINUTES
-/// raises it for a project whose compile alone takes longer: FSharpPlus's
-/// SRTP-heavy test project needs ~23 minutes, and was skipped as "does not
 /// Long enough for a real build of a large project, short enough that a
 /// stuck one is reported rather than waited on forever. CSREF_BUILD_MINUTES
 /// raises it for a project whose compile alone takes longer.

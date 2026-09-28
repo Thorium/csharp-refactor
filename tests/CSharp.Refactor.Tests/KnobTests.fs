@@ -4,9 +4,9 @@
 /// places, so they could drift - and a config stating a wrong default is
 /// worse than one stating none, since a user who keeps the line has pinned
 /// a value they never chose. The source is read, because the fallback a
-/// rule passes cannot be observed from outside it. Then the three knobs
-/// that only DESIGN.md had: CR0040 `sync_swap`, CR0125
-/// `drop_legacy_protocols` and CR0109 `per_call`.
+/// rule passes cannot be observed from outside it. Then three knobs, each
+/// at work: CR0040 `sync_swap`, CR0125 `drop_legacy_protocols` and CR0109
+/// `per_call`.
 module CSharp.Refactor.Tests.KnobTests
 
 open System.IO
@@ -251,3 +251,20 @@ let ``CR0125 retires a protocol only from the flags being switched on, never fro
     Assert.Contains("&= ~(SecurityProtocolType.Ssl3 | SecurityProtocolType.Tls11);", dropped)
     Assert.Contains("& (SecurityProtocolType.Tls | SecurityProtocolType.Tls11)) != 0;", dropped)
     Assert.Contains("= (SecurityProtocolType.Tls12 /* | SecurityProtocolType.Tls11 */);", dropped)
+
+// ---- CR0153 / CR0186 hand-off ----
+
+[<Fact>]
+let ``trivial accessors CR0186 leaves, because it is off, stay CR0153's`` () =
+    let source =
+        csharp
+            """
+            class Person
+            {
+                private int _age;
+                public int Age { get { return _age; } set { _age = value; } }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0153" source)
+    Assert.Equal(1, (suggestCodeWith (with' "dotnet_diagnostic.CR0186.severity" "none") "CR0153" source).Length)

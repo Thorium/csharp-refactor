@@ -76,8 +76,8 @@ let private namespaceNamesOf (compilation: Compilation) =
         )
         .Value
 
-/// The spellings of a file. Binding every `a.b` of a file twice was the
-/// rule's whole cost (a startup file of service-registration chains took
+/// The spellings of a file. Binding every `a.b` of a file twice would be the
+/// rule's whole cost (a startup file of service-registration chains spends
 /// a quarter of a second for nothing; a symbol lookup is a third of a
 /// millisecond), so a chain is bound only when its root identifier can be
 /// a namespace — spelled like one the compilation knows, or like an alias

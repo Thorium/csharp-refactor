@@ -1,4 +1,4 @@
-/// csharp-refactor: the apply tool. Ported from fsharp-refactor's Program.fs;
+/// csharp-refactor: the apply tool, the twin of fsharp-refactor's Program.fs;
 /// the sweep itself lives in Sweep.fs on Roslyn's MSBuildWorkspace.
 module CSharp.Refactor.Tool.Program
 

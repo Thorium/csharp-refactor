@@ -1,8 +1,7 @@
 /// CR0103 — cosmetic. `$"no holes"` is a plain string with an
 /// interpolation marker that does nothing; the fix drops the `$`. Skipped
 /// when the text holds `{{` or `}}` (those escapes would need unescaping),
-/// for raw strings, and — the case the F# twin FR0086 found the hard way —
-/// wherever the site EXPECTS an interpolated string rather than a plain
+/// for raw strings, and (as for the F# twin FR0086) wherever the site EXPECTS an interpolated string rather than a plain
 /// one: a `FormattableString`/`IFormattable` target, or an interpolated
 /// string handler parameter (`ILogger`'s, `Debug.Assert`'s): there a plain
 /// string is a different conversion, or none. With a semantic model the

@@ -244,7 +244,7 @@ let ``a query expression over an IQueryable is an expression tree: the string an
     // `from r in rows let l = "Row " + r.Name + …` over an IQueryable is
     // `rows.Select(r => …)` with an Expression lambda; `$"Row {r.Name} …"` there
     // is string.Format, which EF6 refuses anywhere and EF Core 10 in a `where`.
-    // The lambda spelling was guarded; the query spelling was not.
+    // The query spelling needs the same guard as the lambda spelling.
     let source =
         csharp
             """
@@ -273,3 +273,43 @@ let ``a query expression over an IQueryable is an expression tree: the string an
     Assert.Contains(""".Select(r => "Row " + r.Name + " of " + r.Code)""", fixedSource)
     Assert.Contains("""let label = $"Row {r.Name} of {r.Code}" """.TrimEnd(), fixedSource)
     Assert.Empty(suggestCode "CR0175" source)
+
+// ---- CR0188 ----
+
+[<Fact>]
+let ``a string lowered to compare with an agreeing ASCII literal compares ignoring case; a disagreeing, non-ASCII or tree-bound one stays``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Linq;
+            using System.Linq.Expressions;
+            class C
+            {
+                bool A(string x) => x.ToLower() == "abc";
+                bool B(string x) => "ABC" != x.ToUpper();
+                bool D(string x) => x.ToLowerInvariant().StartsWith("file:");
+                bool E(string x) => x.ToLower().Equals("yes");
+                bool F(string x) => x.ToLower() == "ABC";
+                bool G(string x) => x.ToLower() == "äbc";
+                bool H(string x, string y) => x.ToLower() == y.ToLower();
+                bool I(string x) => x.ToLower(System.Globalization.CultureInfo.InvariantCulture) == "abc";
+                Expression<Func<string, bool>> J = x => x.ToLower() == "abc";
+                bool K(string x) => x.ToLower().Contains("ab");
+            }
+            """
+
+    // A, B, D, E, K; F disagrees, G is not ASCII, H has no literal, I names a culture, J is a tree
+    Assert.Equal(5, (suggestCode "CR0188" source).Length)
+    let fixedSource = fixAll "CR0188" source
+    Assert.Contains("""x.Equals("abc", StringComparison.OrdinalIgnoreCase)""", fixedSource)
+    Assert.Contains("""!x.Equals("ABC", StringComparison.OrdinalIgnoreCase)""", fixedSource)
+    Assert.Contains("""x.StartsWith("file:", StringComparison.OrdinalIgnoreCase)""", fixedSource)
+    Assert.Contains("""x.Equals("yes", StringComparison.OrdinalIgnoreCase)""", fixedSource)
+    Assert.Contains("""x.Contains("ab", StringComparison.OrdinalIgnoreCase)""", fixedSource)
+    Assert.Contains("""x.ToLower() == "ABC";""", fixedSource)
+    Assert.Contains("""x.ToLower() == "äbc";""", fixedSource)
+    Assert.Contains("x.ToLower() == y.ToLower();", fixedSource)
+    Assert.Contains("""J = x => x.ToLower() == "abc";""", fixedSource)

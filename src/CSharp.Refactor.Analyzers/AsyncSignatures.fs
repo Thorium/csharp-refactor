@@ -80,9 +80,9 @@ let private hasModifier (mods: SyntaxTokenList) (kind: SyntaxKind) =
 /// identifier name each spells, in document order. A reference to a method
 /// binds through an identifier spelling its name - `M`, `x.M`, `M<T>`,
 /// `?.M`, `@M` - so a node spelling no identifier of that name cannot refer
-/// to it: each scan binds the nodes under the method's own name only, where
-/// it walked every node of every tree and bound most of them, once per
-/// method (a large file paid minutes for CR0043).
+/// to it: each scan binds the nodes under the method's own name only. A walk
+/// binding most nodes of every tree, once per method, costs a large file
+/// minutes under CR0043.
 type private NameIndex =
     {
         /// Invocations, by the names their callee expression spells.

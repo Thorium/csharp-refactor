@@ -287,3 +287,10 @@ reads — a call in the body can change it (2026-09-21).
 7.0 µs → 4.9 µs (0.70×) over 1000 string keys, half of them present: one
 hash and probe per key where the pair took two. No allocation either way
 (2026-09-28).
+
+## CR0188 — `ToLower()` then compare → `StringComparison.OrdinalIgnoreCase` (performance)
+
+8.8 µs → 0.44 µs (0.05×) for `==`, 12.6 µs → 0.54 µs (0.04×) for
+`StartsWith`, over 1000 mixed-case words; 29 KB → nothing allocated. The
+lowered copy of every string was the cost, and the culture-aware
+`StartsWith` on it (2026-09-28).

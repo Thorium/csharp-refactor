@@ -135,6 +135,65 @@ module RuleContext =
             References = None
         }
 
+    /// The reference oracles hosts lend the analyzer, by the syntax trees it
+    /// analyses. The compiler knows no solution; the apply tool does, and runs
+    /// the analyzer over a compilation of it - registering the oracle here, the
+    /// analyzer's rules see the callers in other projects as the tool's own
+    /// pass does (a public member `--api-changes` opens is written or compared
+    /// elsewhere). Keyed by tree, not compilation: CompilationWithAnalyzers
+    /// runs the analyzers over its own copy of the compilation, which shares
+    /// the trees. Weak: a tree gone takes its oracle along.
+    let private hostOracles =
+        System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, ISymbol -> ReferenceSite list>()
+
+    let registerOracle (trees: SyntaxTree seq) (oracle: SyntaxTree -> ISymbol -> ReferenceSite list) =
+        lock hostOracles (fun () ->
+            for tree in trees do
+                hostOracles.Remove tree |> ignore
+                hostOracles.Add(tree, oracle tree))
+
+    /// The oracle a host lent for this tree.
+    let oracleFor (tree: SyntaxTree) : (ISymbol -> ReferenceSite list) option =
+        match hostOracles.TryGetValue tree with
+        | true, oracle -> Some oracle
+        | _ -> None
+
+    /// The trees a host run leaves out. A host analysing some of a
+    /// compilation's trees asks for all of them once, with the rest set aside
+    /// here: the per-tree entry points each analyse a fresh copy of the
+    /// compilation, and every copy would build its own compilation index.
+    /// Counted: two runs sharing a tree (a linked file, projects analysed
+    /// side by side) each set it aside, and the first to finish does not
+    /// bring it back while the other still runs.
+    let private hostSkipped =
+        System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, System.Runtime.CompilerServices.StrongBox<int>>()
+
+    /// Sets the trees aside for the duration of `run`.
+    let skippingTrees (trees: SyntaxTree seq) (run: unit -> 'a) : 'a =
+        let trees = Array.ofSeq trees
+
+        lock hostSkipped (fun () ->
+            for tree in trees do
+                let count = hostSkipped.GetOrCreateValue tree
+                count.Value <- count.Value + 1)
+
+        try
+            run ()
+        finally
+            lock hostSkipped (fun () ->
+                for tree in trees do
+                    match hostSkipped.TryGetValue tree with
+                    | true, count when count.Value > 1 -> count.Value <- count.Value - 1
+                    | true, _ -> hostSkipped.Remove tree |> ignore
+                    | _ -> ())
+
+    /// Whether a host run set this tree aside.
+    let skippedByHost (tree: SyntaxTree) =
+        lock hostSkipped (fun () ->
+            match hostSkipped.TryGetValue tree with
+            | true, count -> count.Value > 0
+            | _ -> false)
+
     /// The references to a symbol outside this tree, as the host sees them:
     /// `Some []` when the host can see the whole solution and there are none,
     /// `None` when the host cannot see (a rule then keeps to its own file).
@@ -163,6 +222,14 @@ module RuleContext =
     let shadowedRuleOn (ctx: RuleContext) (ids: string list) =
         match ctx.Options with
         | Some o -> Configuration.shadowedRuleOn o ids
+        | None -> false
+
+    /// Is one of OUR rules set to `none` in the file's config? A rule that
+    /// leaves a shape to another asks, so the shape is not lost when the
+    /// other is off.
+    let ruleConfiguredOff (ctx: RuleContext) (code: string) =
+        match ctx.Options with
+        | Some o -> Configuration.severityOf o code = Some "none"
         | None -> false
 
     /// May a rule reshape PUBLIC declarations of this compilation in

@@ -501,8 +501,8 @@ let private dictionaryHazards
             |> List.exists (fun (om, value) -> touches om value || userTouches (Guards.originSymbols om value))
 
         // one small function per operation kind, chosen by `op.Kind`: a single
-        // match over every interface with guards compiled to a decision tree of
-        // a megabyte of IL, whose JIT alone took seconds per process
+        // match over every interface with guards compiles to a decision tree of
+        // a megabyte of IL, whose JIT alone costs seconds per process
         let byOperator (m: IMethodSymbol) (op: IOperation) =
             if isNull m || harmlessMember m then
                 None

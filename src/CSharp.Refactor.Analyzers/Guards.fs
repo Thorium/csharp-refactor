@@ -9,7 +9,7 @@
 ///     question behind map fusion, `Any` over a flag loop, and the like
 ///   - `speculativeCheck`: the patched file still binds, and no symbol at
 ///     an untouched site resolves differently — the resolution class of
-///     defect the F# side's 0.8.23 audit found by hand, caught per fix
+///     defect, caught per fix
 ///
 /// Every proof errs toward silence: what it cannot read is impure.
 module CSharp.Refactor.Guards

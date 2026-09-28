@@ -36,9 +36,8 @@ let ``a hole, an escaped brace, or a raw string keeps the dollar`` () =
 
 [<Fact>]
 let ``a FormattableString, IFormattable or handler target keeps the dollar`` () =
-    // the F# twin lost this the hard way: `let s: FormattableString = $"…"`
-    // stopped compiling once its `$` went, and ILogger's handler parameters
-    // are not string parameters at all
+    // `FormattableString s = $"…"` stops compiling once its `$` goes, and
+    // ILogger's handler parameters are not string parameters at all
     let source =
         csharp
             """

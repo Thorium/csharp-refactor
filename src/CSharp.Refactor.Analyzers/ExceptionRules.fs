@@ -110,6 +110,9 @@ let MessageContextCode = "CR0069"
 [<Literal>]
 let ExceptionDetailCode = "CR0070"
 
+[<Literal>]
+let RethrowCode = "CR0187"
+
 let private throwsIn (node: SyntaxNode) =
     node.DescendantNodes()
     |> Seq.exists (fun n -> n :? ThrowStatementSyntax || n :? ThrowExpressionSyntax)
@@ -308,8 +311,7 @@ let private swallowOffers
 
     // 2. the narrower catch, where the body is ONE statement whose every call
     //    is System.IO's — a read followed by a parse would let the parser's
-    //    exception escape (the F# side's FR0055 undid exactly that on three
-    //    repositories before it drew this line)
+    //    exception escape (the F# side's FR0055 draws the same line)
     let onlyIo =
         tryStmt.Block.Statements.Count = 1
         && ioSmell.IsMatch(tryStmt.Block.ToString())
@@ -825,7 +827,7 @@ let private prints (t: ITypeSymbol) =
         t.SpecialType <> SpecialType.None && t.SpecialType <> SpecialType.System_Object
         || t.TypeKind = TypeKind.Enum
         // a record prints, but prints every member: a request record in an exception
-        // message is a dump of whatever it carries (a payout request, its bank details)
+        // message is a dump of whatever it carries
         || List.contains
             (t.ToDisplayString())
             [
@@ -840,8 +842,8 @@ let private prints (t: ITypeSymbol) =
 let private az09Regex = Regex @"[^a-z0-9_]+"
 
 /// A tree's root text (`ToString`: trivia around the root left out, as
-/// the literal search has always read it), once per tree, where every
-/// candidate literal rebuilt every tree's text.
+/// the literal search reads it), built once per tree rather than once per
+/// candidate literal.
 let private rootTexts =
     System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, string>()
 
@@ -1096,9 +1098,109 @@ let private exceptionDetails (tree: SyntaxTree) (model: SemanticModel) : Suggest
         | _ -> None)
     |> List.ofSeq
 
+// ---- CR0187 ----
+
+/// CR0187 (correctness, fix): `throw ex;` inside the catch that caught `ex`
+/// throws the same object with its stack trace restarted at this line; `throw;`
+/// rethrows it with the trace it came with - the F# side's FR0044 (`reraise ()`
+/// for `raise ex`). Guards: the nearest enclosing clause is the catch declaring
+/// `ex` (an inner catch's `throw;` would rethrow the inner exception), with no
+/// `finally`, lambda or local function between (where `throw;` is not allowed);
+/// `ex` is never assigned in the catch, so it still holds what was caught.
+/// Yields to CA2200.
+let private rethrows (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+    tree.GetRoot().DescendantNodes()
+    |> Seq.choose (fun n ->
+        match n with
+        | :? ThrowStatementSyntax as t when (t.Expression :? IdentifierNameSyntax) ->
+            let id = t.Expression :?> IdentifierNameSyntax
+
+            let rec enclosing (x: SyntaxNode) : CatchClauseSyntax option =
+                match x.Parent with
+                | null -> None
+                | :? CatchClauseSyntax as c -> Some c
+                | :? AnonymousFunctionExpressionSyntax
+                | :? LocalFunctionStatementSyntax
+                | :? FinallyClauseSyntax -> None
+                | parent -> enclosing parent
+
+            match enclosing t with
+            | Some c when
+                not (isNull c.Declaration)
+                && c.Declaration.Identifier.ValueText = id.Identifier.ValueText
+                && not (hasComment t)
+                ->
+                let caught = model.GetDeclaredSymbol c.Declaration
+
+                // written in the filter or the block - an assignment, a
+                // deconstruction, `ref`/`out`, a lambda - by the data flow; or
+                // handed on by reference, which the flow does not count: a `ref
+                // readonly` parameter (`Unsafe.AsRef(ex) = …`), `ref var r = ref
+                // ex;`, `__makeref(ex)`
+                let reassigned =
+                    let writtenIn (node: SyntaxNode) =
+                        let flow =
+                            match node with
+                            | :? StatementSyntax as s -> model.AnalyzeDataFlow s
+                            | :? ExpressionSyntax as e -> model.AnalyzeDataFlow e
+                            | _ -> null
+
+                        isNull flow
+                        || not flow.Succeeded
+                        || flow.WrittenInside
+                           |> Seq.exists (fun w -> SymbolEqualityComparer.Default.Equals(w, caught))
+
+                    let byReference =
+                        c.DescendantNodes()
+                        |> Seq.exists (fun x ->
+                            match x with
+                            | :? IdentifierNameSyntax as mention when
+                                mention.Identifier.ValueText = id.Identifier.ValueText
+                                && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(mention).Symbol, caught)
+                                ->
+                                match mention.Parent with
+                                | :? RefExpressionSyntax
+                                | :? MakeRefExpressionSyntax -> true
+                                | :? ArgumentSyntax as arg ->
+                                    match model.GetOperation arg with
+                                    | :? Operations.IArgumentOperation as a ->
+                                        isNull a.Parameter || a.Parameter.RefKind <> RefKind.None
+                                    | _ -> true
+                                | _ -> false
+                            | _ -> false)
+
+                    writtenIn c.Block
+                    || (not (isNull c.Filter) && writtenIn c.Filter.FilterExpression)
+                    || byReference
+
+                if
+                    not (isNull caught)
+                    && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, caught)
+                    && not reassigned
+                then
+                    let edit = Suggestion.replace t.Span "throw;"
+
+                    if Guards.speculativeCheck model [ edit ] then
+                        Some
+                            {
+                                Code = RethrowCode
+                                Message =
+                                    $"'throw {id.Identifier.ValueText};' restarts the stack trace here: 'throw;' rethrows it with the trace it came with"
+                                Span = t.Span
+                                Fixes = [ Suggestion.fix "Rethrow with 'throw;'" RethrowCode [ edit ] ]
+                            }
+                    else
+                        None
+                else
+                    None
+            | _ -> None
+        | _ -> None)
+    |> List.ofSeq
+
 let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     swallows tree model
     @ filters tree model
     @ throwNotes tree model
     @ messageContexts tree model ctx
     @ exceptionDetails tree model
+    @ rethrows tree model

@@ -756,3 +756,264 @@ let ``review 2026-09-28: CR0179 keeps a construction a goto returns over, a trai
             """
 
     Assert.Empty(suggestCode "CR0179" source)
+
+// ---- CR0186 ----
+
+[<Fact>]
+let ``a property whose accessors only return and store its private field is an auto-property; a serialized, laid-out or shared field keeps it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            class Plain
+            {
+                private string _name;
+                public string Name { get { return _name; } set { _name = value; } }
+                private int _count = 3;
+                public int Count { get => _count; private set => _count = value; }
+                private int _id;
+                public int Id { get { return this._id; } set { this._id = value; } }
+                private int _shared;
+                public int Shared { get { return _shared; } set { _shared = value; } }
+                public void Reset() => _shared = 0;
+                private int _lazy;
+                public int Lazy { get { return _lazy == 0 ? 1 : _lazy; } set { _lazy = value; } }
+            }
+            [Serializable]
+            class Persisted
+            {
+                private string _name;
+                public string Name { get { return _name; } set { _name = value; } }
+            }
+            struct Laid
+            {
+                private int _x;
+                public int X { get { return _x; } set { _x = value; } }
+            }
+            """
+
+    Assert.Equal<string list>([ "Name"; "Count"; "Id" ], firedText source (suggestCode "CR0186" source))
+    let fixedSource = fixAll "CR0186" source
+    Assert.Contains("public string Name { get; set; }", fixedSource)
+    Assert.Contains("public int Count { get; private set; } = 3;", fixedSource)
+    Assert.Contains("public int Id { get; set; }", fixedSource)
+
+    Assert.DoesNotContain(
+        "private string _name;\n    public string Name { get; set; }",
+        fixedSource.Replace("\r\n", "\n")
+    )
+
+    Assert.Contains("public void Reset() => _shared = 0;", fixedSource)
+    Assert.Contains("return _lazy == 0 ? 1 : _lazy;", fixedSource)
+    Assert.Contains("[Serializable]\nclass Persisted\n{\n    private string _name;", fixedSource.Replace("\r\n", "\n"))
+    Assert.Contains("private int _x;", fixedSource)
+
+[<Fact>]
+let ``a backing field declared in another part of a partial type keeps its property, auto or field keyword alike`` () =
+    let property =
+        csharp
+            """
+            partial class Person
+            {
+                public string Name { get { return _name; } set { _name = value; } }
+                public int Age { get { return _age; } set { _age = value < 0 ? 0 : value; } }
+            }
+            """
+
+    let fields =
+        csharp
+            """
+            partial class Person
+            {
+                private string _name;
+                private int _age;
+            }
+            """
+
+    Assert.Empty(suggestInProject false false "CR0186" [ "Person.cs", property; "Person.Fields.cs", fields ])
+    Assert.Empty(suggestInProject false false "CR0153" [ "Person.cs", property; "Person.Fields.cs", fields ])
+    // the same type in one file: both fire
+    let oneFile =
+        csharp
+            """
+            partial class Person
+            {
+                private string _name;
+                private int _age;
+                public string Name { get { return _name; } set { _name = value; } }
+                public int Age { get { return _age; } set { _age = value < 0 ? 0 : value; } }
+            }
+            """
+
+    Assert.Equal(1, (suggestInProject false false "CR0186" [ "Person.cs", oneFile ]).Length)
+    Assert.Equal(1, (suggestInProject false false "CR0153" [ "Person.cs", oneFile ]).Length)
+
+[<Fact>]
+let ``review 2026-09-28b CR0186 keeps an initializer another stands between, an attributed type and a field named by a built string``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Reflection;
+            [AttributeUsage(AttributeTargets.Class)]
+            class FieldsAttribute : Attribute { }
+            class Other { public static int V = 1; }
+            class P(int v)
+            {
+                private int _x = v;
+                public int A = ++v;
+                public int X { get { return _x; } set { _x = value; } }
+                private int _k = 7;
+                public int B = ++v;
+                public int K { get { return _k; } set { _k = value; } }
+            }
+            class Q
+            {
+                private int _y = Other.V;
+                public int Y { get { return _y; } set { _y = value; } }
+            }
+            [Fields]
+            class Settings
+            {
+                private int _port;
+                public int Port { get { return _port; } set { _port = value; } }
+            }
+            class R
+            {
+                private string _name;
+                public string Name { get { return _name; } set { _name = value; } }
+                private string _code;
+                public string Code { get { return _code; } set { _code = value; } }
+                private string _tag;
+                public string Tag { get { return _tag; } set { _tag = value; } }
+                // Instance | NonPublic as a number: the names alone must hold these
+                const BindingFlags Hidden = (BindingFlags)36;
+                object Read() => typeof(R).GetField($"_name", Hidden)
+                    ?? typeof(R).GetField("_CODE", Hidden | BindingFlags.IgnoreCase)
+                    ?? typeof(R).GetField("_" + "tag", Hidden);
+            }
+            """
+
+    // X's initializer would move past A's `++v`; K's constant moves anywhere; Y reads
+    // another type's mutable static (not pure); Settings carries an unknown
+    // attribute; R's fields are named
+    Assert.Equal<string list>([ "K" ], firedText source (suggestCode "CR0186" source))
+
+[<Fact>]
+let ``review 2026-09-28c CR0186 keeps a field another part initializes around, a derived type serializes or reflection enumerates``
+    ()
+    =
+    let partial =
+        csharp
+            """
+            partial class C(int v)
+            {
+                private int _x = v;
+                public int A = ++v;
+            }
+            partial class C
+            {
+                public int X { get { return _x; } set { _x = value; } }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0186" partial)
+
+    let derived =
+        csharp
+            """
+            using System;
+            [AttributeUsage(AttributeTargets.Class)]
+            class FieldsAttribute : Attribute { }
+            class Base
+            {
+                private int _port;
+                public int Port { get { return _port; } set { _port = value; } }
+            }
+            [Fields]
+            class Derived : Base { }
+            """
+
+    Assert.Empty(suggestCode "CR0186" derived)
+
+    let reflected =
+        csharp
+            """
+            using System.Reflection;
+            class C
+            {
+                private int _x;
+                public int X { get { return _x; } set { _x = value; } }
+                public static int Count() => typeof(C).GetFields(BindingFlags.NonPublic | BindingFlags.Instance).Length;
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0186" reflected)
+    // without the walk, X is taken
+    let plain =
+        reflected.Replace("GetFields(BindingFlags.NonPublic | BindingFlags.Instance)", "GetFields()")
+
+    Assert.Equal(1, (suggestCode "CR0186" plain).Length)
+
+[<Fact>]
+let ``parity 2026-09-28 CR0180 keeps a field a comment keeps mutable or an in argument may write`` () =
+    let source =
+        csharp
+            """
+            using System.Runtime.CompilerServices;
+            static class C
+            {
+                // not readonly: avoid constant folding in the benchmark
+                private static int s_n = 1000;
+                private static int s_m = 7;
+                private static int s_k = 3;
+                public static int Read() => s_n + s_k;
+                public static void Poke() => Unsafe.AsRef(in s_m) = 9;
+            }
+            """
+
+    Assert.Equal<string list>([ "s_k" ], firedText source (suggestCode "CR0180" source))
+
+[<Fact>]
+let ``parity 2026-09-28 CR0186 keeps an accessor list holding a directive or a comment`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                private string _name;
+                public string Name
+                {
+                    get { return _name; }
+            #if EDITABLE
+                    set { _name = value; }
+            #endif
+                }
+                private string _code;
+                public string Code { get { return _code; } /* audited */ set { _code = value; } }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0186" source)
+
+[<Fact>]
+let ``a data contract naming its members in another casing leaves the fields to CR0186`` () =
+    let source =
+        csharp
+            """
+            using System.Runtime.Serialization;
+            [DataContract(Name = "BackupUserV1")]
+            public class BackupUserV1
+            {
+                private string userId;
+                [DataMember(IsRequired = true, Name = "UserId", Order = 1)]
+                public string UserId { get { return userId; } set { userId = value; } }
+            }
+            """
+
+    // "UserId" names the property; only BindingFlags.IgnoreCase would reach `userId` by it
+    Assert.Equal<string list>([ "UserId" ], firedText source (suggestCode "CR0186" source))

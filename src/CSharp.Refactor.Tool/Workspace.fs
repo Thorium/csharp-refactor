@@ -3,7 +3,7 @@
 /// loaded workspace answers the same for C# projects; this module exists
 /// for what it cannot load — an F# or VB project of the same solution that
 /// references the C# one, a caller no pass can rewrite and one the public
-/// surface must be held for. Ported from fsharp-refactor.
+/// surface must be held for. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tool.Workspace
 
 open System
@@ -62,8 +62,7 @@ let projectsInSolution (solutionPath: string) : string list =
 /// other property cannot be resolved without MSBuild - but it still names
 /// a project, and a referencer passed over is a call site missed. So such
 /// a reference keeps the file name it ends in (`$(FSharpSourcesRoot)\
-/// FSharp.Core\FSharp.Core.fsproj`, twenty-eight times in dotnet/fsharp)
-/// and matches by that, and one with no recognisable file name at all
+/// FSharp.Core\FSharp.Core.fsproj`) and matches by that, and one with no recognisable file name at all
 /// (`$(Ref)`) is taken to reference ANY project of the workspace: the
 /// cost of reading a sibling that turns out not to call is a typecheck,
 /// the cost of missing one is a broken build.
@@ -77,12 +76,11 @@ type ProjectReference =
 
 /// A project file's text with its XML comments taken out, for every read
 /// that matches the text rather than evaluating it: an element an author
-/// commented away is not one MSBuild sees. welendus's WelendusLogic.fsproj
-/// carries `<!-- <TargetFrameworks>netstandard2.0;net48</TargetFrameworks>
-/// -->` above the live element; the text match took the commented one
-/// first and the run asked for a net48 pass no restore had produced
-/// (NETSDK1005). A commented-out ProjectReference would likewise have made
-/// a referencer of a project that no longer links.
+/// commented away is not one MSBuild sees. A `<!--
+/// <TargetFrameworks>netstandard2.0;net48</TargetFrameworks> -->` above the
+/// live element would match first and ask for a net48 pass no restore
+/// produced (NETSDK1005); a commented-out ProjectReference would likewise
+/// make a referencer of a project that does not link.
 let projectTextWithoutComments (text: string) =
     Regex.Replace(text, @"<!--.*?-->", "", RegexOptions.Singleline)
 
@@ -226,7 +224,7 @@ let referencersOf (workspace: string list) (project: string) : string list =
     let references = workspace |> List.map (fun p -> p, projectReferenceShapesOf p)
 
     // the levels reached, newest first: joined once at the end, where
-    // appending each level to the whole copied everything reached so far
+    // appending each level to the whole would copy everything reached so far
     let mutable levels = [ [ project ] ]
     let mutable frontier = [ project ]
 
@@ -246,11 +244,131 @@ let referencersOf (workspace: string list) (project: string) : string list =
     |> List.concat
     |> List.filter (fun p -> not (samePath p project))
 
+let private assemblyNameOfRegex =
+    Regex "<AssemblyName>\\s*([^<]+?)\\s*</AssemblyName>"
+
+/// The name of the assembly a project builds: its `<AssemblyName>` when the
+/// project spells one out, else the project file's own name - the SDK
+/// default, and the name a HintPath's dll carries. Mirrors fsharp-refactor's.
+let assemblyNameOf (projectPath: string) : string =
+    let text =
+        try
+            projectTextWithoutComments (File.ReadAllText projectPath)
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException -> ""
+
+    let m = assemblyNameOfRegex.Match text
+
+    if m.Success && not (m.Groups.[1].Value.Contains "$(") then
+        m.Groups.[1].Value
+    else
+        Path.GetFileNameWithoutExtension projectPath
+
+/// Does a project's text reference an assembly's dll directly - a
+/// `<Reference Include="Name">` (or `"Name, Version=..."`, or a path ending
+/// in `Name.dll`), or one whose HintPath ends in `Name.dll`? Such a project
+/// compiles against the dll whatever its ProjectReferences say. Mirrors
+/// fsharp-refactor's.
+let private referencesAssemblyDirectly (text: string) (assemblyName: string) =
+    let namesAssembly (value: string) =
+        let value = value.Trim()
+        let fileName = Path.GetFileName(value.Replace('\\', '/'))
+
+        String.Equals(value.Split(',').[0].Trim(), assemblyName, StringComparison.OrdinalIgnoreCase)
+        || String.Equals(fileName, assemblyName + ".dll", StringComparison.OrdinalIgnoreCase)
+
+    Regex.Matches(
+        text,
+        "<Reference\\b[^>]*?(?:/>|>.*?</Reference\\s*>)",
+        RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+    )
+    |> Seq.exists (fun element ->
+        let includeAttribute =
+            Regex.Match(element.Value, "Include\\s*=\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase)
+
+        let hintPath =
+            Regex.Match(element.Value, "<HintPath>\\s*([^<]+?)\\s*</HintPath>", RegexOptions.IgnoreCase)
+
+        (includeAttribute.Success && namesAssembly includeAttribute.Groups.[1].Value)
+        || (hintPath.Success && namesAssembly hintPath.Groups.[1].Value))
+
+/// The repository a path sits in: the nearest ancestor directory holding
+/// `.git`, or None outside one.
+let private repositoryRootOf (path: string) : string option =
+    let mutable dir = Path.GetDirectoryName(Path.GetFullPath path)
+    let mutable found = None
+
+    while found.IsNone && not (String.IsNullOrEmpty dir) do
+        if
+            Directory.Exists(Path.Combine(dir, ".git"))
+            || File.Exists(Path.Combine(dir, ".git"))
+        then
+            found <- Some dir
+        else
+            dir <- Path.GetDirectoryName dir
+
+    found
+
+/// Every project file of a repository with its comment-free text, read once
+/// per run and root.
+let private repositoryProjects =
+    System.Collections.Concurrent.ConcurrentDictionary<string, (string * string) list>(StringComparer.OrdinalIgnoreCase)
+
+/// Forgets the repositories' project files: a long-lived host (the MCP
+/// server) starts each run from the files as they are now.
+let resetRepositoryProjects () = repositoryProjects.Clear()
+
+let private projectsUnder (root: string) =
+    repositoryProjects.GetOrAdd(
+        root,
+        fun root ->
+            projectExtensions
+            |> List.collect (fun ext -> FileWalk.files ("*" + ext) root |> List.ofSeq)
+            |> List.map Path.GetFullPath
+            |> List.distinctBy (fun p -> p.ToLowerInvariant())
+            |> List.map (fun p ->
+                let text =
+                    try
+                        projectTextWithoutComments (File.ReadAllText p)
+                    with
+                    | :? IOException
+                    | :? UnauthorizedAccessException -> ""
+
+                p, text)
+    )
+
+/// The projects of `project`'s repository that compile against it but are
+/// not in the run's workspace - a `<Reference>` or HintPath to its dll (a
+/// legacy tree links its solutions through a shared bin), or a
+/// ProjectReference from a solution the run does not load. Nothing the run
+/// builds or rewrites can see their uses of its public declarations, so a
+/// public shape must not change under them: the caller holds the surface
+/// for them, as fsharp-refactor holds it for a consumer it cannot build.
+let outsideConsumers (runTarget: string) (project: string) : string list =
+    match repositoryRootOf project with
+    | None -> []
+    | Some root ->
+        let workspace = workspaceOf runTarget project |> Option.defaultValue [ project ]
+        let assembly = assemblyNameOf project
+
+        projectsUnder root
+        |> List.filter (fun (p, text) ->
+            not (workspace |> List.exists (samePath p))
+            && not (samePath p project)
+            && (referencesAssemblyDirectly text assembly
+                || projectReferenceShapesOf p
+                   |> List.exists (function
+                       | Resolved target -> samePath target project
+                       | ByName _
+                       | Unresolvable -> false)))
+        |> List.map fst
+
 /// A source file as MSBuildWorkspace's own loader reads it: a byte order
 /// mark decides, else UTF-8 where the bytes are valid UTF-8, else the
 /// system code page (Windows-1252 here). The public `SourceText.From`
 /// overloads decode a file without a mark as UTF-8 and replace every
-/// invalid byte with U+FFFD — how a legacy file's `ä` came back as `�` —
+/// invalid byte with U+FFFD — a legacy file's `ä` comes back as `�` —
 /// so the fallback is done here, as Roslyn's internal loader does it. The
 /// text carries the encoding it was decoded with; the sweep writes it back
 /// the same way.

@@ -1,5 +1,5 @@
-/// The guards the M2 review added: each shape here was a silent semantics
-/// change before it.
+/// Guards against silent semantics changes: each shape here is one a
+/// rewrite would change without its guard.
 module CSharp.Refactor.Tests.M2ReviewTests
 
 open Xunit

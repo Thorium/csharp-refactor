@@ -895,7 +895,7 @@ let ``a private static readonly array the code only reads becomes an ImmutableAr
 
 [<Fact>]
 let ``CR0182 keeps the lookup where the value could change between the check and the read`` () =
-    // each shape from the adversarial review: the rewrite read the value at the check, the code at the read
+    // each shape a rewrite gets wrong: it reads the value at the check, the code at the read
     let source =
         csharp
             """
@@ -1000,3 +1000,34 @@ let ``review 2026-09-28: CR0184 keeps an array read by Aggregate or ElementAt, s
             """
 
     Assert.Empty(suggestCode "CR0184" source)
+
+[<Fact>]
+let ``parity 2026-09-28 CR0182 keeps a dictionary whose indexer or TryGetValue is not the BCL's`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            class Counting<K, V> : Dictionary<K, V>
+            {
+                public int Reads;
+                public new V this[K k] { get { Reads++; return base[k]; } }
+            }
+            class Positional<V> : Dictionary<long, V>
+            {
+                public V this[int i] => default;
+            }
+            abstract class Holder
+            {
+                public abstract Dictionary<string, int> Map { get; }
+                int A(string k) { if (this.Map.ContainsKey(k)) return this.Map[k]; return 0; }
+            }
+            class C
+            {
+                int A(Counting<string, int> d, string k) { if (d.ContainsKey(k)) return d[k]; return 0; }
+                int B(Positional<int> d, int i) { if (d.ContainsKey(i)) return d[i]; return 0; }
+                int D(Dictionary<string, int> d, string k) { if (d.ContainsKey(k)) return d[k]; return 0; }
+            }
+            """
+
+    // D alone: Counting's indexer counts, Positional's d[i] is positional, Map is computed by a derived getter
+    Assert.Equal<string list>([ "d.ContainsKey(k)" ], firedText source (suggestCode "CR0182" source))

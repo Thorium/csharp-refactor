@@ -4,13 +4,13 @@
 /// second argument as absolute and discards the first, which the
 /// concatenation does not.
 ///
-/// Guards (FR0081's, after its false positives): BOTH separators need
+/// Guards (FR0081's): BOTH separators need
 /// positive path evidence — a path-flavoured name in the chain (`dir`,
 /// `path`, `file`, `folder`, `directory`, `root`, `home`, `temp`), a
 /// rooted literal (`C:\…`, `/usr/…`), an extension-bearing literal
 /// (`.txt`, `.json`), or a literal naming a path that exists on this
-/// machine — a lone backslash used to fire alone until escape-sequence
-/// building (`result + "\\" + c`) showed where that goes wrong. A
+/// machine — a lone backslash is no evidence: escape-sequence building
+/// (`result + "\\" + c`) joins with one too. A
 /// separator only joins with text on BOTH sides (`dir + "/"` appends a
 /// marker, `"/" + name` prefixes a root); dot-segments (`"./" + p`, `p +
 /// "../"`) are relative-path notation `Path.Combine` cannot spell. A chain

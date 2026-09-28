@@ -1,8 +1,8 @@
 /// What a run surfaces, and the files it writes: SARIF 2.1.0 (with the
 /// stable fingerprints --baseline keys on), CSV, a self-contained HTML
-/// page, and the JSON of --format json and --mcp. Ported from
-/// fsharp-refactor; the layouts are identical so one set of CI consumers
-/// serves both tools.
+/// page, and the JSON of --format json and --mcp. The layouts are
+/// fsharp-refactor's, identical so one set of CI consumers serves both
+/// tools.
 module CSharp.Refactor.Tool.Reports
 
 open System
@@ -388,9 +388,8 @@ let private writeSarifReport (path: string) (target: string) (findings: Reported
                                                         box "csharp-refactor: C# refactoring analyzers and apply tool"
                                                         "version", box toolVersion.Value
                                                         "semanticVersion", box toolVersion.Value
-                                                        // the URL the package and --help both publish; this
-                                                        // one said FSharp.Refactorings, and it is the link
-                                                        // GitHub code scanning puts in front of users
+                                                        // the URL the package and --help both publish: it is
+                                                        // the link GitHub code scanning puts in front of users
                                                         "informationUri",
                                                         box "https://github.com/Thorium/csharp-refactor"
                                                         "rules", box rulesMetadata

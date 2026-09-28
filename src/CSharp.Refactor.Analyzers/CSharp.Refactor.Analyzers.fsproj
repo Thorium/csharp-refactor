@@ -56,6 +56,7 @@
     <Compile Include="TryPattern.fs" />
     <Compile Include="FixedArray.fs" />
     <Compile Include="ReadOnlyReturn.fs" />
+    <Compile Include="CaseCompare.fs" />
     <Compile Include="SpanShapes.fs" />
     <Compile Include="NestedIfMerge.fs" />
     <Compile Include="SwitchShapes.fs" />

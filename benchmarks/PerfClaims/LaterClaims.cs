@@ -290,3 +290,15 @@ public class CR0182_ContainsKeyThenIndexer
     [Benchmark(Baseline = true)] public int ContainsKeyThenIndexer() { int t = 0; foreach (var k in Keys) if (Fixtures.Dict.ContainsKey(k)) t += Fixtures.Dict[k]; return t; }
     [Benchmark] public int TryGetValue() { int t = 0; foreach (var k in Keys) if (Fixtures.Dict.TryGetValue(k, out var v)) t += v; return t; }
 }
+
+/// <summary>CR0188: lowering a string to compare it with a literal against one case-insensitive comparison, over 1000 mixed-case words.</summary>
+[Config(typeof(Config))]
+public class CR0188_LowerThenCompare
+{
+    static readonly string[] Words = Enumerable.Range(0, 1000).Select(i => i % 3 == 0 ? "Content-Type" : i % 3 == 1 ? "ACCEPT" : "x-request-id-" + i).ToArray();
+
+    [Benchmark(Baseline = true)] public int ToLowerEquals() { int t = 0; foreach (var w in Words) if (w.ToLower() == "content-type") t++; return t; }
+    [Benchmark] public int ToLowerStartsWith() { int t = 0; foreach (var w in Words) if (w.ToLowerInvariant().StartsWith("x-request")) t++; return t; }
+    [Benchmark] public int OrdinalIgnoreCaseEquals() { int t = 0; foreach (var w in Words) if (w.Equals("content-type", StringComparison.OrdinalIgnoreCase)) t++; return t; }
+    [Benchmark] public int OrdinalIgnoreCaseStartsWith() { int t = 0; foreach (var w in Words) if (w.StartsWith("x-request", StringComparison.OrdinalIgnoreCase)) t++; return t; }
+}

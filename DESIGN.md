@@ -364,7 +364,11 @@ applies CR rules only.
 ### 7.2 Overlap table
 
 F# rules whose C# shape Microsoft already reports WITH a fix, on by default
-at the SDK's default analysis level. These get no CR rule; the tool defers.
+at the SDK's default analysis level. A row marked defer gets no CR rule. A
+row naming one has its own rule anyway: Microsoft's analyzers are not
+always there (a .NET Framework project never loads them) and their fixes
+are an editor's, not a sweep's. That rule runs by default and yields only
+under `csharp_refactor.skip_microsoft_duplicates = true`.
 (Defaults as of the .NET 9/10 SDK; the gate above is what matters.)
 
 | F# rule | C# shape | Microsoft rule (with fix) | Decision |
@@ -372,18 +376,18 @@ at the SDK's default analysis level. These get no CR rule; the tool defers.
 | FR0010 (part) | `c ? true : false` | IDE0075 | defer; CR0001 keeps the statement shape |
 | — | `if (a) return x; else return y;` → `return a ? x : y;` | IDE0046, IDE0045 | CR0173: the one-line cases, in the fix pipeline; yields to the IDE rules where they are on |
 | FR0012 (part) | `x == true`, `.Where(p).Any()`, `.Count() == 0` | IDE0100, IDE0120, CA1827 | yields per hint |
-| FR0014 | `ContainsKey` + indexer | CA1854 | defer |
+| FR0014 | `ContainsKey` + indexer | CA1854 | CR0182: the pair's reads proved to see one value (no call, store or `await` between them unless the dictionary and key are private to the member); yields to CA1854 under `skip_microsoft_duplicates` |
 | FR0015 (hoist) | regex construction hoisted | SYSLIB1045 (`[GeneratedRegex]`) | yields; CR0109 covers targets below .NET 7 |
 | FR0018 | check-then-add | CA1864 | defer |
 | FR0019 | Equals without GetHashCode | CS0659 (compiler) | n/a |
-| FR0026 | backing field + trivial get/set | IDE0032 (auto-property) | defer |
+| FR0026 | backing field + trivial get/set | IDE0032 (auto-property) | CR0186: CR0153's field guards, not in a struct or a serialized or laid-out type; yields to IDE0032 under `skip_microsoft_duplicates` |
 | FR0033 | member touching no instance state | CA1822 | defer |
 | FR0034 (part) | `HasValue ? Value : d` | IDE0029/IDE0030/IDE0270 | defer; CR0004 keeps the payload-use shapes |
 | FR0037 (part) | `JsonSerializerOptions`, `SearchValues` in loops | CA1869, CA1870 | yields |
 | FR0038 | char overloads | CA1834, CA1847, CA1865–CA1867 | defer |
-| FR0039 | `ToLower() ==` | CA1862 | defer |
+| FR0039 | `ToLower() ==` | CA1862 | CR0188: an ASCII literal agreeing with the fold, OrdinalIgnoreCase; yields to CA1862 under `skip_microsoft_duplicates` |
 | FR0040 | redundant `ContainsKey` before `Remove` | CA1853, CA1868 | defer |
-| FR0044 | `throw ex;` | CA2200 | defer |
+| FR0044 | `throw ex;` | CA2200 | CR0187: the nearest `catch` declares `ex` and nothing writes it; yields to CA2200 under `skip_microsoft_duplicates` |
 | FR0045 | `x == double.NaN` | CA2242 | defer |
 | FR0048 | placeholder without argument | CA2241 | defer |
 | FR0052 | `Count == 0` on concurrent collections | CA1836 | defer |
@@ -400,11 +404,11 @@ at the SDK's default analysis level. These get no CR rule; the tool defers.
 | FR0167 | `for c in s.ToCharArray()` → `for c in s` | — | CR0176, the `foreach` only (LINQ over a string is slower than over the array) |
 | FR0071 | hoist a loop-invariant `let` above the loop | — | CR0177: the initializer pure and reading nothing the loop changes; measured, a concatenation 4×, local and readonly-field arithmetic parity (the JIT hoists it; a mutable field is never read) |
 | FR0174 | `q.ToList().Where(f).Select(g)` → `q.Where(f).Select(g).ToList()` on an `IQueryable` | — | CR0178: trivial column comparisons and projections only; a sweep moves exact translations (integers, bool, enums, Guid), the editor offers string, decimal, date and nullable ones |
-| FR0118 (omitted token) | forward the `CancellationToken` | CA2016 | defer; CR0055 keeps the explicit `None` |
+| FR0118 (omitted token) | forward the `CancellationToken` | CA2016 | CR0189 (an optional token left out, or the same method with a trailing token), never in cleanup or a branch the token's state chose; CR0055 keeps the explicit `None`; yields to CA2016 under `skip_microsoft_duplicates` |
 | FR0124 (count, interpolated template) | template/argument mismatch | CA2017, CA2254 | defer; CR0114 keeps the remainder |
 | FR0130 | `static readonly` constant → `const`, and a constant local | CA1802 | CR0172: the field under the API gate (a `const` is a different member to a compiled consumer), the local always |
 | FR0139 | LINQ where a property exists | CA1826, CA1829, CA1860 | defer |
-| FR0140 | construct-then-assign → object initializer | IDE0017 | defer |
+| FR0140 | construct-then-assign → object initializer | IDE0017 | CR0179; yields to IDE0017 under `skip_microsoft_duplicates` |
 | FR0145 | unassigned `required` members | CS9035 | n/a |
 | FR0155 | seal a class nothing inherits | CA1852 | defer |
 
@@ -1445,7 +1449,7 @@ Guards:
 | FR0102 | `List<T>` indexing is O(1); CR0026 covers the enumerable case. |
 | FR0116 | No `let rec … and` groups. |
 | FR0131, FR0158 | C# guarantees no tail calls; the loop is the right spelling. |
-| FR0074, FR0140 | `with { A = r.A with { B = v } }` is how C# spells it; IDE0017 covers initialisers. |
+| FR0074 | `with { A = r.A with { B = v } }` is how C# spells it. |
 | FR0145 | `required` members are a compile error when missing. |
 | FR0077 | Missing interface members are a compile error with a Roslyn fix. |
 

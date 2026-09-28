@@ -1,6 +1,6 @@
 /// Console output with a purpose per colour: progress recedes, skips read
 /// as deliberate, failures come forward. Colour is never the only carrier;
-/// every line says in words what it is. Ported from fsharp-refactor.
+/// every line says in words what it is. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tool.Out
 
 open System

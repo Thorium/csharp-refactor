@@ -61,7 +61,8 @@ OPTIONS
                         further. For a repository you do not maintain,
                         "correctness,performance" is the set worth a pull
                         request; nobody welcomes a stranger's punctuation
-  --jobs <n>            projects analysed at once (default: cores, at most 4)
+  --jobs <n>            files analysed at once (default 4, clamped to 2-4 by
+                        core count). --jobs 1 is the sequential run
   --framework <tfm>     analyse only this target framework. By default a
                         multi-targeted project is worked through framework by
                         framework, narrowest first, because code behind another
@@ -264,7 +265,7 @@ let defaults =
         CreateConfig = false
         Mcp = false
         MaxPasses = 5
-        Jobs = min 4 (max 1 Environment.ProcessorCount)
+        Jobs = min 4 (max 2 Environment.ProcessorCount)
         Framework = ""
     }
 

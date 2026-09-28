@@ -575,3 +575,100 @@ let ``CR0064 keeps the IO narrowing off a body that reads and then parses`` () =
 
     for s in suggestCode "CR0064" source do
         Assert.DoesNotContain(s.Fixes, fun f -> f.Title.StartsWith "Catch the IO")
+
+// ---- CR0187 ----
+
+[<Fact>]
+let ``a caught exception thrown again by name is rethrown with throw; an inner catch, a lambda, a finally or a reassignment keep it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            class C
+            {
+                static void Log(Exception e) { }
+                void A() { try { Work(); } catch (InvalidOperationException ex) { Log(ex); throw ex; } }
+                void B() { try { Work(); } catch (Exception ex) { try { Work(); } catch (Exception inner) { throw ex; } } }
+                void D() { try { Work(); } catch (Exception ex) { Action a = () => { throw ex; }; a(); } }
+                void E() { try { Work(); } catch (Exception ex) { ex = new Exception("other", ex); throw ex; } }
+                void F() { try { Work(); } catch (Exception ex) { try { Work(); } finally { throw ex; } } }
+                void G() { try { Work(); } catch (Exception ex) { var other = new Exception(); throw other; } }
+                void H() { try { Work(); } catch (Exception ex) { if (ex.Message == "") throw ex; } }
+                void Work() { }
+            }
+            """
+
+    // A and H; B's throw sits in an inner catch, D's in a lambda, E reassigns, F is in a finally, G throws another
+    Assert.Equal<string list>([ "throw ex;"; "throw ex;" ], firedText source (suggestCode "CR0187" source))
+    let fixedSource = fixAll "CR0187" source
+    Assert.Contains("{ Log(ex); throw; }", fixedSource)
+    Assert.Contains("if (ex.Message == \"\") throw;", fixedSource)
+    Assert.Contains("catch (Exception inner) { throw ex; }", fixedSource)
+    Assert.Contains("() => { throw ex; }", fixedSource)
+    Assert.Contains("ex = new Exception(\"other\", ex); throw ex;", fixedSource)
+    Assert.Contains("finally { throw ex; }", fixedSource)
+
+[<Fact>]
+let ``a caught exception written through a ref alias keeps its throw`` () =
+    let source =
+        csharp
+            """
+            using System;
+            class C
+            {
+                void A()
+                {
+                    try { Work(); }
+                    catch (Exception ex)
+                    {
+                        ref Exception alias = ref ex;
+                        alias = new InvalidOperationException("other");
+                        throw ex;
+                    }
+                }
+                void Work() { }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0187" source)
+
+[<Fact>]
+let ``review 2026-09-28b CR0187 keeps a caught exception a deconstruction, the filter or a by-reference use may have replaced``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            class C
+            {
+                static ref readonly T Same<T>(ref readonly T x) => ref x;
+                void A()
+                {
+                    try { } catch (Exception ex) { Exception other = new ArgumentException(); (ex, other) = (other, ex); throw ex; }
+                }
+                void B()
+                {
+                    try { } catch (Exception ex) when ((ex = new ArgumentException()) != null) { throw ex; }
+                }
+                void D()
+                {
+                    try { } catch (Exception ex) { Same(ex); throw ex; }
+                }
+                void E()
+                {
+                    try { } catch (Exception ex) { var r = __makeref(ex); throw ex; }
+                }
+                void F()
+                {
+                    try { } catch (Exception ex) { Console.WriteLine(ex.Message); Log(ex); throw ex; }
+                }
+                static void Log(Exception e) { }
+            }
+            """
+
+    // F alone: a by-value argument and a member read leave the exception as caught
+    Assert.Equal(1, (suggestCode "CR0187" source).Length)
+    Assert.Contains("Log(ex); throw; }", fixAll "CR0187" source)

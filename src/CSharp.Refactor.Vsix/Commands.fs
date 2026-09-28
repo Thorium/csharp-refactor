@@ -1,5 +1,5 @@
 /// The Tools > CSharp.Refactor menu: the commands the VS Code extension
-/// puts in its palette, which Visual Studio had none of.
+/// puts in its palette, which Visual Studio otherwise lacks.
 ///
 /// The hints and light bulbs need no shell package at all — Roslyn loads
 /// the analyzer from the VSIX's analyzer asset. A menu does: Visual Studio
@@ -384,7 +384,7 @@ module internal Commands =
 
                     // no positional target: the tool writes into its CURRENT
                     // directory, which runTool sets to `dir`. Quoting the
-                    // directory instead broke on its trailing separator -
+                    // directory instead would break on its trailing separator -
                     // a `\` before the closing quote escapes the quote under
                     // the .NET host's argument splitting
                     let! _ = runTool "--create-config" dir |> Async.StartAsTask

@@ -282,7 +282,7 @@ let private mergeArms (root: SyntaxNode) (text: SourceText) (wrapColumn: int) (o
                         else
                             // one line while it fits; past the wrap column each
                             // pattern takes its own line, the `or`s indented under
-                            // the first (six event types joined made a 200-columns)
+                            // the first (six event types joined run to 200 columns)
                             let armLine = text.Lines.GetLineFromPosition run.Head.SpanStart
                             let armColumn = run.Head.SpanStart - armLine.Start
                             let names = run |> List.map (fun a -> a.Pattern.ToString())

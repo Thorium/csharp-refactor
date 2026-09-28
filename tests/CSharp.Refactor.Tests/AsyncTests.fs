@@ -866,3 +866,253 @@ let ``a caller's own AggregateException handler holds the taskify fix`` () =
             """
 
     Assert.Empty(suggestCode "CR0041" source |> List.filter (fun s -> not s.Fixes.IsEmpty))
+
+// ---- CR0189 ----
+
+[<Fact>]
+let ``a call omitting the token in scope passes it where the callee takes one; cleanup, two tokens or no token overload keep it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+            class Repo
+            {
+                public Task<int> GetAsync(int id) => Task.FromResult(id);
+                public Task<int> GetAsync(int id, CancellationToken ct) => Task.FromResult(id);
+                public Task SaveAsync(int id, CancellationToken ct = default) => Task.CompletedTask;
+                public Task PutAsync(int id, bool force = false, CancellationToken ct = default) => Task.CompletedTask;
+                public Task<int> CountAsync() => Task.FromResult(0);
+            }
+            class C
+            {
+                Repo repo = new Repo();
+                async Task A(int id, CancellationToken ct) { await repo.GetAsync(id); }
+                async Task B(int id, CancellationToken ct) { await repo.SaveAsync(id); }
+                async Task D(int id, CancellationToken ct) { await repo.PutAsync(id); }
+                async Task E(int id, CancellationToken ct) { try { } finally { await repo.SaveAsync(id); } }
+                async Task F(int id, CancellationToken a, CancellationToken b) { await repo.GetAsync(id); }
+                async Task G(CancellationToken ct) { await repo.CountAsync(); }
+                async Task H(int id) { await repo.GetAsync(id); }
+                async Task I(int id, CancellationToken ct) { await repo.GetAsync(id, ct); }
+            }
+            """
+
+    // A, B, D; E is cleanup, F has two tokens, G's callee takes none, H has no token, I passes it
+    Assert.Equal(3, (suggestCode "CR0189" source).Length)
+    let fixedSource = fixAll "CR0189" source
+    Assert.Contains("await repo.GetAsync(id, ct); }\n    async Task B", fixedSource.Replace("\r\n", "\n"))
+    Assert.Contains("await repo.SaveAsync(id, ct); }\n    async Task D", fixedSource.Replace("\r\n", "\n"))
+    Assert.Contains("await repo.PutAsync(id, ct: ct);", fixedSource)
+    Assert.Contains("finally { await repo.SaveAsync(id); }", fixedSource)
+    Assert.Contains("CancellationToken b) { await repo.GetAsync(id); }", fixedSource)
+    Assert.Contains("await repo.CountAsync();", fixedSource)
+
+[<Fact>]
+let ``a branch the token's state chose, a params call or a lambda's call keeps its token omitted`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class Log
+            {
+                public Task WriteAsync(string m, CancellationToken ct = default) => Task.CompletedTask;
+                public Task ManyAsync(params string[] ms) => Task.CompletedTask;
+                public Task ManyAsync(string[] ms, CancellationToken ct) => Task.CompletedTask;
+            }
+            class C
+            {
+                Log log = new Log();
+                async Task A(CancellationToken ct)
+                {
+                    if (ct.IsCancellationRequested) { await log.WriteAsync("cancelled"); return; }
+                    await (ct.IsCancellationRequested ? log.WriteAsync("late") : Task.CompletedTask);
+                    await log.ManyAsync("a", "b", "c");
+                    Func<Task> later = () => log.WriteAsync("later");
+                    await later();
+                    while (!ct.IsCancellationRequested) { await log.WriteAsync("after a read"); }
+                }
+                async Task B(CancellationToken ct)
+                {
+                    while (!ct.IsCancellationRequested) { await log.WriteAsync("tick"); }
+                }
+            }
+            """
+
+    // only B's loop body: it runs while the token is live; A's loop follows
+    // the cancel reads above it
+    Assert.Equal<string list>([ "log.WriteAsync(\"tick\")" ], firedText source (suggestCode "CR0189" source))
+
+[<Fact>]
+let ``review 2026-09-28b CR0189 keeps a call the token would re-bind, a scheduler however spelled and code after a cancel state was read``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Threading;
+            using System.Threading.Tasks;
+            using static System.Threading.Tasks.Task;
+            class B
+            {
+                public Task<string> GetAsync(int id) => Task.FromResult("b");
+                public Task<string> GetAsync(int id, CancellationToken ct) => Task.FromResult("bt");
+                public Task LoadAsync(int id, CancellationToken ct = default) => Task.CompletedTask;
+            }
+            class D : B
+            {
+                public Task<string> GetAsync(int id, object state) => Task.FromResult("d");
+                public Task LoadAsync(int id, object state) => Task.CompletedTask;
+            }
+            class Lib
+            {
+                public Task ReadAsync(int id) => Task.CompletedTask;
+                private Task ReadAsync(int id, CancellationToken ct) => Task.CompletedTask;
+                public Task ReadAsync(int id, object state) => Task.CompletedTask;
+            }
+            class C
+            {
+                Task FlushAsync(CancellationToken ct = default) => Task.CompletedTask;
+                async Task A(D d, Lib lib, Task work, CancellationToken ct)
+                {
+                    await d.GetAsync(1);
+                    await d.LoadAsync(1);
+                    await lib.ReadAsync(1);
+                    await System.Threading.Tasks.Task.Run(() => { });
+                    await Run(() => { });
+                    await new TaskFactory().StartNew(() => { });
+                    await work.ContinueWith(_ => { });
+                    await Task.Delay(1);
+                }
+                async Task Worker(CancellationToken ct)
+                {
+                    while (!ct.IsCancellationRequested) { await Task.Delay(10); }
+                    await FlushAsync();
+                }
+                async Task Early(CancellationToken ct)
+                {
+                    bool stopping = ct.IsCancellationRequested;
+                    if (!stopping) return;
+                    await FlushAsync();
+                }
+            }
+            """
+
+    // the Delay in A and the one in the loop body; the rest re-bind, schedule or follow a cancel read
+    Assert.Equal<string list>([ "Task.Delay(1)"; "Task.Delay(10)" ], firedText source (suggestCode "CR0189" source))
+
+[<Fact>]
+let ``a task started and not waited for keeps its own lifetime; one awaited, returned, blocked on, combined or held and awaited gets the token``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class Bus
+            {
+                public Task SendAsync(string m, CancellationToken ct = default) => Task.CompletedTask;
+                public int Count(string m, CancellationToken ct = default) => 0;
+            }
+            class C
+            {
+                Bus bus = new Bus();
+                Task pending;
+                List<Task> jobs = new List<Task>();
+                async Task Detached(CancellationToken ct)
+                {
+                    _ = bus.SendAsync("audit");
+                    bus.SendAsync("fire");
+                    pending = bus.SendAsync("stored");
+                    jobs.Add(bus.SendAsync("queued"));
+                    var later = bus.SendAsync("held");
+                    pending = later;
+                    await Task.Yield();
+                }
+                async Task Waited(CancellationToken ct)
+                {
+                    await bus.SendAsync("awaited").ConfigureAwait(false);
+                    bus.SendAsync("blocked").Wait();
+                    await Task.WhenAll(bus.SendAsync("a"), bus.SendAsync("b"));
+                    var t = bus.SendAsync("held");
+                    await t;
+                    bus.Count("sync");
+                }
+                Task Returned(CancellationToken ct) => bus.SendAsync("returned");
+            }
+            """
+
+    Assert.Equal<string list>(
+        [
+            "bus.SendAsync(\"awaited\")"
+            // the blocking wait takes the token too: Wait(CancellationToken)
+            "bus.SendAsync(\"blocked\").Wait()"
+            "bus.SendAsync(\"blocked\")"
+            "bus.SendAsync(\"a\")"
+            "bus.SendAsync(\"b\")"
+            "bus.SendAsync(\"held\")"
+            "bus.Count(\"sync\")"
+            "bus.SendAsync(\"returned\")"
+        ],
+        firedText source (suggestCode "CR0189" source)
+    )
+
+[<Fact>]
+let ``review 2026-09-28c CR0189 keeps an acquire its finally releases and code after a caught cancel`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                SemaphoreSlim gate = new SemaphoreSlim(1, 1);
+                Task FlushAsync(CancellationToken ct = default) => Task.CompletedTask;
+                async Task Guarded(CancellationToken ct)
+                {
+                    try { await gate.WaitAsync(); } finally { gate.Release(); }
+                }
+                async Task Outside(CancellationToken ct)
+                {
+                    await gate.WaitAsync();
+                    try { } finally { gate.Release(); }
+                }
+                async Task Drain(CancellationToken ct)
+                {
+                    try { await Task.Delay(10, ct); } catch (OperationCanceledException) { }
+                    await FlushAsync();
+                }
+            }
+            """
+
+    // Outside's acquire runs before the try: a cancelled wait never reaches the release
+    Assert.Equal<string list>([ "gate.WaitAsync()" ], firedText source (suggestCode "CR0189" source))
+    Assert.Contains("await gate.WaitAsync(ct);\n        try { }", (fixAll "CR0189" source).Replace("\r\n", "\n"))
+
+[<Fact>]
+let ``parity 2026-09-28 CR0189 keeps a Register callback's own token`` () =
+    let source =
+        csharp
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                SemaphoreSlim gate = new SemaphoreSlim(1);
+                void Flush() { }
+                void Hook(CancellationToken ct)
+                {
+                    ct.Register((state, token) => { gate.Wait(); Flush(); }, null);
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0189" source)

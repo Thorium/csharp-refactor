@@ -436,6 +436,227 @@ type EndToEnd() =
         Assert.Contains("public static readonly int Limit = 10;", File.ReadAllText(Path.Combine(opened, "Knobs.cs")))
 
     [<Fact>]
+    member _.``--api-changes keeps a public member another project writes, hashes or compares, and fixes the one it only builds``
+        ()
+        =
+        let dir = tempDir ()
+        Directory.CreateDirectory(Path.Combine(dir, "Core")) |> ignore
+        Directory.CreateDirectory(Path.Combine(dir, "App")) |> ignore
+
+        File.WriteAllText(
+            Path.Combine(dir, "Core", "Core.csproj"),
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
+        )
+
+        // each type is built by an object initializer in its own project, so the
+        // compilation's own index sees only construction
+        File.WriteAllText(
+            Path.Combine(dir, "Core", "Models.cs"),
+            csharp
+                """
+                namespace Core;
+                public class AccountFilter
+                {
+                    public string Currency { get; set; }
+                    public string Status { get; set; }
+                }
+                public class Key
+                {
+                    public int Id { get; init; }
+                }
+                public class Plain
+                {
+                    public int Id { get; init; }
+                }
+                public static class Limits
+                {
+                    public static int Retries = 3;
+                    public static int Timeout = 30;
+                }
+                public static class Make
+                {
+                    public static AccountFilter Filter() => new AccountFilter { Currency = "EUR", Status = "active" };
+                    public static Key K() => new Key { Id = 1 };
+                    public static Plain P() => new Plain { Id = 2 };
+                    public static int Sum() => Limits.Retries + Limits.Timeout;
+                }
+
+                """
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "App", "App.csproj"),
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup></Project>"""
+        )
+
+        // App writes Currency after construction, hashes Key, writes Retries
+        File.WriteAllText(
+            Path.Combine(dir, "App", "Use.cs"),
+            csharp
+                """
+                using System.Collections.Generic;
+                namespace App;
+                public static class Use
+                {
+                    public static int Run(string currency)
+                    {
+                        var filter = new Core.AccountFilter { Status = "active" };
+                        filter.Currency = currency;
+                        var seen = new HashSet<Core.Key> { Core.Make.K() };
+                        Core.Limits.Retries = 5;
+                        return seen.Count + filter.Status.Length + Core.Make.P().Id;
+                    }
+                }
+
+                """
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "All.slnx"),
+            """<Solution><Project Path="Core/Core.csproj" /><Project Path="App/App.csproj" /></Solution>"""
+        )
+
+        Sweep.resetRun ()
+
+        match parseArgs [| dir; "--api-changes"; "--codes"; "CR0083,CR0080,CR0180" |] with
+        | Ok opts -> Sweep.executeRun opts |> ignore
+        | Error e -> failwith e
+
+        let models = File.ReadAllText(Path.Combine(dir, "Core", "Models.cs"))
+        // written in App after construction: CS8852 as init
+        Assert.Contains("public string Currency { get; set; }", models)
+        // App only builds it: init is safe
+        Assert.Contains("public string Status { get; init; }", models)
+        // App hashes Key: a record would change the set; Plain App only reads
+        Assert.Contains("public class Key", models)
+        Assert.Contains("public record Plain", models)
+        // App writes Retries; nothing writes Timeout
+        Assert.Contains("public static int Retries = 3;", models)
+        Assert.Contains("public static readonly int Timeout = 30;", models)
+
+    [<Fact>]
+    member _.``--api-changes keeps a setter another project sets through a nested initializer``() =
+        let dir = tempDir ()
+        Directory.CreateDirectory(Path.Combine(dir, "Core")) |> ignore
+        Directory.CreateDirectory(Path.Combine(dir, "App")) |> ignore
+
+        File.WriteAllText(
+            Path.Combine(dir, "Core", "Core.csproj"),
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "Core", "Models.cs"),
+            csharp
+                """
+                namespace Core;
+                public class Inner
+                {
+                    public int P { get; set; }
+                }
+                public class Outer
+                {
+                    public Inner Inner { get; } = new Inner { P = 1 };
+                }
+
+                """
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "App", "App.csproj"),
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><ProjectReference Include="../Core/Core.csproj" /></ItemGroup></Project>"""
+        )
+
+        // `Inner = { P = 5 }` sets P on the Inner that Outer already holds: CS8852 as init
+        File.WriteAllText(
+            Path.Combine(dir, "App", "Use.cs"),
+            csharp
+                """
+                namespace App;
+                public static class Use
+                {
+                    public static int Run() => new Core.Outer { Inner = { P = 5 } }.Inner.P;
+                }
+
+                """
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "All.slnx"),
+            """<Solution><Project Path="Core/Core.csproj" /><Project Path="App/App.csproj" /></Solution>"""
+        )
+
+        Sweep.resetRun ()
+
+        match parseArgs [| dir; "--api-changes"; "--codes"; "CR0083" |] with
+        | Ok opts -> Sweep.executeRun opts |> ignore
+        | Error e -> failwith e
+
+        Assert.Contains("public int P { get; set; }", File.ReadAllText(Path.Combine(dir, "Core", "Models.cs")))
+
+    [<Fact>]
+    member _.``--api-changes holds the public surface a project outside the run compiles against through a HintPath``
+        ()
+        =
+        let write (withOutsider: bool) =
+            let dir = tempDir ()
+            Directory.CreateDirectory(Path.Combine(dir, ".git")) |> ignore
+            Directory.CreateDirectory(Path.Combine(dir, "Lib")) |> ignore
+
+            File.WriteAllText(
+                Path.Combine(dir, "Lib", "Lib.csproj"),
+                """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
+            )
+
+            File.WriteAllText(
+                Path.Combine(dir, "Lib", "Knobs.cs"),
+                csharp
+                    """
+                    public static class Knobs
+                    {
+                        public static int Limit = 10;
+                        private static int Mine = 2;
+                        public static int Sum() => Limit + Mine;
+                    }
+
+                    """
+            )
+
+            // a legacy consumer: no ProjectReference, the built dll from a shared bin
+            if withOutsider then
+                Directory.CreateDirectory(Path.Combine(dir, "Other")) |> ignore
+
+                File.WriteAllText(
+                    Path.Combine(dir, "Other", "Other.csproj"),
+                    """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><Reference Include="Lib"><HintPath>..\bin\Lib.dll</HintPath></Reference></ItemGroup></Project>"""
+                )
+
+            dir, Path.Combine(dir, "Lib", "Lib.csproj")
+
+        let run (project: string) =
+            Sweep.resetRun ()
+
+            match parseArgs [| project; "--api-changes"; "--codes"; "CR0180" |] with
+            | Ok opts -> Sweep.executeRun opts |> ignore
+            | Error e -> failwith e
+
+        // nothing outside the run compiles against Lib: the flag opens its public field
+        let dir, project = write false
+        run project
+
+        Assert.Contains(
+            "public static readonly int Limit = 10;",
+            File.ReadAllText(Path.Combine(dir, "Lib", "Knobs.cs"))
+        )
+
+        // Other reads Lib.dll from a shared bin, outside the run: the public field keeps its shape
+        let dir, project = write true
+        run project
+        let knobs = File.ReadAllText(Path.Combine(dir, "Lib", "Knobs.cs"))
+        Assert.Contains("public static int Limit = 10;", knobs)
+        Assert.Contains("private static readonly int Mine = 2;", knobs)
+
+    [<Fact>]
     member _.``a fix that raises an analyzer warning the project treats as an error is held, the others stand``() =
         let dir = tempDir ()
 

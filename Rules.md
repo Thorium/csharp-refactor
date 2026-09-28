@@ -148,6 +148,10 @@ a section, and its category and default state match the code.
 | CR0183 | Idiom | v | | | | `private bool TryFind(string k, out Order o)` whose callers only test it: `if (TryFind(k, out var o)) Use(o);` | `private Order? TryFind(string k)`, `if (TryFind(k) is { } o) Use(o);`, `if (TryFind(k) is not { } o) return;` |
 | CR0184 | Idiom | v | | | | `private static readonly string[] Allowed = { "a", "b" };` only read | `private static readonly ImmutableArray<string> Allowed = ["a", "b"];` (`ImmutableArray.Create<string>(…)` before C# 12) |
 | CR0185 | Idiom | | v | | | `public List<Order> Pending()` whose every caller only reads the result | `public IReadOnlyList<Order> Pending()` |
+| CR0186 | Idiom | v | | | IDE0032 | `private string _name; public string Name { get { return _name; } set { _name = value; } }` | `public string Name { get; set; }` (the field's initializer after it) |
+| CR0187 | Correctness | v | | | CA2200 | `catch (Exception ex) { Log(ex); throw ex; }` | `catch (Exception ex) { Log(ex); throw; }` |
+| CR0188 | Performance | v | | | CA1862 | `s.ToLower() == "abc"`, `s.ToUpperInvariant().StartsWith("ID-")` | `s.Equals("abc", StringComparison.OrdinalIgnoreCase)`, `s.StartsWith("ID-", StringComparison.OrdinalIgnoreCase)` |
+| CR0189 | Correctness | v | | | CA2016 | `async Task Load(int id, CancellationToken ct) { await repo.GetAsync(id); }` | `await repo.GetAsync(id, ct);` (`ct: ct` past a skipped optional parameter) |
 
 \*) Enabled by default. A blank cell means the rule is off until
 `.editorconfig` turns it on (`dotnet_diagnostic.CRxxxx.severity = suggestion`)
@@ -1022,6 +1026,15 @@ the entity check of CR0083; the scope gate: a public type converts only
 where the public shape is open (`--api-changes`, a leaf compilation), an
 internal one where no friend sees it, a private one always.
 
+A member visible outside its assembly — public or protected, internal with
+friends — is looked up across the projects that see it: the compilation's
+own index sees only its own trees, and `--api-changes` opens exactly those
+members. The tool lends the analyzer its solution-wide reference search;
+where a host has none (the compiler, an editor without a solution) such a
+member is left as it is. Any use of the class in another project keeps it a class:
+that project may hash it, compare it or print it, which a record changes
+and no build check catches.
+
 ### CR0081 — performance
 
 A `record` of at most four small unmanaged fields, 32 bytes in all, is a
@@ -1091,6 +1104,15 @@ property by reflection and from its source generator alike, and never
 names `JsonObjectCreationHandling` (Populate writes into what a property
 already holds). A type-level `[JsonConverter]` (a converter of its own may
 build the instance) and `[JsonExtensionData]` still keep the setter.
+
+A member visible outside its assembly — public or protected, internal with
+friends — is looked up across the projects that see it: the compilation's
+own index sees only its own trees, and `--api-changes` opens exactly those
+members. The tool lends the analyzer its solution-wide reference search;
+where a host has none (the compiler, an editor without a solution) such a
+member is left as it is. Another project writing the property outside an object
+initializer or a `with` keeps the setter (`filter.Currency = x` is CS8852 on
+an `init` one).
 
 ### CR0084 — correctness
 
@@ -1554,7 +1576,7 @@ declared in a statement is in scope for the rest of its block); the receiver
 is not assigned in the branch; a pass-through payload
 (`x.HasValue ? x.Value : d`) is IDE0270's `??` and stays; nothing moves
 inside an expression tree, where patterns cannot go; C# 8 is required.
-F# twin: FR0016.
+F# twin: FR0034.
 
 ### CR0005 — idiom
 
@@ -2603,7 +2625,9 @@ through parentheses, `ref` alias or `&` — is
 `public static readonly string Prefix = "v";`, and a literal-initialised
 one goes on to CR0172's `const`. An array field whose elements are
 written still qualifies: the elements are not the field. Guards: one
-declarator; not `volatile`, no attribute (`[ThreadStatic]`…); not a
+declarator; not `volatile`, no attribute (`[ThreadStatic]`…); no comment
+around it speaking of folding, inlining or optimising (`// not readonly:
+avoid constant folding` over a benchmark input, FR0007's guard); not a
 mutable struct — a `readonly` field copies it before each call, so a
 mutating method would change the copy (primitives, enums, `DateTime`,
 `decimal` and `readonly struct`s are fine); not in a generic type (a
@@ -2615,6 +2639,14 @@ compilation — a loader walking `GetFields()` reaches any static field, and
 a `readonly` one throws FieldAccessException there. A public or protected field is API
 (`--api-changes`, or a leaf compilation); a private one stands down where
 IDE0044 is on.
+
+A member visible outside its assembly — public or protected, internal with
+friends — is looked up across the projects that see it: the compilation's
+own index sees only its own trees, and `--api-changes` opens exactly those
+members. The tool lends the analyzer its solution-wide reference search;
+where a host has none (the compiler, an editor without a solution) such a
+member is left as it is. Any write to the field in another project keeps it
+writable.
 
 ### CR0181 — idiom
 
@@ -2657,7 +2689,12 @@ was.
 A `ContainsKey` check and an indexer read of the same key under it look
 the key up twice; `TryGetValue` looks once and hands the value over:
 `if (d.ContainsKey(k)) Use(d[k]);` becomes `if (d.TryGetValue(k, out var
-value)) Use(value);`. The value is read in the rest of an `&&` chain after
+value)) Use(value);`. The dictionary is the BCL's own (a
+System.Collections.Generic, Concurrent, Immutable, Frozen or ObjectModel
+type), where the indexer and `TryGetValue` are one contract: a derived
+`new V this[K k]` counting reads, or a positional `this[int i]` beside a
+`long` key, is other code. A receiver property must not be abstract,
+virtual or an override, whose getter a derived type may compute. The value is read in the rest of an `&&` chain after
 the check and in the `if`'s statement; for a negated check whose
 statement leaves (`return`, `throw`, `continue`, `break`), in the
 statements after the `if` in its block — an `out var` in an `if`
@@ -2761,3 +2798,128 @@ value of a `return` from a method of such a type, or a `var` local read
 only in those ways. The re-bind of every touched file settles the rest.
 Off by default: it changes a signature for the reader's sake, not the
 program's; a public method changes under `--api-changes` only.
+
+### CR0186 — idiom
+
+A property whose accessors only return and store its private field is an
+auto-property: `private string _name; public string Name { get { return
+_name; } set { _name = value; } }` becomes `public string Name { get; set;
+}`, and the field goes. The F# side's FR0026 (`member val`). A field
+initializer moves after the property (`{ get; set; } = 3;`, C# 6 on) when
+it is a constant or no other initializer stands between the two (moved
+past one, it runs on its other side: a primary constructor parameter
+another initializer changed, another type's static constructor run in
+another order); the accessors keep their modifiers (`private set`,
+`init`). Trivial means
+`get { return f; }`, `get => f;`, `set { f = value; }`, `set => f =
+value;`, `this.f` alike, with no attribute on an accessor. The field
+carries CR0153's guards: private, instance, unattributed, not `volatile`,
+declared alone in this file (the fix removes it; a field in another part
+of a partial type is out of reach), of the property's own type,
+referenced only inside this property's accessors in every part of the
+type, named by no `nameof` and no string (reflection by name: any case,
+a constant interpolation or concatenation too; a name built at run time
+is out of sight), a pure initializer, no comment on it, and no comment or
+directive in the accessor list (replaced whole: an `#if` around a setter
+would be decided for every configuration by the one analysed). It stands
+down in
+a struct, an `ISerializable` type, a compilation walking private fields
+unnamed (`BindingFlags.NonPublic`, `GetRuntimeFields`, `DeclaredFields`,
+MessagePack's `…AllowPrivate` resolvers), and a type, base type or
+derived type carrying any attribute but a few known to read no field (`[DataContract]`,
+`[DebuggerDisplay]`, `[Obsolete]`, `[Table]`, `[XmlRoot]` and the like): the
+field's name and place are what a binary serializer, a layout or a
+library's field mode (`[JsonObject(MemberSerialization.Fields)]` wrote
+`_port`, then `<Port>k__BackingField`) sees.
+A field initializer from another part of a partial type moves only when
+constant. Trivial accessors are CR0186's, and CR0153's `field` keyword
+takes the rest - and the trivial ones too where CR0186 is set to `none`
+or yields to IDE0032.
+
+### CR0187 — correctness
+
+`throw ex;` inside the `catch` that caught `ex` starts the stack trace
+again at the `throw`, losing where the exception came from: `throw;`
+rethrows it with the trace it came with. The F# side's FR0044 (`reraise
+()`). The nearest `catch` around the `throw` must be the one declaring
+`ex` (an inner `catch`'s `throw;` would rethrow the inner exception), with
+no lambda, local function or `finally` between, where `throw;` is not
+allowed; `ex` is never written in the `catch` or its `when` filter, by
+the data flow (an assignment, a deconstruction, `ref`/`out`, a lambda),
+and never handed on by reference (a `ref readonly` parameter such as
+`Unsafe.AsRef`, `ref var r = ref ex;`, `__makeref`), so it still holds
+what was caught; no comment in the statement.
+
+### CR0188 — performance
+
+`x.ToLower() == "abc"` lowers a copy of `x` to compare it once: an
+allocation per call, and a culture's case rules where a case-insensitive
+comparison was meant. It becomes `x.Equals("abc",
+StringComparison.OrdinalIgnoreCase)` (`!x.Equals(…)` for `!=`), and
+`x.ToLower().StartsWith("ab")` becomes `x.StartsWith("ab",
+StringComparison.OrdinalIgnoreCase)`; `Equals`, `StartsWith`, `EndsWith`,
+`Contains`, `IndexOf` and `LastIndexOf` alike, where the string's
+`StringComparison` overload of the method exists (`Contains` from .NET
+Core 2.1) and the one-string overload is what binds. The F# side's FR0039.
+`ToLower()`, `ToUpper()`, `ToLowerInvariant()` and `ToUpperInvariant()`
+without a culture argument; the literal pure ASCII and already in the
+lowering's direction (`x.ToLower() == "ABC"` is never true, and making it
+match would change what the code does). Measured over every UTF-16
+character against every ASCII one, the spellings then differ where a
+culture was the bug or no key holds the character: the invariant folds on
+U+212A KELVIN SIGN and U+017F LONG S, the culture folds on those and the
+Turkish İ and ı (and under tr-TR on `I` and `i` themselves, which the
+lowering got wrong). The one-string `StartsWith`, `EndsWith`, `IndexOf`
+and `LastIndexOf` compare by the current culture, which skips ignorable
+characters (`"AB\0".ToLower().EndsWith("b")` is true); the ordinal
+comparison does not, and the culture compares a letter and a combining
+mark after it as one (`"Café".ToLower().IndexOf("cafe")` is -1,
+the ordinal 0). `==`, `Equals` and `Contains` were ordinal already.
+The instance `Equals` keeps the NullReferenceException a null `x` threw.
+Not in an expression tree: a LINQ provider translates `ToLower`, not the
+comparison overloads. 8.8 µs → 0.44 µs over 1000 words, and no allocation
+(benchmarks/PerfClaims).
+
+### CR0189 — correctness
+
+A call that leaves out the `CancellationToken` in scope, where the callee
+takes one, runs to the end whatever the caller cancels: `await
+repo.GetAsync(id)` inside `Task Load(int id, CancellationToken ct)`
+becomes `await repo.GetAsync(id, ct)`. The F# side's FR0118. The callee
+takes the token as an optional parameter left out (passed by name, `ct:
+ct`, when other optional parameters stand before it), or has an overload
+that is the same method with a trailing `CancellationToken`: same type,
+name, parameters in order and return type. The call with the token must
+bind to that method: a derived type's `GetAsync(int, object)` hides the
+base overload once the call has two arguments, an inaccessible overload
+loses to an accessible one, an instance method outranks the extension
+that bound before. Guards: exactly one token parameter on the enclosing
+function (a lambda answers to its own); not in a `catch` or `finally`
+(cleanup must run after a cancel); not in a callback handed to a token's
+`Register`/`UnsafeRegister` (it runs because of the cancel: its own token
+parameter is already cancelled); not after an `IsCancellationRequested`
+read anywhere earlier in the function, but the condition of a loop around
+the call - `if (ct.IsCancellationRequested) { await
+log.WriteAsync("cancelled"); }`, a flush after `while
+(!ct.IsCancellationRequested) { … }`, code after `bool stopping =
+ct.IsCancellationRequested;` may run because of the cancel, and the token
+would throw there at once; not after a `catch` of
+`OperationCanceledException` (or `TaskCanceledException`) earlier in the
+function, for the same reason; not in a `try` whose `finally` touches the
+call's receiver (`try { await gate.WaitAsync(); … } finally {
+gate.Release(); }`: a cancelled acquire still reaches the release, which
+gives back what was never taken - SemaphoreFullException, or a lock open
+to two); not a scheduler by symbol, however spelled
+(`Task.Run`, `TaskFactory.StartNew`, `ContinueWith`,
+`ContinueWhenAll`/`Any`: cancelled, the work or the cleanup never runs,
+silently), not a `params` call, no named arguments, the token not already
+among the arguments. A call starting work - a task, a value task, an async
+stream - gets the token only when that work is waited for: awaited
+(through `ConfigureAwait`), returned, `await foreach`'d, blocked on
+(`.Result`, `.Wait()`, `.GetAwaiter().GetResult()`), handed to
+`Task.WhenAll`/`WhenAny`, or held in a local that is. `_ =
+bus.SendAsync(m);`, a bare `bus.SendAsync(m);`, a task stored in a field or
+a list is fire-and-forget: work meant to outlive the caller, which the
+caller's token would cancel when the caller is done. A loop body under `while
+(!ct.IsCancellationRequested)` gets the token: it runs while the token is
+live.

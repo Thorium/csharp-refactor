@@ -106,6 +106,9 @@ let SingleTaskCode = "CR0054"
 [<Literal>]
 let TokenCode = "CR0055"
 
+[<Literal>]
+let OmittedTokenCode = "CR0189"
+
 // ---- what a body is ----
 
 let private taskNames =
@@ -1141,6 +1144,379 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
         | _ -> None)
     |> List.ofSeq
 
+// ---- CR0189 ----
+
+/// A task, a value task, an async stream or anything with `GetAwaiter`: a
+/// value whose work may outlive the call that started it.
+let private awaitable (t: ITypeSymbol) =
+    not (isNull t)
+    && (match t.OriginalDefinition.ToDisplayString() with
+        | "System.Threading.Tasks.Task"
+        | "System.Threading.Tasks.Task<TResult>"
+        | "System.Threading.Tasks.ValueTask"
+        | "System.Threading.Tasks.ValueTask<TResult>"
+        | "System.Collections.Generic.IAsyncEnumerable<T>" -> true
+        | _ -> not (t.GetMembers "GetAwaiter").IsEmpty)
+
+/// Is the task a call starts waited for by this function or its caller -
+/// awaited (through `ConfigureAwait`), returned, `await foreach`'d, blocked
+/// on (`.Result`, `.Wait()`, `.GetAwaiter().GetResult()`), handed to
+/// `Task.WhenAll`/`WhenAny`, or held in a local that is? Anything else - a
+/// discard, `_ = SendAsync(m);`, a store, an argument elsewhere - may be
+/// fire-and-forget: work meant to outlive the caller, which the caller's
+/// token would cancel when the caller is done.
+let private taskWaitedFor (model: SemanticModel) (body: SyntaxNode) (call: ExpressionSyntax) =
+    let rec consumed (depth: int) (e: ExpressionSyntax) =
+        // `(e)`, `e.ConfigureAwait(false)`, `e.WithCancellation(…)` stand for e
+        let rec outer (e: ExpressionSyntax) =
+            match e.Parent with
+            | :? ParenthesizedExpressionSyntax as p -> outer p
+            | :? MemberAccessExpressionSyntax as ma when
+                obj.ReferenceEquals(ma.Expression, e)
+                && (ma.Name.Identifier.ValueText = "ConfigureAwait"
+                    || ma.Name.Identifier.ValueText = "WithCancellation")
+                && (ma.Parent :? InvocationExpressionSyntax)
+                ->
+                outer (ma.Parent :?> ExpressionSyntax)
+            | _ -> e
+
+        let e = outer e
+
+        match e.Parent with
+        | :? AwaitExpressionSyntax
+        | :? ReturnStatementSyntax
+        | :? ArrowExpressionClauseSyntax -> true
+        | :? ForEachStatementSyntax as fe -> fe.AwaitKeyword.IsKind SyntaxKind.AwaitKeyword
+        | :? MemberAccessExpressionSyntax as ma when obj.ReferenceEquals(ma.Expression, e) ->
+            match ma.Name.Identifier.ValueText with
+            | "Result"
+            | "Wait" -> true
+            | "GetAwaiter" ->
+                match ma.Parent with
+                | :? InvocationExpressionSyntax as ga ->
+                    match ga.Parent with
+                    | :? MemberAccessExpressionSyntax as gr -> gr.Name.Identifier.ValueText = "GetResult"
+                    | _ -> false
+                | _ -> false
+            | _ -> false
+        | :? ArgumentSyntax as arg when depth < 3 ->
+            // Task.WhenAll(a, b) / WhenAny, itself waited for
+            match arg.Parent, arg.Parent.Parent with
+            | :? ArgumentListSyntax, (:? InvocationExpressionSyntax as combinator) ->
+                match model.GetSymbolInfo(combinator).Symbol with
+                | :? IMethodSymbol as cm when
+                    (cm.Name = "WhenAll" || cm.Name = "WhenAny")
+                    && cm.ContainingType.ToDisplayString() = "System.Threading.Tasks.Task"
+                    ->
+                    consumed (depth + 1) combinator
+                | _ -> false
+            | _ -> false
+        | :? EqualsValueClauseSyntax as init when depth < 3 ->
+            // `var t = SendAsync(m);` then `await t`: the local's uses decide
+            match init.Parent with
+            | :? VariableDeclaratorSyntax as v ->
+                match model.GetDeclaredSymbol v with
+                | :? ILocalSymbol as local ->
+                    body.DescendantNodes()
+                    |> Seq.exists (fun n ->
+                        match n with
+                        | :? IdentifierNameSyntax as id when
+                            id.Identifier.ValueText = local.Name
+                            && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local)
+                            ->
+                            consumed (depth + 1) id
+                        | _ -> false)
+                | _ -> false
+            | _ -> false
+        | _ -> false
+
+    consumed 0 call
+
+/// CR0189 (correctness, fix): a call that omits the `CancellationToken` in
+/// scope, where the callee takes one - `await repo.GetAsync(id)` inside
+/// `Task Load(int id, CancellationToken ct)` - runs to the end whatever the
+/// caller cancels: `await repo.GetAsync(id, ct)`. The F# side's FR0118 (the
+/// omitted-token half; CR0055 is the explicit `None`, CR0170 the loop). The
+/// callee takes it as an optional token parameter left out (passed by name
+/// when other optional parameters stand before it), or has an overload that is
+/// the same method with a trailing `CancellationToken` added - same type,
+/// same name, the same parameters in order, the same return type. Guards: as
+/// CR0055 - exactly one token parameter on the enclosing function, not in a
+/// `catch` or `finally` (cleanup must run after a cancel), not `Task.Run`/
+/// `StartNew`/`ContinueWith` by symbol (a scheduling condition), not after
+/// an `IsCancellationRequested` read earlier in the function but a loop
+/// condition around the call (that code may run because of the cancel), no
+/// named arguments, the token not already among the arguments; a call in a
+/// lambda answers to the lambda's parameters; work the call starts is
+/// waited for (`taskWaitedFor`), not fire-and-forget; not after a caught
+/// OperationCanceledException; not in a `try` whose `finally` touches the
+/// receiver (an acquire its `finally` releases); the call with the
+/// token binds to the method expected, by a speculative bind.
+/// Yields to CA2016.
+let private omittedTokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+    tree.GetRoot().DescendantNodes()
+    |> Seq.choose (fun n ->
+        match n with
+        | :? InvocationExpressionSyntax as inv when
+            inv.ArgumentList.Arguments |> Seq.forall (fun a -> isNull a.NameColon)
+            ->
+            // a token handed to the scheduler is a condition on running the work at
+            // all: cancelled, `Task.Run`'s body or a `ContinueWith` cleanup never
+            // runs, and nothing awaits the task to say so. By symbol, however spelled
+            let scheduling (m: IMethodSymbol) =
+                let owner = m.ContainingType.OriginalDefinition.ToDisplayString()
+
+                (owner = "System.Threading.Tasks.Task"
+                 || owner = "System.Threading.Tasks.Task<TResult>"
+                 || owner = "System.Threading.Tasks.TaskFactory"
+                 || owner = "System.Threading.Tasks.TaskFactory<TResult>")
+                && (m.Name = "Run"
+                    || m.Name = "StartNew"
+                    || m.Name = "ContinueWith"
+                    || m.Name = "ContinueWhenAll"
+                    || m.Name = "ContinueWhenAny")
+
+            match enclosingFunction inv, model.GetSymbolInfo(inv).Symbol with
+            | Some f, (:? IMethodSymbol as m) when
+                not (scheduling m || inCatchOrFinally f inv)
+                // a callback handed to a token's `Register`/`UnsafeRegister` runs
+                // because of the cancel: its own token parameter is already
+                // cancelled, and a wait given it throws at once (FR0118's
+                // cleanup zones)
+                && not (
+                    match f.Node.Parent with
+                    | :? ArgumentSyntax as arg ->
+                        match arg.Parent.Parent with
+                        | :? InvocationExpressionSyntax as reg ->
+                            match model.GetSymbolInfo(reg).Symbol with
+                            | :? IMethodSymbol as rm ->
+                                (rm.Name = "Register" || rm.Name = "UnsafeRegister")
+                                && rm.ContainingType.ToDisplayString() = "System.Threading.CancellationToken"
+                            | _ -> false
+                        | _ -> false
+                    | _ -> false
+                )
+                // a `params` call spreads its arguments past the parameters
+                && not (m.Parameters |> Seq.exists (fun ps -> ps.IsParams))
+                && inv.ArgumentList.Arguments.Count <= m.Parameters.Length
+                ->
+                let tokenParams =
+                    f.Parameters
+                    |> List.filter (fun p ->
+                        match model.GetDeclaredSymbol p with
+                        | null -> false
+                        | ps -> isTokenType ps.Type)
+
+                match tokenParams with
+                | [ p ] ->
+                    let name = p.Identifier.ValueText
+                    let args = inv.ArgumentList.Arguments
+
+                    let alreadyPassed =
+                        args |> Seq.exists (fun a -> Text.mentionsName name a.Expression)
+                        || m.Parameters
+                           |> Seq.take args.Count
+                           |> Seq.exists (fun ps -> isTokenType ps.Type)
+
+                    // an optional token parameter left out: the first omitted token
+                    let omittedOptional =
+                        m.Parameters
+                        |> Seq.skip args.Count
+                        |> Seq.tryFind (fun ps -> isTokenType ps.Type && ps.IsOptional)
+
+                    // the same method with a trailing token: one overload, exactly that
+                    let overload () =
+                        let sameType (a: ITypeSymbol) (b: ITypeSymbol) =
+                            a.OriginalDefinition.ToDisplayString() = b.OriginalDefinition.ToDisplayString()
+
+                        let reduced = if isNull m.ReducedFrom then m else m.ReducedFrom
+                        let owner = reduced.ContainingType
+
+                        owner.GetMembers reduced.Name
+                        |> Seq.tryPick (fun o ->
+                            match o with
+                            | :? IMethodSymbol as om when
+                                om.Parameters.Length = reduced.Parameters.Length + 1
+                                && om.IsStatic = reduced.IsStatic
+                                && om.Arity = reduced.Arity
+                                ->
+                                let last = om.Parameters.[om.Parameters.Length - 1]
+
+                                if
+                                    isTokenType last.Type
+                                    && sameType om.ReturnType reduced.ReturnType
+                                    && Seq.forall2
+                                        (fun (x: IParameterSymbol) (y: IParameterSymbol) ->
+                                            sameType x.Type y.Type && x.RefKind = y.RefKind)
+                                        (Seq.take reduced.Parameters.Length om.Parameters)
+                                        reduced.Parameters
+                                then
+                                    Some om
+                                else
+                                    None
+                            | _ -> None)
+
+                    // every parameter the call left out is optional: appending lands on the token
+                    let restOptional =
+                        m.Parameters |> Seq.skip args.Count |> Seq.forall (fun ps -> ps.IsOptional)
+
+                    // code the function reaches after reading a cancel state may run
+                    // because of the cancel - `if (ct.IsCancellationRequested) { await
+                    // LogAsync("cancelled"); }`, a flush after `while
+                    // (!ct.IsCancellationRequested) { … }`, after `bool stopping =
+                    // ct.IsCancellationRequested;` - and the token passed there throws
+                    // at once. Any `IsCancellationRequested` read before the call stands
+                    // it down, but the condition of a loop around it: that body runs
+                    // while the token is live
+                    let tokenObserved =
+                        f.Body.DescendantNodes()
+                        |> Seq.exists (fun x ->
+                            match x with
+                            | :? MemberAccessExpressionSyntax as ma when
+                                ma.Name.Identifier.ValueText = "IsCancellationRequested"
+                                && ma.SpanStart < inv.SpanStart
+                                ->
+                                let loopAround =
+                                    inv.Ancestors()
+                                    |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, f.Node)))
+                                    |> Seq.exists (fun a ->
+                                        let condition: ExpressionSyntax =
+                                            match a with
+                                            | :? WhileStatementSyntax as s -> s.Condition
+                                            | :? ForStatementSyntax as s -> s.Condition
+                                            | _ -> null
+
+                                        not (isNull condition) && condition.Span.Contains ma.Span)
+
+                                not loopAround
+                            | _ -> false)
+
+                    // the argument, and the method the call must then bind to
+                    // work started and not waited for is the author's to detach
+                    let fireAndForget = awaitable m.ReturnType && not (taskWaitedFor model f.Body inv)
+
+                    // `try { await gate.WaitAsync(); … } finally { gate.Release(); }`: a
+                    // cancelled acquire still reaches the release, which then gives back
+                    // what was never taken - SemaphoreFullException, or a lock open to
+                    // two. A call in a `try` whose `finally` touches the same receiver
+                    let releasedInFinally =
+                        match inv.Expression with
+                        | :? MemberAccessExpressionSyntax as ma ->
+                            let receiver = ma.Expression.ToString()
+
+                            inv.Ancestors()
+                            |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, f.Node)))
+                            |> Seq.exists (fun a ->
+                                match a with
+                                | :? TryStatementSyntax as ts when
+                                    not (isNull ts.Finally) && ts.Block.Span.Contains inv.Span
+                                    ->
+                                    ts.Finally.Block.DescendantNodes()
+                                    |> Seq.exists (fun x ->
+                                        match x with
+                                        | :? MemberAccessExpressionSyntax as fm ->
+                                            fm.Expression.ToString() = receiver
+                                        | _ -> false)
+                                | _ -> false)
+                        | _ -> false
+
+                    // after a caught cancel - `try { … } catch (OperationCanceledException)
+                    // { … }` then `await FlushAsync();` - the code runs because of it
+                    let afterCaughtCancel =
+                        f.Body.DescendantNodes()
+                        |> Seq.exists (fun x ->
+                            match x with
+                            | :? CatchClauseSyntax as c when
+                                c.SpanStart < inv.SpanStart
+                                && not (c.Span.Contains inv.Span)
+                                && not (isNull c.Declaration)
+                                ->
+                                match model.GetTypeInfo(c.Declaration.Type).Type with
+                                | null -> false
+                                | t ->
+                                    let rec cancels (t: ITypeSymbol) =
+                                        not (isNull t)
+                                        && (t.ToDisplayString() = "System.OperationCanceledException"
+                                            || cancels t.BaseType)
+
+                                    cancels t
+                            | _ -> false)
+
+                    let insertion =
+                        if
+                            alreadyPassed
+                            || tokenObserved
+                            || fireAndForget
+                            || releasedInFinally
+                            || afterCaughtCancel
+                        then
+                            None
+                        else
+                            match omittedOptional with
+                            | Some ps when restOptional ->
+                                // positional when the token is the next parameter, else by name
+                                let index = m.Parameters.IndexOf ps
+
+                                if index = args.Count then
+                                    Some(name, m)
+                                else
+                                    Some($"{ps.Name}: {name}", m)
+                            | Some _ -> None
+                            | None when args.Count = m.Parameters.Length ->
+                                overload () |> Option.map (fun om -> name, om)
+                            | None -> None
+
+                    let separator = if args.Count = 0 then "" else ", "
+
+                    // the call with the token binds to that method: a derived type's
+                    // `GetAsync(int, object)` hides the base overload once the call has
+                    // two arguments, an inaccessible overload loses to an accessible
+                    // one, an instance method outranks the extension that bound before
+                    let bindsTo (argument: string) (target: IMethodSymbol) =
+                        let callText = inv.ToString()
+                        let at = inv.ArgumentList.CloseParenToken.SpanStart - inv.SpanStart
+
+                        let rewritten =
+                            SyntaxFactory.ParseExpression(callText.Insert(at, separator + argument))
+
+                        let definition (x: IMethodSymbol) =
+                            (if isNull x.ReducedFrom then x else x.ReducedFrom).OriginalDefinition
+
+                        match
+                            model
+                                .GetSpeculativeSymbolInfo(
+                                    inv.SpanStart,
+                                    rewritten,
+                                    SpeculativeBindingOption.BindAsExpression
+                                )
+                                .Symbol
+                        with
+                        | :? IMethodSymbol as bound ->
+                            SymbolEqualityComparer.Default.Equals(definition bound, definition target)
+                        | _ -> false
+
+                    match insertion with
+                    | Some(argument, target) when bindsTo argument target ->
+                        let edit =
+                            Suggestion.insert inv.ArgumentList.CloseParenToken.SpanStart (separator + argument)
+
+                        if Guards.speculativeCheck model [ edit ] then
+                            Some
+                                {
+                                    Code = OmittedTokenCode
+                                    Message =
+                                        $"'{name}' is in scope and '{m.Name}' takes a token: pass it, or the call runs to the end whatever is cancelled"
+                                    Span = inv.Span
+                                    Fixes = [ Suggestion.fix ("Pass " + name) OmittedTokenCode [ edit ] ]
+                                }
+                        else
+                            None
+                    | _ -> None
+                | _ -> None
+            | _ -> None
+        | _ -> None)
+    |> List.ofSeq
+
 let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     // the sync-sibling swap walks code AWAY from async: an editor action the
     // author picks, or `csharp_refactor.CR0040.sync_swap = true` for a sweep
@@ -1150,3 +1526,4 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
     @ asyncVoidLambdas tree model
     @ singleTasks tree model
     @ tokens tree model
+    @ omittedTokens tree model

@@ -161,8 +161,8 @@ let ``a regex built per call is hoisted to a generated regex, the type made part
 
 [<Fact>]
 let ``CR0109 names a hoist after its member before the pattern's words, which lose their escapes`` () =
-    // `\bError\b` once gave `BerrorRegex`: the escape's letter stuck to the
-    // word, and the word was lower-cased. A predicate's `Is` goes; a name
+    // `\bError\b` must not give `BerrorRegex`: the escape's letter must not
+    // stick to the word, nor the word be lower-cased. A predicate's `Is` goes; a name
     // taken moves to the next candidate - the whole member name, then the
     // pattern's words
     let source =

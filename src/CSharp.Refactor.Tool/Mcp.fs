@@ -1,7 +1,7 @@
 /// --mcp: a minimal MCP server over stdio — newline-delimited JSON-RPC
 /// 2.0, no extra dependencies, one process (and its MSBuild) warm across
 /// every call. Progress prose is diverted to stderr so the protocol
-/// stream stays clean. Ported from fsharp-refactor.
+/// stream stays clean. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tool.Mcp
 
 open System

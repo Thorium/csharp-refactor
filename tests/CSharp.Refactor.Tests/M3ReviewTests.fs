@@ -1,5 +1,5 @@
-/// The guards the M3 review added: each shape here was a silent semantics
-/// change before it.
+/// Guards against silent semantics changes: each shape here is one a
+/// rewrite would change without its guard.
 module CSharp.Refactor.Tests.M3ReviewTests
 
 open Xunit
@@ -121,11 +121,15 @@ let ``CR0153 keeps a backing field of another type or with an effectful initiali
                 private int _stamp = Environment.TickCount;
                 public int Stamp { get => _stamp; set => _stamp = value; }
                 private int _plain = 1;
-                public int Plain { get => _plain; set => _plain = value; }
+                public int Plain { get => _plain; set => _plain = value < 0 ? 0 : value; }
             }
             """
 
     Assert.Equal<string list>([ "Plain" ], firedText source (suggestCode "CR0153" source))
+    // trivial accessors are CR0186's, which keeps the same fields
+    let trivial = source.Replace("value < 0 ? 0 : value", "value")
+    Assert.Empty(suggestCode "CR0153" trivial)
+    Assert.Equal<string list>([ "Plain" ], firedText trivial (suggestCode "CR0186" trivial))
 
 [<Fact>]
 let ``CR0147 needs a subject the flow proves not null and var binders`` () =

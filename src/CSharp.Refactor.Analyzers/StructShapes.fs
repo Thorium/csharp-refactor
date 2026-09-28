@@ -205,7 +205,7 @@ let private declaredType (symbol: ISymbol) : ITypeSymbol =
 /// compilation — one retyped together with it. A library's `Tuple<…>`
 /// parameter, a type parameter or `object` would take the value tuple as
 /// something else; a callee that does not bind hides what it takes (an
-/// unresolved reference made the in-memory check blind once).
+/// unresolved reference leaves the in-memory check blind).
 let private argumentOk (m: SemanticModel) (symbol: ISymbol) (arg: ArgumentSyntax) =
     match arg.Parent with
     | :? ArgumentListSyntax as al ->

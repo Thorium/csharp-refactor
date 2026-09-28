@@ -81,6 +81,11 @@ let private sameChain (a: ISymbol list) (b: ISymbol list) =
 /// A property whose read runs no code of its own: an auto-property in source.
 let private autoProperty (p: IPropertySymbol) =
     not p.IsIndexer
+    // an abstract, virtual or overriding one may read through a derived getter
+    && not p.IsAbstract
+    && not p.IsVirtual
+    && not p.IsOverride
+    && p.ContainingType.TypeKind <> TypeKind.Interface
     && not p.DeclaringSyntaxReferences.IsEmpty
     && p.DeclaringSyntaxReferences
        |> Seq.forall (fun r ->
@@ -344,8 +349,24 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
 
             let dictionaryType = model.GetTypeInfo(receiver).Type
 
+            // the BCL's own dictionary, where `d[k]` and `TryGetValue` are one
+            // contract: a derived `new V this[K k]` counting reads, or a positional
+            // `this[int i]` beside a long key, would bind the indexer to other code
+            let bclDictionary =
+                match dictionaryType with
+                | :? INamedTypeSymbol as n ->
+                    n.OriginalDefinition.DeclaringSyntaxReferences.IsEmpty
+                    && (let ns = n.ContainingNamespace.ToDisplayString()
+
+                        ns = "System.Collections.Generic"
+                        || ns = "System.Collections.Concurrent"
+                        || ns = "System.Collections.Immutable"
+                        || ns = "System.Collections.Frozen"
+                        || ns = "System.Collections.ObjectModel")
+                | _ -> false
+
             let hasTryGetValue =
-                not (isNull dictionaryType)
+                bclDictionary
                 && (dictionaryType
                     :: (dictionaryType.AllInterfaces
                         |> Seq.map (fun i -> i :> ITypeSymbol)

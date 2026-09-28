@@ -442,16 +442,16 @@ let ``a long run of arms folds one pattern per line`` () =
     let source =
         csharp
             """
-            enum Kind { PaymentOutCreated, PaymentOutSent, PaymentOutCleared, PaymentOutFailed, PaymentOutCancelled, Other }
+            enum Kind { ItemOutCreated, ItemOutSent, ItemOutCleared, ItemOutFailed, ItemOutCancelled, Other }
             class C
             {
                 string A(Kind k) => k switch
                 {
-                    Kind.PaymentOutCreated => "PayoutStatusChanged",
-                    Kind.PaymentOutSent => "PayoutStatusChanged",
-                    Kind.PaymentOutCleared => "PayoutStatusChanged",
-                    Kind.PaymentOutFailed => "PayoutStatusChanged",
-                    Kind.PaymentOutCancelled => "PayoutStatusChanged",
+                    Kind.ItemOutCreated => "ItmStatusChanged",
+                    Kind.ItemOutSent => "ItmStatusChanged",
+                    Kind.ItemOutCleared => "ItmStatusChanged",
+                    Kind.ItemOutFailed => "ItmStatusChanged",
+                    Kind.ItemOutCancelled => "ItmStatusChanged",
                     _ => "Unmapped",
                 };
             }
@@ -462,11 +462,11 @@ let ``a long run of arms folds one pattern per line`` () =
     let expected =
         csharp
             """
-                    Kind.PaymentOutCreated
-                        or Kind.PaymentOutSent
-                        or Kind.PaymentOutCleared
-                        or Kind.PaymentOutFailed
-                        or Kind.PaymentOutCancelled => "PayoutStatusChanged",
+                    Kind.ItemOutCreated
+                        or Kind.ItemOutSent
+                        or Kind.ItemOutCleared
+                        or Kind.ItemOutFailed
+                        or Kind.ItemOutCancelled => "ItmStatusChanged",
                     _ => "Unmapped",
             """
 
@@ -938,7 +938,7 @@ let ``a conditional whose arms meet at a wider natural type than each arm conver
 
 [<Fact>]
 let ``a null arm beside a value of the return type still folds`` () =
-    // ICSharpCode.TextEditor's getters: `if (c) return null; return x;` — the
+    // getters shaped `if (c) return null; return x;` — the
     // null converts to the return type either way; the guard must not stand down
     let source =
         csharp

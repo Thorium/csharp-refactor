@@ -1,5 +1,5 @@
 /// Recursive file enumeration that survives the directories real
-/// repositories actually contain. Ported from fsharp-refactor.
+/// repositories actually contain. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tool.FileWalk
 
 open System.Collections.Generic
@@ -42,7 +42,7 @@ let private listing (pattern: string) (directory: string) =
 /// dead symlink, a permission this process lacks — and it fails part-way
 /// through iteration, so the caller loses the results already produced along
 /// with the ones still to come. Repositories do contain such directories (a
-/// Fable checkout has one under its Beam build output), and pointing this tool
+/// junction under a build output), and pointing this tool
 /// at a repository is the ordinary way to use it. Here an unreadable directory
 /// is skipped, not fatal.
 /// Iterative rather than recursive, and deliberately so: a `seq` that

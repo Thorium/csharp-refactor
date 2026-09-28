@@ -125,11 +125,27 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
         | Accessibility.ProtectedAndInternal -> RuleContext.internalShapeOpen ctx
         | _ -> RuleContext.publicShapeOpen ctx
 
+    // spelled List<T> or IList<T>, before the model is asked: an alias of
+    // either is not read, and stays as written
+    let spelledAsList (t: TypeSyntax) =
+        let rec last (t: TypeSyntax) =
+            match t with
+            | :? QualifiedNameSyntax as q -> last q.Right
+            | :? AliasQualifiedNameSyntax as a -> last a.Name
+            | t -> t
+
+        match last t with
+        | :? GenericNameSyntax as g ->
+            g.TypeArgumentList.Arguments.Count = 1
+            && (g.Identifier.ValueText = "List" || g.Identifier.ValueText = "IList")
+        | _ -> false
+
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
         match n with
         | :? MethodDeclarationSyntax as md when
-            not (
+            spelledAsList md.ReturnType
+            && not (
                 md.Modifiers
                 |> Seq.exists (fun m -> m.IsKind SyntaxKind.AsyncKeyword || m.IsKind SyntaxKind.PartialKeyword)
             )

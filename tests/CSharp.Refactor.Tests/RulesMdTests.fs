@@ -1,6 +1,6 @@
 /// Rules.md and the catalog stay in step: every code has a row and a
 /// section, categories and defaults match, the help link of every rule
-/// lands on its heading. Ported from fsharp-refactor.
+/// lands on its heading. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tests.RulesMdTests
 
 open System.IO

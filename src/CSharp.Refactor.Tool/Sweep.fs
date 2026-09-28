@@ -16,6 +16,7 @@ open Microsoft.Build.Locator
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.Diagnostics
+open Microsoft.CodeAnalysis.FindSymbols
 open Microsoft.CodeAnalysis.MSBuild
 open Microsoft.CodeAnalysis.Text
 open CSharp.Refactor
@@ -42,6 +43,8 @@ let private heldByScope = Dictionary<string, int>()
 let private reportedFindings = ResizeArray<ReportedFinding>()
 let private reportedKeys = HashSet<string>()
 let private printedNotes = HashSet<string>()
+/// The projects whose held public surface this run has announced.
+let private announcedHolds = HashSet<string>(StringComparer.OrdinalIgnoreCase)
 let mutable runTotalApplied = 0
 let mutable private runBuildFailures = 0
 let mutable private runCrossFileHeld = 0
@@ -60,6 +63,8 @@ let resetRun () =
         reportedKeys.Clear())
 
     printedNotes.Clear()
+    announcedHolds.Clear()
+    Workspace.resetRepositoryProjects ()
     heldNoteCounts.Clear()
     heldByScope.Clear()
     exitReasons.Clear()
@@ -118,15 +123,66 @@ type private OverlaidProvider(inner: AnalyzerConfigOptionsProvider, extra: IRead
     override _.GetOptions(file: AdditionalText) : AnalyzerConfigOptions =
         OverlaidOptions(inner.GetOptions file, extra)
 
-/// The project's analyzer options, with `--api-changes` laid over them.
-let private runAnalyzerOptions (opts: Options) (options: AnalyzerOptions) =
-    if opts.ApiChanges then
-        let extra =
-            Dictionary<string, string>(dict [ Configuration.Prefix + "api_changes", "true" ])
+/// The project's analyzer options with the run's decisions laid over them:
+/// `--api-changes` as `api_changes = true`; and where a project the run
+/// cannot build or rewrite compiles against this one (`heldFor`), the public
+/// surface held - `api_changes = false`, `public_api = true` - whatever the
+/// flag or `.editorconfig` say, as fsharp-refactor holds it for a consumer
+/// it cannot verify.
+let private runAnalyzerOptions (opts: Options) (heldFor: string list) (options: AnalyzerOptions) =
+    let extra =
+        if not heldFor.IsEmpty then
+            Some(
+                dict
+                    [
+                        Configuration.Prefix + "api_changes", "false"
+                        Configuration.Prefix + "public_api", "true"
+                    ]
+            )
+        elif opts.ApiChanges then
+            Some(dict [ Configuration.Prefix + "api_changes", "true" ])
+        else
+            None
 
-        AnalyzerOptions(options.AdditionalFiles, OverlaidProvider(options.AnalyzerConfigOptionsProvider, extra))
-    else
-        options
+    match extra with
+    | Some extra ->
+        AnalyzerOptions(
+            options.AdditionalFiles,
+            OverlaidProvider(options.AnalyzerConfigOptionsProvider, Dictionary<string, string>(extra))
+        )
+    | None -> options
+
+/// The projects a run holds a project's public surface for, each announced
+/// once per run: a same-solution consumer MSBuildWorkspace cannot load (an F#
+/// or VB project), and a project of the repository outside the run that
+/// compiles against it (a HintPath into a shared bin, a solution not loaded).
+let private publicSurfaceHeldFor (opts: Options) (project: Project) : string list =
+    let foreign =
+        match Workspace.workspaceOf opts.Target project.FilePath with
+        | Some ws ->
+            Workspace.referencersOf ws project.FilePath
+            |> List.filter (Workspace.isCSharpProject >> not)
+        | None -> []
+
+    let outside = Workspace.outsideConsumers opts.Target project.FilePath
+    let held = (foreign @ outside) |> List.distinctBy (fun p -> p.ToLowerInvariant())
+
+    if not held.IsEmpty && announcedHolds.Add project.FilePath then
+        let shown =
+            held |> List.truncate 5 |> List.map Path.GetFileName |> String.concat ", "
+
+        let more =
+            if held.Length > 5 then
+                $" and {held.Length - 5} more"
+            else
+                ""
+
+        let verb = if held.Length = 1 then "compiles" else "compile"
+
+        Out.dim
+            $"  ({shown}{more} {verb} against {Path.GetFileName project.FilePath} outside this run: its public declarations keep their shape)"
+
+    held
 
 let private encodingOf (path: string) : Text.Encoding =
     let bom =
@@ -319,9 +375,9 @@ let private errorsOf (compilation: Compilation) =
 /// The project's own analyzers (CA, IDE, third-party) whose diagnostics its
 /// build turns into errors — `TreatWarningsAsErrors`, a `WarningsAsErrors`
 /// list, a `severity = error` in its .editorconfig. The compile `errorsOf`
-/// reads carries the compiler's diagnostics only: a fix that raised CA1859
-/// under TreatWarningsAsErrors passed it and failed the verification build,
-/// which put back every fix of the project. Empty where the project
+/// reads carries the compiler's diagnostics only: a fix that raises CA1859
+/// under TreatWarningsAsErrors passes it and fails the verification build,
+/// which puts back every fix of the project. Empty where the project
 /// escalates nothing: then nothing runs.
 let private escalatedAnalyzers (project: Project) (compilation: Compilation) : ImmutableArray<DiagnosticAnalyzer> =
     let options = compilation.Options
@@ -519,6 +575,12 @@ let private analyzeProject
             not (String.IsNullOrEmpty tree.FilePath)
             && files.Contains(Path.GetFullPath tree.FilePath)
 
+    // the projects this one's public surface is held for, and the analyzer
+    // options carrying that and --api-changes, for the analyzer run and the
+    // tool's own pass alike
+    let heldFor = publicSurfaceHeldFor opts project
+    let projectOptions = runAnalyzerOptions opts heldFor project.AnalyzerOptions
+
     // --codes names an ask: a default-off rule or a config `none` wakes
     // for the codes typed, through the compilation's own diagnostic
     // options, which outrank .editorconfig
@@ -537,13 +599,40 @@ let private analyzeProject
 
     let analyzerOptions =
         CompilationWithAnalyzersOptions(
-            runAnalyzerOptions opts project.AnalyzerOptions,
+            projectOptions,
             (fun ex analyzer _ ->
                 eprintfn $"  (analyzer {analyzer.GetType().Name} failed: {ex.GetType().Name}: {ex.Message})"),
-            concurrentAnalysis = true,
+            // --jobs 1 is the sequential run, the analyzer included
+            concurrentAnalysis = (opts.Jobs > 1),
             logAnalyzerExecutionTime = false,
             reportSuppressedDiagnostics = true
         )
+
+    // the analyzer sees the solution's other projects through the tool's oracle:
+    // a public member --api-changes opens is written or compared there, and the
+    // compilation's own index would not know. The analyzer's symbols are its
+    // own copy's (CompilationWithAnalyzers analyses a clone), so each is found
+    // again in the solution's compilation, which the oracle searches; one it
+    // cannot find there is an unreadable site, and holds the fix
+    // one oracle for the analyzer run and the tool's own pass: a symbol's
+    // references are searched once, not once per half
+    let solutionOracle = References.solutionOracle project.Solution
+
+    RuleContext.registerOracle withCodes.SyntaxTrees (fun tree ->
+        let find = solutionOracle tree
+
+        fun symbol ->
+            match SymbolFinder.FindSimilarSymbols(symbol, compilation, ct) |> Seq.tryHead with
+            | Some mapped -> find mapped
+            | None ->
+                [
+                    {
+                        Tree = tree
+                        Model = null
+                        Node = null
+                        Editable = false
+                    }
+                ])
 
     let withAnalyzers = CompilationWithAnalyzers(withCodes, analyzers, analyzerOptions)
 
@@ -553,14 +642,11 @@ let private analyzeProject
         | Some _ ->
             // the analyzers over the scoped trees alone: a tree is analysed
             // with the whole compilation's semantics, but only ITS findings
-            // are computed
-            withCodes.SyntaxTrees
-            |> Seq.filter inScope
-            |> Seq.collect (fun tree ->
-                withAnalyzers
-                    .GetAnalyzerSemanticDiagnosticsAsync(withCodes.GetSemanticModel tree, Nullable(), ct)
-                    .Result)
-            |> ImmutableArray.CreateRange
+            // are computed. One call with the others set aside, not a call
+            // per tree: each per-tree call analyses a fresh copy of the
+            // compilation, and each copy builds the compilation index again
+            RuleContext.skippingTrees (withCodes.SyntaxTrees |> Seq.filter (inScope >> not)) (fun () ->
+                withAnalyzers.GetAnalyzerDiagnosticsAsync(ct).Result)
 
     let wanted (d: Diagnostic) =
         RuleCatalog.known.Contains d.Id
@@ -622,59 +708,81 @@ let private analyzeProject
             | Some _ -> true
             | None -> explicitly || RuleCatalog.isDefaultOn code)
 
+    // an executable another project of the solution references (its tests)
+    // is not a leaf: those callers see its public shape
+    let referencedByAnother =
+        project.Solution.Projects
+        |> Seq.exists (fun p ->
+            p.Id <> project.Id
+            && p.ProjectReferences |> Seq.exists (fun r -> r.ProjectId = project.Id))
+
+    // a consumer no verification of this run can build - an F# project,
+    // a project outside the run compiling against the dll - sees the
+    // public surface too: it is held, flag or no flag
+    let held = not heldFor.IsEmpty
+
+    // the rules again, per file, for the fixes the diagnostics do not carry:
+    // `--jobs` files at once, as fsharp-refactor typechecks them. The results
+    // keep the files' order, and so does everything printed from them
+    let perTree = Array.ofList trees
+
+    let computed: (Document * SourceText * Suggestion list * (string * exn) list) option array =
+        Array.zeroCreate perTree.Length
+
+    let compute (i: int) =
+        let tree, _ = perTree.[i]
+        let document = project.GetDocument tree
+
+        if not (isNull document) then
+            let text = tree.GetText ct
+            let model = compilation.GetSemanticModel(tree, false)
+            let options = Some(projectOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
+
+            let ruleContext =
+                let c = Context.forTree options compilation tree opts.ApiChanges
+
+                { c with
+                    IsLeaf = c.IsLeaf && not referencedByAnother && not held
+                    ApiChanges = c.ApiChanges && not held
+                    // callers in other files and projects, for the cross-file edit sets
+                    References = Some(solutionOracle tree)
+                }
+
+            let suggestions, failures =
+                if opts.ParseOnly then
+                    Rules.parseOnly tree ruleContext, []
+                else
+                    Rules.allWithFailures tree model ruleContext
+
+            computed.[i] <- Some(document, text, suggestions, failures)
+
+    if opts.Jobs <= 1 || perTree.Length <= 1 then
+        for i in 0 .. perTree.Length - 1 do
+            compute i
+    else
+        System.Threading.Tasks.Parallel.For(
+            0,
+            perTree.Length,
+            System.Threading.Tasks.ParallelOptions(MaxDegreeOfParallelism = opts.Jobs, CancellationToken = ct),
+            (fun i -> compute i)
+        )
+        |> ignore
+
     [
-        for tree, ds in trees do
-            let document = project.GetDocument tree
+        for i in 0 .. perTree.Length - 1 do
+            let tree, ds = perTree.[i]
 
-            if not (isNull document) then
-                let text = tree.GetText ct
-                let model = compilation.GetSemanticModel(tree, false)
+            match computed.[i] with
+            | None -> ()
+            | Some(document, text, suggestions, failures) ->
+                let options = Some(projectOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
 
-                let options =
-                    Some(project.AnalyzerOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
+                for (name, ex) in failures do
+                    let file = Path.GetFileName tree.FilePath
+                    let kind = ex.GetType().Name
 
-                // an executable another project of the solution references (its tests)
-                // is not a leaf: those callers see its public shape
-                let referencedByAnother =
-                    project.Solution.Projects
-                    |> Seq.exists (fun p ->
-                        p.Id <> project.Id
-                        && p.ProjectReferences |> Seq.exists (fun r -> r.ProjectId = project.Id))
-
-                // a consumer MSBuildWorkspace cannot load (an F# project) sees the
-                // public surface too, and no verification of this run can build it:
-                // the surface is held, flag or no flag
-                let foreignConsumer =
-                    match Workspace.workspaceOf opts.Target project.FilePath with
-                    | Some ws ->
-                        Workspace.referencersOf ws project.FilePath
-                        |> List.exists (Workspace.isCSharpProject >> not)
-                    | None -> false
-
-                let ruleContext =
-                    let c = Context.forTree options compilation tree opts.ApiChanges
-
-                    { c with
-                        IsLeaf = c.IsLeaf && not referencedByAnother && not foreignConsumer
-                        ApiChanges = c.ApiChanges && not foreignConsumer
-                        // callers in other files and projects, for the cross-file edit sets
-                        References = Some(References.oracle project.Solution tree)
-                    }
-
-                let suggestions =
-                    if opts.ParseOnly then
-                        Rules.parseOnly tree ruleContext
-                    else
-                        let kept, failures = Rules.allWithFailures tree model ruleContext
-
-                        for (name, ex) in failures do
-                            let file = Path.GetFileName tree.FilePath
-                            let kind = ex.GetType().Name
-
-                            Out.bad
-                                $"  (rule {name} threw on {file}: {kind}: {ex.Message} — its suggestions for this file are lost; the log line is the bug report)"
-
-                        kept
+                    Out.bad
+                        $"  (rule {name} threw on {file}: {kind}: {ex.Message} — its suggestions for this file are lost; the log line is the bug report)"
 
                 for d in ds do
                     let span = d.Location.SourceSpan

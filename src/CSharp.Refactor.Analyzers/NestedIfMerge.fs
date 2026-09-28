@@ -135,8 +135,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                 let wrapColumn = RuleContext.wrapColumn ctx Code
 
                 // a merged condition that runs past the wrap column is not the
-                // cleanup it claims to be (two TryGetValue guards joined made a
-                // 170-column line): the nesting stays
+                // cleanup it claims to be (two TryGetValue guards joined easily
+                // run to 170 columns): the nesting stays
                 if not sameElse || outerColumn + "if (".Length + condition.Length + 2 > wrapColumn then
                     None
                 else

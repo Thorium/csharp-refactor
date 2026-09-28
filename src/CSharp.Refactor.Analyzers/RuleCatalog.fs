@@ -285,6 +285,23 @@ let rules: Rule list =
         rule "CR0184" Category.Idiom "a private static readonly array the code only reads is an ImmutableArray"
         rule "CR0185" Category.Idiom "a method returning a List every caller only reads returns IReadOnlyList"
         |> off
+        rule
+            "CR0186"
+            Category.Idiom
+            "a property whose accessors only return and store its private field is an auto-property"
+        |> yields [ "IDE0032" ]
+        rule "CR0187" Category.Correctness "a caught exception thrown again by name is rethrown with throw;"
+        |> yields [ "CA2200" ]
+        rule
+            "CR0188"
+            Category.Performance
+            "a string lowered or uppered to compare with a literal is a case-insensitive comparison"
+        |> yields [ "CA1862" ]
+        rule
+            "CR0189"
+            Category.Correctness
+            "a call omitting the CancellationToken in scope, where the callee takes one, passes it"
+        |> yields [ "CA2016" ]
     ]
 
 let private byCode = rules |> List.map (fun r -> r.Code, r) |> Map.ofList
