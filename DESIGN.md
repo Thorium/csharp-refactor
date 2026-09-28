@@ -305,6 +305,7 @@ csharp_refactor.CR0145.uses          = 6
 csharp_refactor.public_api   = false          # nothing links to this assembly
 csharp_refactor.api_changes  = true           # --api-changes as a standing decision (implies public_api = false)
 csharp_refactor.suppressions = no-correctness # all | no-correctness | none
+csharp_refactor.skip_microsoft_duplicates = true  # skip what an enabled Microsoft rule already reports (default false)
 csharp_refactor.ignore_paths = generated;external/imported
 csharp_refactor.hints        = csharprefactor.hints   # extra CR0011 rules, one per line
 ```

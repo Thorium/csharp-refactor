@@ -785,3 +785,218 @@ let ``CR0034 leaves one query per pre-split id batch alone`` () =
 
     // `group.Contains(...)` sends the whole batch in one statement: a batch loop, not an N+1
     Assert.Empty(suggestCode "CR0034" source)
+
+// ---- CR0182 ----
+
+[<Fact>]
+let ``a ContainsKey check and an indexer read of the same key become one TryGetValue; a write, a reachable call or an expression tree keep them``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq.Expressions;
+            class C
+            {
+                Dictionary<string, int> _d = new();
+                static void Use(int v) { }
+                void Reset() => _d.Clear();
+                static string Key() => "k";
+                void A(Dictionary<string, int> d, string k) { if (d.ContainsKey(k)) Use(d[k]); }
+                int B(Dictionary<string, int> d, string k) { if (d.ContainsKey(k) && d[k] > 0) return d[k]; return 0; }
+                int D(Dictionary<string, int> d, string k)
+                {
+                    if (!d.ContainsKey(k)) return 0;
+                    return d[k] * 2;
+                }
+                int E(IReadOnlyDictionary<string, int> d, string k) => d.ContainsKey(k) ? d[k] : -1;
+                void F(Dictionary<string, int> d, string k) { if (d.ContainsKey(k)) d[k] = d[k] + 1; }
+                void G(Dictionary<string, int> d, string k) { if (d.ContainsKey(k)) { d.Remove(k); Use(d[k]); } }
+                void H(string k) { if (_d.ContainsKey(k)) { Reset(); Use(_d[k]); } }
+                Expression<Func<Dictionary<string, int>, int>> I = d => d.ContainsKey("a") ? d["a"] : 0;
+                int J { get => 0; set { if (_d.ContainsKey("v")) Use(_d["v"] + value); } }
+                void K(Dictionary<string, int> d) { if (d.ContainsKey(Key())) Use(d[Key()]); }
+                void L(Dictionary<string, int> d, string k) { if (d.ContainsKey(k)) Use(1); else Use(d[k]); }
+                void M(Dictionary<string, int> d, string k, int value) { if (d.ContainsKey(k)) Use(d[k] + value); }
+            }
+            """
+
+    // A, B, D, E, J, M; F stores, G removes, H calls a method of the type over a field,
+    // I is an expression tree, K keys by a call, L reads in the else
+    Assert.Equal(6, (suggestCode "CR0182" source).Length)
+    let fixedSource = fixAll "CR0182" source
+    Assert.Contains("if (d.TryGetValue(k, out var value)) Use(value);", fixedSource)
+    Assert.Contains("if (d.TryGetValue(k, out var value) && value > 0) return value; return 0;", fixedSource)
+    Assert.Contains("if (!d.TryGetValue(k, out var value)) return 0;", fixedSource)
+    Assert.Contains("return value * 2;", fixedSource)
+    Assert.Contains("=> d.TryGetValue(k, out var value) ? value : -1;", fixedSource)
+    Assert.Contains("if (d.ContainsKey(k)) d[k] = d[k] + 1;", fixedSource)
+    Assert.Contains("d.Remove(k); Use(d[k]);", fixedSource)
+    Assert.Contains("Reset(); Use(_d[k]);", fixedSource)
+    Assert.Contains("""d => d.ContainsKey("a") ? d["a"] : 0;""", fixedSource)
+    Assert.Contains("""if (_d.TryGetValue("v", out var found)) Use(found + value);""", fixedSource)
+    Assert.Contains("if (d.ContainsKey(Key())) Use(d[Key()]);", fixedSource)
+    Assert.Contains("else Use(d[k]);", fixedSource)
+    Assert.Contains("if (d.TryGetValue(k, out var value2)) Use(value2 + value);", fixedSource)
+
+// ---- CR0184 ----
+
+[<Fact>]
+let ``a private static readonly array the code only reads becomes an ImmutableArray; a store, a params argument, Contains or a struct element keep it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            struct Point { public int X; }
+            class C
+            {
+                private static readonly string[] Allowed = { "a", "b" };
+                private static readonly int[] Weights = new[] { 1, 2 };
+                private static readonly int[] Written = { 1 };
+                private static readonly string[] Formatted = { "x" };
+                private static readonly string[] Probed = { "p" };
+                private static readonly Point[] Points = { new Point() };
+                private static readonly string[] Joined = { "j" };
+                public static readonly string[] Shared = { "s" };
+                static void Take(IReadOnlyList<string> xs) { }
+                void Use()
+                {
+                    Console.WriteLine(Allowed.Length + Allowed[0]);
+                    foreach (var a in Allowed) Console.WriteLine(a);
+                    Take(Allowed);
+                    Console.WriteLine(Allowed.Where(a => a != "").Count());
+                    Console.WriteLine(Weights.Sum());
+                    Written[0] = 2;
+                    Console.WriteLine(string.Format("{0}", Formatted));
+                    Console.WriteLine(Probed.Contains("p"));
+                    Points[0].X = 1;
+                    Console.WriteLine(string.Join(",", Joined));
+                    Console.WriteLine(Shared[0]);
+                }
+            }
+            """
+
+    Assert.Equal<string list>([ "Allowed"; "Weights" ], firedText source (suggestCode "CR0184" source))
+    let fixedSource = fixAll "CR0184" source
+    Assert.Contains("using System.Collections.Immutable;", fixedSource)
+    Assert.Contains("""private static readonly ImmutableArray<string> Allowed = ["a", "b"];""", fixedSource)
+    Assert.Contains("private static readonly ImmutableArray<int> Weights = [1, 2];", fixedSource)
+    Assert.Contains("private static readonly int[] Written = { 1 };", fixedSource)
+    Assert.Contains("""private static readonly string[] Formatted = { "x" };""", fixedSource)
+    Assert.Contains("""private static readonly string[] Probed = { "p" };""", fixedSource)
+    Assert.Contains("private static readonly Point[] Points", fixedSource)
+    Assert.Contains("""private static readonly string[] Joined = { "j" };""", fixedSource)
+
+[<Fact>]
+let ``CR0182 keeps the lookup where the value could change between the check and the read`` () =
+    // each shape from the adversarial review: the rewrite read the value at the check, the code at the read
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            using System.Text;
+            class Holder { public Dictionary<string, int> Map = new(); }
+            class C
+            {
+                string key = "a";
+                string _k = "a";
+                Dictionary<string, int> _d = new();
+                Dictionary<string, int> Map { get; } = new();
+                void Advance() => _k = "b";
+                void Bump() => Map["a"] = 42;
+                string Shadowed(Dictionary<string, int> d)
+                {
+                    var sb = new StringBuilder();
+                    if (d.ContainsKey(key)) foreach (var key in new[] { "b", "c" }) sb.Append(d[key]);
+                    return sb.ToString();
+                }
+                string Lambda(Dictionary<string, int> d, string k, string[] xs)
+                {
+                    if (d.ContainsKey(k)) return string.Join(",", xs.Select(k => d[k]));
+                    return "";
+                }
+                int FieldKey(Dictionary<string, int> d) { if (d.ContainsKey(_k)) { Advance(); return d[_k]; } return 0; }
+                int PropertyDictionary(string k) { if (Map.ContainsKey(k)) { Bump(); return Map[k]; } return 0; }
+                int LocalFunction()
+                {
+                    var d = new Dictionary<string, int> { ["a"] = 1 };
+                    void Set() => d["a"] = 42;
+                    if (d.ContainsKey("a")) { Set(); return d["a"]; }
+                    return 0;
+                }
+                int Deferred()
+                {
+                    var d = new Dictionary<string, int> { ["a"] = 1 };
+                    Func<int> get = () => -1;
+                    if (d.ContainsKey("a")) { get = () => d["a"]; }
+                    d["a"] = 99;
+                    return get();
+                }
+                int Owner(Holder o, Holder o2) { if (o.Map.ContainsKey("a")) { o = o2; return o.Map["a"]; } return 0; }
+                int Alias()
+                {
+                    var d = new Dictionary<string, int> { ["a"] = 1 };
+                    var alias = d;
+                    if (!d.ContainsKey("a")) return 0;
+                    alias["a"] = 7;
+                    return d["a"];
+                }
+                int Loop(Dictionary<string, int> d, string k, int[] xs)
+                {
+                    var t = 0;
+                    if (d.ContainsKey(k)) foreach (var x in xs) t += Twice(d[k]);
+                    return t;
+                }
+                static int Twice(int x) => x * 2;
+                int Private()
+                {
+                    var d = new Dictionary<string, int> { ["a"] = 1 };
+                    if (d.ContainsKey("a")) { Console.WriteLine(); return d["a"]; }
+                    return 0;
+                }
+            }
+            """
+
+    // only Private: a dictionary the member made and never hands on, a constant key - the call cannot reach them
+    Assert.Equal<string list>([ "d.ContainsKey(\"a\")" ], firedText source (suggestCode "CR0182" source))
+
+[<Fact>]
+let ``review 2026-09-28: CR0184 keeps an array read by Aggregate or ElementAt, sliced, handed to an overloaded or type-testing callee``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                private static readonly int[] Weights = { };
+                private static readonly int[] Picked = { 1, 2 };
+                private static readonly int[] Sliced = { 1, 2, 3 };
+                private static readonly int[] Spanned = { 1, 2 };
+                private static readonly int[] Tested = { 1, 2 };
+                static string Sum(ReadOnlySpan<int> xs) => "span";
+                static string Sum(IEnumerable<int> xs) => "enumerable";
+                static string Kind(IEnumerable<int> xs) => xs is int[] ? "array" : "sequence";
+                void Use()
+                {
+                    Console.WriteLine(Weights.Aggregate((a, b) => a + b));
+                    Console.WriteLine(Picked.ElementAt(5));
+                    Console.WriteLine(Sliced[1..2].Length);
+                    Console.WriteLine(Sum(Spanned));
+                    Console.WriteLine(Kind(Tested));
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0184" source)

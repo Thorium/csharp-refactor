@@ -236,7 +236,7 @@ public class CR0174_SubstringToSpan
 public class CR0175_PrefixCompare
 {
     static readonly string Line = "ORDER-" + Environment.ProcessId;
-    static readonly string Other = "INVOICE-" + Environment.ProcessId;
+    static readonly string Other = "RECEIPT-" + Environment.ProcessId;
 
     [Benchmark(Baseline = true)] public bool SubstringEquals() => Line.Length >= 6 && Line.Substring(0, 6) == "ORDER-";
     [Benchmark] public bool StartsWithOrdinal() => Line.Length >= 6 && Line.StartsWith("ORDER-", StringComparison.Ordinal);
@@ -279,4 +279,14 @@ public class CR0177_LoopInvariant
     [Benchmark] public int FieldArithmeticHoisted() { var c = field * 3 + 1; foreach (var x in xs) { Sink(x + c); } return sink; }
     [Benchmark] public int StringConcatInLoop() { foreach (var x in xs) { var label = prefix + ":"; Sink(label); } return sink; }
     [Benchmark] public int StringConcatHoisted() { var label = prefix + ":"; foreach (var x in xs) { Sink(label); } return sink; }
+}
+
+/// <summary>CR0182: ContainsKey then the indexer against one TryGetValue, over 1000 keys half present.</summary>
+[Config(typeof(Config))]
+public class CR0182_ContainsKeyThenIndexer
+{
+    static readonly string[] Keys = Enumerable.Range(0, 1000).Select(i => "w" + (i * 2)).ToArray();
+
+    [Benchmark(Baseline = true)] public int ContainsKeyThenIndexer() { int t = 0; foreach (var k in Keys) if (Fixtures.Dict.ContainsKey(k)) t += Fixtures.Dict[k]; return t; }
+    [Benchmark] public int TryGetValue() { int t = 0; foreach (var k in Keys) if (Fixtures.Dict.TryGetValue(k, out var v)) t += v; return t; }
 }

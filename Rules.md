@@ -135,12 +135,19 @@ a section, and its category and default state match the code.
 | CR0170 | Correctness | v | | | | `Task A(…, CancellationToken ct) { foreach (var x in xs) { await Process(x); } }` — a loop that awaits, sleeps or blocks on a task and never reads the token | `ct.ThrowIfCancellationRequested();` at the top of the loop body |
 | CR0171 | Correctness | v | | v | | `foreach (var x in xs) { if (x < 0) xs.Remove(x); }`, `foreach (var n in names) { … names.Add("fresh"); }` — the enumerated collection changed under its own `foreach` | `xs.RemoveAll(x => x < 0);` for the filter shape; `foreach (var n in names.ToList())` — a snapshot — otherwise |
 | CR0172 | Idiom | v | v | | | `var schema = "app";`, `int retries = 3;`, `static readonly string Prefix = "v";` — initialised with a constant, never written | `const string schema = "app";`, `const int retries = 3;`, `const string Prefix = "v";` (a public or protected field under `--api-changes`) |
-| CR0173 | Idiom | v | | | IDE0046, IDE0045 | `if (a) return "1"; else return "2";`, `if (a) return x; return y;`, `if (a) v = f(); else v = g();` | `return a ? "1" : "2";`, `v = a ? f() : g();` |
+| CR0173 | Idiom | v | | | IDE0046, IDE0045 | `if (a) return "1"; else return "2";`, `if (a) return x; return y;`, `if (a) v = f(); else v = g();`, `T v; if (a) v = f(); else v = g();`, `if (a) return 1; else if (b) return 2; else return 3;` | `return a ? "1" : "2";`, `v = a ? f() : g();`, `var v = a ? f() : g();` (`T v = …` where an arm is not a `T`), `return a ? 1 : b ? 2 : 3;` |
 | CR0174 | Performance | v | | | CA1846 | `int.Parse(s.Substring(6, 5))`, `sb.Append(s.Substring(6))`, `writer.Write(s[6..])` | `int.Parse(s.AsSpan(6, 5))`, `sb.Append(s.AsSpan(6))`, `writer.Write(s.AsSpan(6))` |
 | CR0175 | Performance | v | | | | `s.Length >= 6 && s.Substring(0, 6) == "ORDER-"`, `s[..6] == "ORDER-"`, `s[^3..] != "MED"` under a length guard | `s.StartsWith("ORDER-", StringComparison.Ordinal)`, `!s.EndsWith("MED", StringComparison.Ordinal)` |
 | CR0176 | Performance | v | | | | `foreach (var c in s.ToCharArray())` | `foreach (var c in s)` |
 | CR0177 | Performance | v | | | | `foreach (var x in xs) { var label = tag + ":"; Use(x, label); }` | `var label = tag + ":"; foreach (var x in xs) { Use(x, label); }` |
 | CR0178 | Performance | v | | | | `db.Orders.ToList().Where(o => o.Total > 0).Select(o => o.Id)` | `db.Orders.Where(o => o.Total > 0).Select(o => o.Id).ToList()` |
+| CR0179 | Idiom | v | | | IDE0017 | `var o = new Order(); o.Id = id; o.Total = total;` | `var o = new Order() { Id = id, Total = total };` (one member per line when it does not fit) |
+| CR0180 | Idiom | v | v | | | `public static string Prefix = "v";`, `static int[] Table = { 1, 2 };` with nothing writing them | `public static readonly string Prefix = "v";` (then CR0172 `const`) |
+| CR0181 | Idiom | v | | | IDE0066 | `switch (k) { case A: return "a"; case B: case C: return "bc"; default: throw …; }`, sections of `x = e; break;` | `return k switch { A => "a", B or C => "bc", _ => throw … };`, `x = k switch { … };` |
+| CR0182 | Performance | v | | | CA1854 | `if (d.ContainsKey(k)) Use(d[k]);`, `if (!d.ContainsKey(k)) return 0; return d[k];`, `d.ContainsKey(k) ? d[k] : -1` | `if (d.TryGetValue(k, out var value)) Use(value);`, `if (!d.TryGetValue(k, out var value)) return 0; return value;`, `d.TryGetValue(k, out var value) ? value : -1` |
+| CR0183 | Idiom | v | | | | `private bool TryFind(string k, out Order o)` whose callers only test it: `if (TryFind(k, out var o)) Use(o);` | `private Order? TryFind(string k)`, `if (TryFind(k) is { } o) Use(o);`, `if (TryFind(k) is not { } o) return;` |
+| CR0184 | Idiom | v | | | | `private static readonly string[] Allowed = { "a", "b" };` only read | `private static readonly ImmutableArray<string> Allowed = ["a", "b"];` (`ImmutableArray.Create<string>(…)` before C# 12) |
+| CR0185 | Idiom | | v | | | `public List<Order> Pending()` whose every caller only reads the result | `public IReadOnlyList<Order> Pending()` |
 
 \*) Enabled by default. A blank cell means the rule is off until
 `.editorconfig` turns it on (`dotnet_diagnostic.CRxxxx.severity = suggestion`)
@@ -156,9 +163,14 @@ against (an executable) is the exception, and a library says the same with
 without `--notes`, editors show them as warnings, and SARIF carries them at
 warning level.
 
-\*\*\*\*) The Microsoft analyzer rules this one shadows: when any of them is
-enabled in the file's effective `.editorconfig`, this rule stands down for
-those shapes, so nothing is reported twice.
+\*\*\*\*) The Microsoft analyzer rules this one shadows. Under
+`csharp_refactor.skip_microsoft_duplicates = true` — the Microsoft analyzers and
+fixers really run on the code — a rule stands down for those shapes when
+any of them is enabled in the file's effective `.editorconfig`, so nothing
+is reported twice. By default it reports and fixes them anyway: a severity
+line proves no analyzer is loaded (a .NET Framework project never loads
+NetAnalyzers, a command-line build runs no IDE rule without
+`EnforceCodeStyleInBuild`), and none of them fixes anything unasked.
 
 A `—` under Offered fix means the rule only reports.
 
@@ -1067,7 +1079,18 @@ attribute on the property or the type naming a serializer or ORM
 (`Json…`, `Xml…`, `Column`, `Table`, `Bson…`, `DataMember`, `Key`…) and
 no Entity Framework entity (`DbSet<T>` of the type anywhere) — those set
 properties by reflection after construction; the scope gate of CR0080 on
-the property's effective accessibility.
+the property's effective accessibility. System.Text.Json's property
+attributes are the exception, on a property with no initializer that no
+constructor sets (the source generator builds the DTO with an object
+initializer, so a property missing from the JSON gets default(T), not its
+`= 1` or the constructor's value) — `[JsonPropertyName]`, `[JsonIgnore]`,
+`[JsonPropertyOrder]`, `[JsonInclude]`, `[JsonRequired]`,
+`[JsonNumberHandling]`, a property-level `[JsonConverter]` — where the
+compilation references System.Text.Json 8 or later, which sets an `init`
+property by reflection and from its source generator alike, and never
+names `JsonObjectCreationHandling` (Populate writes into what a property
+already holds). A type-level `[JsonConverter]` (a converter of its own may
+build the instance) and `[JsonExtensionData]` still keep the setter.
 
 ### CR0084 — correctness
 
@@ -2347,15 +2370,26 @@ A `return` — or an assignment to one target — that every branch of an
 `if` performs, on a different value, is one `return` of a conditional:
 `if (a) return "1"; else return "2";` and the else-less `if (a) return
 "1"; return "2";` become `return a ? "1" : "2";`; `if (a) v = f(); else
-v = g();` becomes `v = a ? f() : g();`. The bool-literal spellings
+v = g();` becomes `v = a ? f() : g();`. A bare declaration of that
+local right above the `if` — `T v;`, one variable, no initializer or
+modifier, no comment after its start, the local unread in the condition
+and the arms — joins it into one statement, F#'s `let v = if a then …
+else …`: `var v = a ? f() : g();` where both arms are of the declared
+type, so the local's type is unchanged, and `T v = …` otherwise (`long n`
+over two int literals, an `IEnumerable<int>` over array arms, a `null`
+arm); no rule turns an existing declaration into `var`. The stray `;` of
+`if (a) { … } else { … };` goes with the `if`. The bool-literal spellings
 (`return true` / `return false`) are CR0001's, which returns the
 condition itself; this rule stands down for them. Guards: each branch is
 exactly one statement, a `return` with an expression or a simple
-assignment to the same local, parameter or field (a property setter may
-act, and the branches ran it once each); the else-less form takes the
+assignment to the same local or parameter (not a `ref` one, which a
+condition can re-point) or field by name, through `this.` or a type (a
+property setter may act, and the branches ran it once each; `o.F = c ? … :
+…` evaluates `o` before `c`, so a `c` that re-points `o` would store
+into the old object); the else-less form takes the
 `return` that immediately follows the `if` in its block; the two values
 differ in text; no comment or directive inside is swallowed; an `if`
-that is another `if`'s `else` is left to the chain; the result is one
+that is another `if`'s `else` is taken with its chain from the head; the result is one
 line within the wrap column (`wrap_column`, else `max_line_length`, else
 120: a conditional over two multi-line arms — an `Ok(new …)` against a
 `NotFound(…)` of five lines — is no clearer than the `if`); an arm that is
@@ -2368,6 +2402,22 @@ the target, or a target-typed conditional (`if (a) return 1; else return
 2.0;` in an `object` method would box a double; `a ? i : f` into a
 `double` rounds the int through `float`). No F# twin: F# has no `return`, and
 its `if` is the expression already. Yields to IDE0046 and IDE0045.
+
+An `if`/`else if` chain every link of which returns — the last one an
+`else` or the `return` right after the chain — or assigns the one target,
+with a final `else`, is a ladder: `if (n < 10) return "small"; else if
+(n < 100) return "medium"; return "large";` becomes `return n < 10 ?
+"small" : n < 100 ? "medium" : "large";`, and a bare declaration right
+above joins it as in the two-branch form. The ladder is one line when it
+fits; else an arm a line, `: c2 ? v2` one indent under the statement; and
+where even that is too wide, the condition and the value on lines of
+their own (`? v1`, `: c2`, `? v2`, …, `: v3;`). Only the else side nests,
+so a reader walks one path. A chain CR0002 takes — three comparisons at least, of one local,
+parameter or readonly field against constants, of a type a `switch`
+takes — is its `switch`; one it refuses (two comparisons, a property, a
+`double`) is this rule's ladder. A `throw`, a link of more statements
+than one, an assignment chain without a final `else`, or one value on
+every path keeps the `if`.
 
 ### CR0174 — performance
 
@@ -2517,3 +2567,197 @@ the filtered rows (or, under a projection, none) are tracked, so code that
 relied on the context having loaded the whole table — relationship
 fix-up, `DbSet.Local` — sees less.
 F# twin: FR0174.
+
+### CR0179 — idiom
+
+A local constructed and then set, member by member, in the statements
+straight after is one object initializer: `var o = new Order(); o.Id =
+id; o.Total = total;` becomes `var o = new Order() { Id = id, Total =
+total };`, one member per line under the declaration's indent when the
+line would pass the wrap column (`wrap_column`, else `max_line_length`,
+else 120). The same assignments in the same order, run on the new object
+before it has a name: the object reads as constructed rather than
+assembled, and CR0083 then sees setters used only while constructing.
+Guards: a declaration of one local, not `using` or `const`, initialised by
+`new T(…)` or `new(…)` with no initializer of its own; the local of the
+created type (`Order o = new Special()` could set a member `Special`
+hides); only the uninterrupted run of `o.P = value;` right after the
+declaration folds, since anything between could observe the half-built
+object; each `P` an instance field or property of the object set
+directly — not `o.A.B`, not an indexer, not `+=` — and none twice; no
+value mentions the local, declares a variable (`out var`, a pattern) or
+spans lines; no comment or directive on a folded statement or after the construction;
+no `goto` or label in the member — a jump back over the declaration reuses
+the one captured variable, which a closure made on the last pass sees as
+the new object only while it is assembled. The member-per-line layout
+takes a declaration and a last set each alone on their lines; a one-line
+block gets the one-line form or none. The speculative re-bind settles the
+rest (a read-only member, accessibility). F# twin: FR0140. Yields to IDE0017.
+
+### CR0180 — idiom
+
+A `static` field nothing in the compilation writes — no assignment,
+`++`, `ref`/`out` argument, deconstruction (nested ones too), store
+through parentheses, `ref` alias or `&` — is
+`static readonly`: `public static string Prefix = "v";` becomes
+`public static readonly string Prefix = "v";`, and a literal-initialised
+one goes on to CR0172's `const`. An array field whose elements are
+written still qualifies: the elements are not the field. Guards: one
+declarator; not `volatile`, no attribute (`[ThreadStatic]`…); not a
+mutable struct — a `readonly` field copies it before each call, so a
+mutating method would change the copy (primitives, enums, `DateTime`,
+`decimal` and `readonly struct`s are fine); not in a generic type (a
+write through `G<int>.F` binds a constructed field); a write in a static
+constructor keeps the field too; the name in no `nameof` and no string
+literal of the compilation (`GetField("Name")` with a reflective write,
+which a `readonly` static refuses); no `FieldInfo.SetValue` anywhere in the
+compilation — a loader walking `GetFields()` reaches any static field, and
+a `readonly` one throws FieldAccessException there. A public or protected field is API
+(`--api-changes`, or a leaf compilation); a private one stands down where
+IDE0044 is on.
+
+### CR0181 — idiom
+
+A `switch` statement whose every section returns a value, assigns the
+one target and breaks, or throws, is a switch expression (C# 8): the arms
+read as a table, and the compiler checks them for subsumption. Labels
+become patterns — `case X:` is `X`, `case P when g:` is `P when g`, the
+labels of one section join with `or` (C# 9; not with a `when` or a
+designation), `default` is `_` and goes last, since a statement's
+`default` matches only where nothing else does, wherever it stands. A
+switch without `default` takes the `return` right after it as its `_`
+arm and is left alone otherwise: a switch expression matching nothing
+throws where the statement fell through. Guards: each section is one
+`return e;` or `throw e;`, or `t = e;` with `break;` on one target (a
+local or parameter that is not `ref`, or a field by name, through `this.`
+or a type — `o.F = x switch …` evaluates `o` before the scrutinee; a
+block around them is fine); a section holding `default` holds plain
+constants beside it only (a guard, a property pattern or a `Deconstruct`
+would run in the statement and never under `_`); not a switch through a
+user-defined conversion (a statement switches on the converted value, an
+expression on the object); the switch alone on its first and last lines; every value on
+one line; no comment or directive inside; the arms keep the conversion
+each took to the target, as for CR0002 and CR0173; the governing
+expression is parenthesised unless primary (`(a + b) switch`). The
+layout is CR0002's expression form. Yields to IDE0066.
+
+`csharp_refactor.CR0181.drop_throwing_default = true` leaves out a
+`default: throw …;` where the other sections name every member of an enum
+(not `[Flags]`) by plain constant labels: without the `_` arm, CS8509
+flags the member added later, where a catch-all would swallow it. The
+cost is the exception for a value outside the named members — an
+unnamed cast value now throws `SwitchExpressionException` — and the
+compiler's CS8524 about exactly that, which a team using the setting
+turns off (`dotnet_diagnostic.CS8524.severity = none`) so that CS8509
+stays the signal. Off by default: the default keeps the program as it
+was.
+
+### CR0182 — performance
+
+A `ContainsKey` check and an indexer read of the same key under it look
+the key up twice; `TryGetValue` looks once and hands the value over:
+`if (d.ContainsKey(k)) Use(d[k]);` becomes `if (d.TryGetValue(k, out var
+value)) Use(value);`. The value is read in the rest of an `&&` chain after
+the check and in the `if`'s statement; for a negated check whose
+statement leaves (`return`, `throw`, `continue`, `break`), in the
+statements after the `if` in its block — an `out var` in an `if`
+condition is in scope there and definitely assigned; for a negated check
+with an `else`, in the `else`; in a conditional's true arm. Guards: the
+dictionary has `TryGetValue(key, out value)`; the dictionary is a local,
+parameter, field or auto-property, the key one of those but a property,
+or a constant (a key's getter would run once where it ran twice); a
+`d[k]` is matched by what its names mean, not their spelling — a `k` a
+`foreach` or a lambda declares is another variable; every one in the
+region is a plain read — not assigned, incremented or passed by `ref` —
+outside any lambda or local function, which would run after the
+dictionary changed, and there is one at least; the region writes neither
+the dictionary (an indexer store, `Add`, `Remove`, `Clear`, `TryAdd`…,
+the dictionary handed to a call), the key, nor a name on the way to them
+(`o = o2` under `o.Map`); and unless the dictionary is a local the member
+made and never hands on or captures, and the key a constant or an
+uncaptured local or parameter, nothing between the check and a read runs
+code that could reach them — a call, a construction, an `await`, a
+`foreach`, a store into a field, property or indexer (a call around a read
+runs after it, unless a loop brings the read round again); the branch that did not check reads no `d[k]`; not in an
+expression tree or a query clause, where `out var` is not allowed; the
+value is named `value` (`found` in a setter, whose `value` is taken),
+numbered by the check's place in the member, so two fixed in one pass never
+declare the same name. F# twin: FR0014. Yields to
+CA1854, which .NET Framework builds never run.
+
+### CR0183 — idiom
+
+A private `bool TryX(…, out T value)` whose callers only test it returns
+the value or null, and its callers match it: `private bool TryFind(string
+k, out Order o)` becomes `private Order? TryFind(string k)`, `o = e;
+return true;` becomes `return e;`, `return false;` becomes `return
+null;`, and `if (TryFind(k, out var o))` becomes `if (TryFind(k) is { }
+o)` — `is not { } o` under a `!` (C# 9), `is { }` for `out _`. One value
+in, one out, as F# returns a `'T option`. Guards: a private method of a
+type declared in one file, so every caller is in it; not virtual,
+override, abstract, partial, extern, async or an interface
+implementation; a block body; one `out` parameter, the last; `T` not
+already nullable and not a type parameter; every `return` is `return
+true;` or `return false;`, each `return true;` right after `value = e;`
+with `e` provably not null — a value type, or a `new`, a literal,
+`this`, `x ?? throw …`; not a flow state, which calls an array element, a
+dictionary value or a nullable-oblivious call not null, nor a `!`, a
+claim — since a true with a null value would read as false; the out
+parameter otherwise set only to `null`, `default` or a constant at the top
+of the body (the false path's value, which no caller reads; one in a
+`finally` or a branch runs after the value handed back), never read or
+handed on; no other member of that name in the type or its bases
+(`TryFind(object)` beside the new `TryFind(string)` would lose its calls); every reference is a call
+whose last argument is `out var x`, `out T x` or `out _`, standing as the
+condition of an `if` or `while`, an operand of `&&` or `||`, a
+conditional's test, or under `!`; no call inside the method itself. The
+speculative re-bind refuses a caller that reads `x` where the pattern
+leaves it unassigned — after the `if`, or on the false path. Internal and
+public methods are not taken yet.
+
+### CR0184 — idiom
+
+A private `static readonly T[]` table the code only reads is an
+`ImmutableArray<T>`: `readonly` fixes the field, not the elements, and
+anything holding the array can write them. `private static readonly
+string[] Allowed = { "a", "b" };` becomes `private static readonly
+ImmutableArray<string> Allowed = ["a", "b"];` —
+`ImmutableArray.Create<string>("a", "b")` before C# 12 — with the
+`using` added where it is missing; a multi-line initializer keeps its
+layout. Reads cost the same: the struct wraps the array. Guards: private,
+`static readonly`, one declarator, an array initializer (`{ … }`, `new[]
+{ … }`, `new T[] { … }`); the type declared in one file;
+System.Collections.Immutable resolvable; not an array of mutable structs
+(`arr[0].X = 1` writes the array's own element, where an ImmutableArray
+hands out a copy); every use a plain read — an element read (not a
+store, `ref` or `++`), `.Length`, a `foreach` source, a LINQ call other than
+`Aggregate` and `ElementAt` (ImmutableArray's own answer an empty table
+with default, and throw another exception — measured), not a slice
+(`arr[1..3]` is an array before and an ImmutableArray after), or an
+argument to a parameter typed `IEnumerable<T>`, `IReadOnlyList<T>` or
+`IReadOnlyCollection<T>` of a method with no other overload of that arity
+(a `ReadOnlySpan<T>` one takes the array and not the ImmutableArray) whose
+body, where it is in sight, tests no type of it (`xs is int[]`). Anything else keeps the
+array: a `params` argument or a format would see one object where it saw
+the elements (`string.Join(",", arr)` binds `params string[]`), and
+`Array.*` or a copy into a local are not followed. `Contains` is
+CR0023's, where a set may be the better table.
+
+### CR0185 — idiom
+
+A method returning `List<T>` or `IList<T>` whose every caller only reads
+the result returns `IReadOnlyList<T>`: the signature then says the caller
+gets a view, not a collection to change. Only the signature changes; the
+body still builds and returns its list. Guards: not virtual, override,
+abstract, async or an interface implementation; every reference in the
+compilation (or the host's solution) is a call, and each call's value is
+only read — a `foreach` source, `.Count`, an element read,
+`Contains`/`ToArray`, a LINQ call other than `Reverse` (on a `List` that
+reverses in place; on the view it returns a reversed copy and changes
+nothing), an argument to a parameter typed `IEnumerable<T>`,
+`IReadOnlyCollection<T>` or `IReadOnlyList<T>` (the overload bound stays
+bound: every better one takes a type the view does not convert to), the
+value of a `return` from a method of such a type, or a `var` local read
+only in those ways. The re-bind of every touched file settles the rest.
+Off by default: it changes a signature for the reader's sake, not the
+program's; a public method changes under `--api-changes` only.

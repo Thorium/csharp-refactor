@@ -268,6 +268,23 @@ let rules: Rule list =
             Category.Performance
             "a local computed inside a loop from nothing the loop changes is computed once, above it"
         rule "CR0178" Category.Performance "a query copied before Where or Select runs them in the query, copying after"
+        rule
+            "CR0179"
+            Category.Idiom
+            "a local set member by member straight after its construction is an object initializer"
+        |> yields [ "IDE0017" ]
+        rule "CR0180" Category.Idiom "a static field nothing writes is static readonly"
+        rule
+            "CR0181"
+            Category.Idiom
+            "a switch statement whose every section returns, assigns one target or throws is a switch expression"
+        |> yields [ "IDE0066" ]
+        rule "CR0182" Category.Performance "a ContainsKey check and an indexer read of the same key are one TryGetValue"
+        |> yields [ "CA1854" ]
+        rule "CR0183" Category.Idiom "a private Try-method whose callers only test it returns the value or null"
+        rule "CR0184" Category.Idiom "a private static readonly array the code only reads is an ImmutableArray"
+        rule "CR0185" Category.Idiom "a method returning a List every caller only reads returns IReadOnlyList"
+        |> off
     ]
 
 let private byCode = rules |> List.map (fun r -> r.Code, r) |> Map.ofList
@@ -410,6 +427,14 @@ let knobs: (string * Knob list) list =
             number "deep_uses" 4 "the same, for a namespace three segments deep"
         ]
         "CR0173", [ wrapColumn ]
+        "CR0179", [ wrapColumn ]
+        "CR0181",
+        [
+            flag
+                "drop_throwing_default"
+                false
+                "leave out a throwing default beside arms naming every member of an enum, so the compiler flags a member added later"
+        ]
     ]
 
 /// The tunables of one rule, empty when it has none.

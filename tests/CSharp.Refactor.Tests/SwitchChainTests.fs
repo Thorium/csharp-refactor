@@ -428,3 +428,213 @@ let ``arms that meet at a wider natural type keep the statement form`` () =
     let fixedSource = fixAll "CR0002" source
     Assert.DoesNotContain("=> 2L", fixedSource)
     Assert.Contains("case 2:", fixedSource)
+
+// ---- CR0181: switch statement → switch expression ----
+
+[<Fact>]
+let ``a switch statement whose every section returns, assigns one target or throws is a switch expression`` () =
+    let source =
+        csharp
+            """
+            using System;
+            enum Kind { A, B, C, D }
+            class C
+            {
+                string Name(Kind k)
+                {
+                    switch (k)
+                    {
+                        case Kind.A: return "a";
+                        default: throw new ArgumentException();
+                        case Kind.B:
+                        case Kind.C: return "bc";
+                    }
+                }
+                string Tail(Kind k)
+                {
+                    switch (k)
+                    {
+                        case Kind.A: return "a";
+                        case Kind.B: { return "b"; }
+                    }
+                    return "other";
+                }
+                int Set(object o)
+                {
+                    int n;
+                    switch (o)
+                    {
+                        case int i when i > 0: n = i; break;
+                        case string s: n = s.Length; break;
+                        default: n = 0; break;
+                    }
+                    return n;
+                }
+                string Open(Kind k)
+                {
+                    switch (k) { case Kind.A: return "a"; }
+                    Console.WriteLine();
+                    return "x";
+                }
+                string Two(Kind k)
+                {
+                    switch (k)
+                    {
+                        case Kind.A: Console.WriteLine(); return "a";
+                        default: return "b";
+                    }
+                }
+                string Bound(object o)
+                {
+                    switch (o)
+                    {
+                        case int i:
+                        case long l: return "number";
+                        default: return "other";
+                    }
+                }
+                int Sum(int a, int b)
+                {
+                    switch (a + b) { case 0: return 1; default: return 2; }
+                }
+            }
+            """
+
+    // Name, Tail, Set, Sum; Open falls through to a statement, Two has two, Bound's labels designate
+    Assert.Equal<string list>(
+        [ "switch"; "switch"; "switch"; "switch" ],
+        firedText source (suggestCode "CR0181" source)
+    )
+
+    let fixedSource = (fixAll "CR0181" source).Replace("\r\n", "\n")
+
+    Assert.Contains(
+        "        return k switch\n        {\n            Kind.A => \"a\",\n            Kind.B or Kind.C => \"bc\",\n            _ => throw new ArgumentException(),\n        };",
+        fixedSource
+    )
+
+    Assert.Contains("            Kind.B => \"b\",\n            _ => \"other\",\n        };", fixedSource)
+    Assert.DoesNotContain("    return \"other\";", fixedSource)
+
+    Assert.Contains(
+        "        n = o switch\n        {\n            int i when i > 0 => i,\n            string s => s.Length,\n            _ => 0,\n        };",
+        fixedSource
+    )
+
+    Assert.Contains("switch (k) { case Kind.A: return \"a\"; }", fixedSource)
+    Assert.Contains("case Kind.A: Console.WriteLine(); return \"a\";", fixedSource)
+    Assert.Contains("case long l: return \"number\";", fixedSource)
+    Assert.Contains("return (a + b) switch", fixedSource)
+
+[<Fact>]
+let ``drop_throwing_default leaves out a throwing default only beside arms naming every member of a plain enum`` () =
+    let source =
+        csharp
+            """
+            using System;
+            enum Two { A, B }
+            enum Three { A, B, C }
+            [Flags] enum Bits { X = 1, Y = 2 }
+            class C
+            {
+                string Full(Two t)
+                {
+                    switch (t)
+                    {
+                        case Two.A: return "a";
+                        case Two.B: return "b";
+                        default: throw new ArgumentOutOfRangeException(nameof(t));
+                    }
+                }
+                string Partial(Three t)
+                {
+                    switch (t)
+                    {
+                        case Three.A: return "a";
+                        case Three.B: return "b";
+                        default: throw new ArgumentOutOfRangeException(nameof(t));
+                    }
+                }
+                string Flagged(Bits b)
+                {
+                    switch (b)
+                    {
+                        case Bits.X: return "x";
+                        case Bits.Y: return "y";
+                        default: throw new ArgumentOutOfRangeException(nameof(b));
+                    }
+                }
+            }
+            """
+
+    let dropping =
+        Some(
+            FakeOptions(dict [ "csharp_refactor.CR0181.drop_throwing_default", "true" ])
+            :> Microsoft.CodeAnalysis.Diagnostics.AnalyzerConfigOptions
+        )
+
+    let fixedSource = (fixAllWith dropping "CR0181" source).Replace("\r\n", "\n")
+    Assert.Contains("            Two.B => \"b\",\n        };", fixedSource)
+
+    Assert.Contains(
+        "            Three.B => \"b\",\n            _ => throw new ArgumentOutOfRangeException(nameof(t)),",
+        fixedSource
+    )
+
+    Assert.Contains(
+        "            Bits.Y => \"y\",\n            _ => throw new ArgumentOutOfRangeException(nameof(b)),",
+        fixedSource
+    )
+
+    // off by default: the default stays as the `_` arm
+    let plain = (fixAll "CR0181" source).Replace("\r\n", "\n")
+
+    Assert.Contains(
+        "            Two.B => \"b\",\n            _ => throw new ArgumentOutOfRangeException(nameof(t)),",
+        plain
+    )
+
+[<Fact>]
+let ``review 2026-09-28: CR0181 keeps a guard beside default, a user conversion to the governing type, a target a scrutinee re-points``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            class Box { public int F; }
+            class W { public string V; public static implicit operator string(W w) => w?.V; }
+            class C
+            {
+                static Box cur = new Box();
+                static int Next() { cur = new Box(); return 1; }
+                static bool Validate(int n) => n >= 0 ? true : throw new ArgumentOutOfRangeException();
+                string Guarded(int n)
+                {
+                    switch (n)
+                    {
+                        case 0: return "zero";
+                        case int big when Validate(big):
+                        default: return "other";
+                    }
+                }
+                string Converted(W w)
+                {
+                    switch (w)
+                    {
+                        case null: return "null";
+                        default: return "val";
+                    }
+                }
+                void Repointed()
+                {
+                    switch (Next())
+                    {
+                        case 1: cur.F = 10; break;
+                        default: cur.F = 30; break;
+                    }
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0181" source)

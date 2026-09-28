@@ -22,8 +22,11 @@ let holdsCommentOrDirective (node: SyntaxNode) : bool =
         || t.IsKind SyntaxKind.MultiLineDocumentationCommentTrivia)
 
 /// Is the node inside an expression tree — a lambda converted to
-/// `Expression<TDelegate>`? There the shape is what a LINQ provider
-/// translates, and a rewrite that is fine in code may not translate.
+/// `Expression<TDelegate>`, or a query expression over an `IQueryable`,
+/// whose clauses are such lambdas without the arrow? There the shape is what
+/// a LINQ provider translates, and a rewrite that is fine in code may not
+/// translate: `$"Row {r.Name}"` is `string.Format` in a tree, which EF6
+/// refuses anywhere and EF Core in a `where`.
 let insideExpressionTree (model: SemanticModel) (node: SyntaxNode) : bool =
     node.Ancestors()
     |> Seq.exists (fun a ->
@@ -35,6 +38,13 @@ let insideExpressionTree (model: SemanticModel) (node: SyntaxNode) : bool =
             not (isNull t)
             && t.Name = "Expression"
             && t.ContainingNamespace.ToDisplayString() = "System.Linq.Expressions"
+        // the first `from`'s source runs where it stands, before the provider sees anything
+        | :? Syntax.QueryExpressionSyntax as q when not (q.FromClause.Expression.Span.Contains node.Span) ->
+            let t = model.GetTypeInfo(q.FromClause.Expression).Type
+
+            not (isNull t)
+            && (t.Name = "IQueryable"
+                || t.AllInterfaces |> Seq.exists (fun i -> i.Name = "IQueryable"))
         | _ -> false)
 
 /// Does any identifier token in the node spell the name? No node (a root's
@@ -95,6 +105,21 @@ let leadingWhitespace (text: SourceText) (position: int) : string =
     let line = text.Lines.GetLineFromPosition position
     let s = line.ToString()
     s.Substring(0, s.Length - s.TrimStart([| ' '; '\t' |]).Length)
+
+/// One indent level deeper than a statement's own indent: the step from its
+/// block's brace to the statement, else a tab or four spaces as the line
+/// uses.
+let indentStep (text: SourceText) (statement: SyntaxNode) : string =
+    let own = leadingWhitespace text statement.SpanStart
+
+    let braceIndent =
+        match statement.Parent with
+        | :? Syntax.BlockSyntax as b -> ValueSome(leadingWhitespace text b.OpenBraceToken.SpanStart)
+        | _ -> ValueNone
+
+    match braceIndent with
+    | ValueSome b when own.Length > b.Length && own.StartsWith b -> own.Substring b.Length
+    | _ -> if own.Contains "\t" then "\t" else "    "
 
 /// The local names a statement list declares directly — declarations,
 /// `out var`, patterns and deconstructions — for a scope-clash check.

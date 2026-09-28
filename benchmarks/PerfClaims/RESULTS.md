@@ -281,3 +281,9 @@ rewrites the `foreach` only, as the F# twin keeps `Seq.*` on the array.
 The rule takes the concatenation (the win) and the readonly-field or local
 arithmetic (parity, moved for the reading); the mutable field it never
 reads — a call in the body can change it (2026-09-21).
+
+## CR0182 — `ContainsKey` then the indexer → `TryGetValue` (performance)
+
+7.0 µs → 4.9 µs (0.70×) over 1000 string keys, half of them present: one
+hash and probe per key where the pair took two. No allocation either way
+(2026-09-28).

@@ -703,7 +703,8 @@ let ``returns and assignments every branch performs become one conditional; the 
             """if (a) return "1"; return "2";"""
             """if (a) { return "1"; } else { return "2"; }"""
             "if (a) return x > y ? x : y; else return y;"
-            "if (a) v = f(); else v = g();"
+            "int v; if (a) v = f(); else v = g();"
+            """if (a) return "1"; else if (b) return "2"; else return "3";"""
             "if (x > y) return y; return x + y;"
             "if (a) return 1; else return null;"
         ],
@@ -715,11 +716,198 @@ let ``returns and assignments every branch performs become one conditional; the 
     Assert.Contains("""string B(bool a) { return a ? "1" : "2"; }""", fixedSource)
     Assert.Contains("""string D(bool a) { return a ? "1" : "2"; }""", fixedSource)
     Assert.Contains("return a ? (x > y ? x : y) : y;", fixedSource)
-    Assert.Contains("v = a ? f() : g();", fixedSource)
+    Assert.Contains("{ var v = a ? f() : g(); field = v; }", fixedSource)
     Assert.Contains("if (a) return true; return false;", fixedSource)
     Assert.Contains("else throw new InvalidOperationException();", fixedSource)
     Assert.Contains("""if (a) P = "1"; else P = "2";""", fixedSource)
     Assert.Contains("int? R(bool a) { return a ? 1 : null; }", fixedSource)
+    Assert.Contains("""string J(bool a, bool b) { return a ? "1" : b ? "2" : "3"; }""", fixedSource)
+
+[<Fact>]
+let ``an else-if chain every link of which returns or assigns one target is a conditional ladder, one arm a line when long``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Linq.Expressions;
+            static class C
+            {
+                static string Size(int n)
+                {
+                    if (n < 10) return "small";
+                    else if (n < 100) return "medium";
+                    return "large";
+                }
+                static Expression ParseExpression(Type propertyType, string value)
+                {
+                    if (propertyType == typeof(short) || propertyType == typeof(short?)) return Expression.Constant(short.Parse(value), propertyType);
+                    else if (propertyType == typeof(int) || propertyType == typeof(int?)) return Expression.Constant(int.Parse(value), propertyType);
+                    else if (propertyType == typeof(string)) return Expression.Constant(value, propertyType);
+                    else return Expression.Constant(false);
+                }
+                static string Describe(int temperatureInCelsius)
+                {
+                    if (temperatureInCelsius < 0) return "freezing cold outside today";
+                    else if (temperatureInCelsius < 15) return "rather chilly outside today";
+                    else return "pleasantly warm outside today";
+                }
+                static int Grade(int score)
+                {
+                    int g;
+                    if (score > 90) g = 1; else if (score > 50) g = 2; else g = 3;
+                    return g;
+                }
+                static string Table(int k)
+                {
+                    if (k == 1) return "one"; else if (k == 2) return "two"; else if (k == 3) return "three"; else return "many";
+                }
+                static string Thrown(int n)
+                {
+                    if (n < 0) return "negative"; else if (n == 0) return "zero"; else throw new ArgumentException();
+                }
+                static void Open(int n, ref int g)
+                {
+                    if (n < 0) g = 1; else if (n == 0) g = 2;
+                }
+                static string Long(int n)
+                {
+                    if (n < 0) { Console.WriteLine(); return "negative"; } else if (n == 0) return "zero"; else return "positive";
+                }
+            }
+            """
+
+    let fired =
+        suggestCode "CR0173" source
+        |> firedText source
+        |> List.map (fun s ->
+            let s = s.Replace("\r\n", "\n")
+            s.Substring(0, min 20 s.Length))
+
+    // Size (the else-less tail), ParseExpression, Describe, Grade; Table is CR0002's switch,
+    // Thrown throws, Open has no final else, Long has a two-statement link
+    Assert.Equal<string list>(
+        [
+            "if (n < 10) return \""
+            "if (propertyType == "
+            "if (temperatureInCel"
+            "int g;\n        if (s"
+        ],
+        fired
+    )
+
+    let fixedSource = (fixAll "CR0173" source).Replace("\r\n", "\n")
+    Assert.Contains("""return n < 10 ? "small" : n < 100 ? "medium" : "large";""", fixedSource)
+    Assert.Contains("var g = score > 90 ? 1 : score > 50 ? 2 : 3;", fixedSource)
+
+    // too wide for one line: an arm a line
+    Assert.Contains(
+        "        return temperatureInCelsius < 0 ? \"freezing cold outside today\"\n"
+        + "            : temperatureInCelsius < 15 ? \"rather chilly outside today\"\n"
+        + "            : \"pleasantly warm outside today\";",
+        fixedSource
+    )
+
+    // too wide for an arm a line: the condition and the value on lines of their own
+    Assert.Contains(
+        "        return propertyType == typeof(short) || propertyType == typeof(short?)\n"
+        + "            ? Expression.Constant(short.Parse(value), propertyType)\n"
+        + "            : propertyType == typeof(int) || propertyType == typeof(int?)\n"
+        + "            ? Expression.Constant(int.Parse(value), propertyType)\n"
+        + "            : propertyType == typeof(string)\n"
+        + "            ? Expression.Constant(value, propertyType)\n"
+        + "            : Expression.Constant(false);",
+        fixedSource
+    )
+
+    Assert.Contains("""if (k == 1) return "one";""", fixedSource)
+    Assert.Contains("else throw new ArgumentException();", fixedSource)
+    Assert.Contains("if (n < 0) g = 1; else if (n == 0) g = 2;", fixedSource)
+    Assert.Contains("""{ Console.WriteLine(); return "negative"; }""", fixedSource)
+
+[<Fact>]
+let ``a bare declaration right above the assigning if joins it: var only where both arms are of the declared type`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                static IEnumerable<int> F() => new[] { 1 };
+                static IEnumerable<int> G() => new[] { 2 };
+                static int[] Arr() => new[] { 3 };
+                int Seq(bool a)
+                {
+                    IEnumerable<int> xs;
+                    if (a) { xs = F(); } else { xs = G(); };
+                    return xs.Sum();
+                }
+                int Wider(bool a)
+                {
+                    IEnumerable<int> ys;
+                    if (a) ys = Arr(); else ys = Arr().Reverse().ToArray();
+                    return ys.Sum();
+                }
+                long Long(bool a)
+                {
+                    long n;
+                    if (a) n = 1; else n = 2;
+                    return n;
+                }
+                string Nullable(bool a)
+                {
+                    string s;
+                    if (a) s = "x"; else s = null;
+                    return s;
+                }
+                int Commented(bool a)
+                {
+                    int c; // the count
+                    if (a) c = 1; else c = 2;
+                    return c;
+                }
+                int Apart(bool a)
+                {
+                    int p;
+                    System.Console.WriteLine();
+                    if (a) p = 1; else p = 2;
+                    return p;
+                }
+                int Pair(bool a)
+                {
+                    int q, r = 0;
+                    if (a) q = 1; else q = 2;
+                    return q + r;
+                }
+                int ReadInCondition(string t)
+                {
+                    int k;
+                    if (int.TryParse(t, out k)) k = k + 1; else k = 0;
+                    return k;
+                }
+            }
+            """
+
+    let fixedSource = fixAll "CR0173" source
+    // the stray `;` after the else block goes with the if
+    Assert.Contains("var xs = a ? F() : G();", fixedSource)
+    Assert.DoesNotContain(";;", fixedSource)
+    // int[] arms into an IEnumerable<int> local: `var` would change the local's type
+    Assert.Contains("IEnumerable<int> ys = a ? Arr() : Arr().Reverse().ToArray();", fixedSource)
+    Assert.Contains("long n = a ? 1 : 2;", fixedSource)
+    Assert.Contains("""string s = a ? "x" : null;""", fixedSource)
+    // a comment on the declaration, a statement between, two declarators, the local
+    // read in the condition: the plain assignment form, or nothing
+    Assert.Contains("int c; // the count", fixedSource)
+    Assert.Contains("c = a ? 1 : 2;", fixedSource)
+    Assert.Contains("int p;", fixedSource)
+    Assert.Contains("p = a ? 1 : 2;", fixedSource)
+    Assert.Contains("int q, r = 0;", fixedSource)
+    Assert.Contains("q = a ? 1 : 2;", fixedSource)
+    Assert.Contains("int k;", fixedSource)
+    Assert.DoesNotContain("var k", fixedSource)
 
 [<Fact>]
 let ``a conditional whose arms meet at a wider natural type than each arm converted to stands down`` () =
@@ -770,3 +958,26 @@ let ``a null arm beside a value of the return type still folds`` () =
             """
 
     Assert.Equal(4, (suggestCode "CR0173" source).Length)
+
+[<Fact>]
+let ``review 2026-09-28: CR0173 keeps an assignment whose target's owner or ref a condition can re-point`` () =
+    let source =
+        csharp
+            """
+            class Box { public int F; }
+            class C
+            {
+                static Box cur = new Box();
+                static bool Swap() { cur = new Box(); return true; }
+                void Chain(int n) { if (Swap() && n < 0) cur.F = 1; else if (n < 10) cur.F = 2; else cur.F = 3; }
+                void Two(int n) { if (Swap()) cur.F = 1; else cur.F = 2; }
+                void Ref(bool c)
+                {
+                    int b1 = 0, b2 = 0;
+                    ref int r = ref b2;
+                    if ((r = ref b1) == 0 && c) r = 1; else r = 2;
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0173" source)

@@ -236,3 +236,40 @@ let ``DateTime.Now as an instant becomes UtcNow under the knob; calendar reads, 
     Assert.Contains("int D() => DateTime.Now.Day;", fixedSource)
     Assert.Contains("File.SetLastWriteTime(p, DateTime.Now)", fixedSource)
     Assert.Contains("\"Now\" => DateTime.Now", fixedSource)
+
+[<Fact>]
+let ``a query expression over an IQueryable is an expression tree: the string and span rewrites stand down inside it``
+    ()
+    =
+    // `from r in rows let l = "Row " + r.Name + …` over an IQueryable is
+    // `rows.Select(r => …)` with an Expression lambda; `$"Row {r.Name} …"` there
+    // is string.Format, which EF6 refuses anywhere and EF Core 10 in a `where`.
+    // The lambda spelling was guarded; the query spelling was not.
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Linq;
+            class Row { public string Code; public string Name; }
+            class C
+            {
+                IQueryable<string> Q(IQueryable<Row> rows) =>
+                    from r in rows
+                    where r.Code.Length >= 6 && r.Code.Substring(0, 6) == "ORDER-"
+                    let label = "Row " + r.Name + " of " + r.Code
+                    select label;
+                IQueryable<string> L(IQueryable<Row> rows) =>
+                    rows.Where(r => r.Code.Length >= 6 && r.Code.Substring(0, 6) == "ORDER-")
+                        .Select(r => "Row " + r.Name + " of " + r.Code);
+                IEnumerable<string> E(List<Row> rows) =>
+                    from r in rows
+                    let label = "Row " + r.Name + " of " + r.Code
+                    select label;
+            }
+            """
+
+    let fixedSource = fixAll "CR0100" source
+    Assert.Contains("""let label = "Row " + r.Name + " of " + r.Code""", fixedSource)
+    Assert.Contains(""".Select(r => "Row " + r.Name + " of " + r.Code)""", fixedSource)
+    Assert.Contains("""let label = $"Row {r.Name} of {r.Code}" """.TrimEnd(), fixedSource)
+    Assert.Empty(suggestCode "CR0175" source)

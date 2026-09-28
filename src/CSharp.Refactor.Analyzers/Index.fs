@@ -192,14 +192,21 @@ let private build (compilation: Compilation) : CompilationIndex =
                 | :? IMethodSymbol as md when interesting md.ReturnType -> addUse md { Tree = tree; Model = m; Id = id }
                 | _ -> ()
             | :? AssignmentExpressionSyntax as a when (a.Left :? TupleExpressionSyntax) ->
-                // a deconstruction writes each target
-                for arg in (a.Left :?> TupleExpressionSyntax).Arguments do
-                    addWrite (m.GetSymbolInfo(arg.Expression).Symbol) Elsewhere
+                // a deconstruction writes each target, a nested tuple's too
+                let rec targets (t: TupleExpressionSyntax) =
+                    for arg in t.Arguments do
+                        match arg.Expression with
+                        | :? TupleExpressionSyntax as inner -> targets inner
+                        | e -> addWrite (m.GetSymbolInfo(e).Symbol) Elsewhere
+
+                targets (a.Left :?> TupleExpressionSyntax)
             | :? AssignmentExpressionSyntax as a ->
                 let target =
                     match a.Left with
                     | :? IdentifierNameSyntax
-                    | :? MemberAccessExpressionSyntax -> m.GetSymbolInfo(a.Left).Symbol
+                    | :? MemberAccessExpressionSyntax
+                    // `(Counters.D) = 40;`: the model answers through the parentheses
+                    | :? ParenthesizedExpressionSyntax -> m.GetSymbolInfo(a.Left).Symbol
                     // `x?.P = v` (C# 14) parses as `x?.(P = v)`: the assignment sits inside
                     // the conditional access, its target a member binding
                     | :? MemberBindingExpressionSyntax -> m.GetSymbolInfo(a.Left).Symbol

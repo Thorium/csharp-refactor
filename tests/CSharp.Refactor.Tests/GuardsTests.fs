@@ -229,12 +229,26 @@ let ``an edit inside a body that splits the member is judged on the whole file``
     Assert.True(Guards.speculativeCheck model inside)
 
 [<Fact>]
-let ``the yields-to gate stands down only when the shadowed rule is enabled`` () =
+let ``the yields-to gate stands down only when the shadowed rule is enabled and the Microsoft tooling is said to run``
+    ()
+    =
     let ctxWith (pairs: (string * string) list) =
         { RuleContext.editor with
-            Options = Some(FakeOptions(dict pairs) :> AnalyzerConfigOptions)
+            Options =
+                Some(
+                    FakeOptions(dict (("csharp_refactor.skip_microsoft_duplicates", "true") :: pairs))
+                    :> AnalyzerConfigOptions
+                )
         }
 
+    // a severity alone is no proof the Microsoft analyzer or its fixer runs: the rule keeps fixing
+    let severityOnly =
+        { RuleContext.editor with
+            Options =
+                Some(FakeOptions(dict [ "dotnet_diagnostic.CA2213.severity", "warning" ]) :> AnalyzerConfigOptions)
+        }
+
+    Assert.False(RuleContext.shadowedRuleOn severityOnly [ "CA2213" ])
     Assert.False(RuleContext.shadowedRuleOn (ctxWith []) [ "CA2213" ])
     Assert.False(RuleContext.shadowedRuleOn (ctxWith [ "dotnet_diagnostic.CA2213.severity", "none" ]) [ "CA2213" ])
     Assert.True(RuleContext.shadowedRuleOn (ctxWith [ "dotnet_diagnostic.CA2213.severity", "warning" ]) [ "CA2213" ])

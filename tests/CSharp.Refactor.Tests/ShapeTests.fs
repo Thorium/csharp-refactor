@@ -46,6 +46,227 @@ let ``a setter only used while constructing becomes init; a later write, a seria
     Assert.Contains("public int Z { get; init; }", fixedSource)
     Assert.Contains("public int Y { get; set; }", fixedSource)
 
+[<Fact>]
+let ``System.Text.Json's property attributes leave the setter init-able; Newtonsoft, a type converter, extension data and Populate keep it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Text.Json;
+            using System.Text.Json.Serialization;
+            namespace Newtonsoft.Json { class JsonPropertyAttribute : System.Attribute { public JsonPropertyAttribute(string n) { } } }
+            class Dto
+            {
+                [JsonPropertyName("n")] public string Name { get; set; }
+                [JsonIgnore] public int Hidden { get; set; }
+                [Newtonsoft.Json.JsonProperty("o")] public string Old { get; set; }
+                [JsonExtensionData] public Dictionary<string, JsonElement> Rest { get; set; }
+            }
+            class Uint64Converter : JsonConverter<Converted>
+            {
+                public override Converted Read(ref Utf8JsonReader r, System.Type t, JsonSerializerOptions o) => null;
+                public override void Write(Utf8JsonWriter w, Converted v, JsonSerializerOptions o) { }
+            }
+            [JsonConverter(typeof(Uint64Converter))] class Converted { [JsonPropertyName("v")] public int V { get; set; } }
+            static class Make
+            {
+                static Dto D() => new Dto { Name = "a", Hidden = 1, Old = "b", Rest = null };
+                static Converted C() => new Converted { V = 1 };
+            }
+            """
+
+    Assert.Equal<string list>([ "set"; "set" ], firedText source (suggestCode "CR0083" source))
+    let fixedSource = fixAll "CR0083" source
+    Assert.Contains("""[JsonPropertyName("n")] public string Name { get; init; }""", fixedSource)
+    Assert.Contains("[JsonIgnore] public int Hidden { get; init; }", fixedSource)
+    Assert.Contains("""[Newtonsoft.Json.JsonProperty("o")] public string Old { get; set; }""", fixedSource)
+    Assert.Contains("public Dictionary<string, JsonElement> Rest { get; set; }", fixedSource)
+    Assert.Contains("""[JsonPropertyName("v")] public int V { get; set; }""", fixedSource)
+
+    // Populate writes into what a property already holds: anywhere in the compilation, nothing converts
+    let populating =
+        source
+        + "\nstatic class Options { static JsonSerializerOptions O() => new() { PreferredObjectCreationHandling = JsonObjectCreationHandling.Populate }; }\n"
+
+    Assert.Empty(suggestCode "CR0083" populating)
+
+// ---- CR0179 ----
+
+[<Fact>]
+let ``a local set member by member straight after its construction folds into an object initializer; the run stops at anything else``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            class Order
+            {
+                public int Id { get; set; }
+                public decimal Total { get; set; }
+                public string Note;
+                public Order Parent { get; set; }
+                public Order() { }
+                public Order(int id) { Id = id; }
+            }
+            class Special : Order { public new int Id { get; set; } }
+            struct Point { public int X; public int Y; }
+            class C
+            {
+                static int Parse(string s, out int v) { v = 0; return 0; }
+                Order A(int id, decimal total)
+                {
+                    var o = new Order();
+                    o.Id = id;
+                    o.Total = total;
+                    return o;
+                }
+                Order B(int id)
+                {
+                    Order o = new(id);
+                    o.Note = "first";
+                    Console.WriteLine();
+                    o.Total = 2;
+                    return o;
+                }
+                Order D()
+                {
+                    var o = new Order();
+                    o.Id = 1;
+                    o.Total = o.Id * 2;
+                    return o;
+                }
+                Order E()
+                {
+                    var o = new Order();
+                    o.Id = 1;
+                    o.Id = 2;
+                    return o;
+                }
+                Order F(Order parent)
+                {
+                    var o = new Order();
+                    // the parent first
+                    o.Parent = parent;
+                    return o;
+                }
+                Order G()
+                {
+                    Order o = new Special();
+                    o.Id = 1;
+                    return o;
+                }
+                Order H()
+                {
+                    var o = new Order { Id = 1 };
+                    o.Total = 2;
+                    return o;
+                }
+                Order I(string s)
+                {
+                    var o = new Order();
+                    o.Id = Parse(s, out var v);
+                    return o;
+                }
+                Order J()
+                {
+                    var o = new Order();
+                    o.Parent.Id = 1;
+                    return o;
+                }
+                Point K()
+                {
+                    var p = new Point();
+                    p.X = 1;
+                    p.Y = 2;
+                    return p;
+                }
+                Order L()
+                {
+                    var order = new Order();
+                    order.Note = "a long enough note to push this well past the wrap column of the file";
+                    order.Total = 1234567.89m;
+                    return order;
+                }
+            }
+            """
+
+    // A, B (the run before Console), D (Id only), E (the first Id), K, L
+    Assert.Equal<string list>([ "o"; "o"; "o"; "o"; "p"; "order" ], firedText source (suggestCode "CR0179" source))
+    let fixedSource = fixAll "CR0179" source
+    Assert.Contains("var o = new Order() { Id = id, Total = total };", fixedSource)
+    Assert.Contains("""Order o = new(id) { Note = "first" };""", fixedSource)
+    Assert.Contains("o.Total = 2;", fixedSource)
+    Assert.Contains("var o = new Order() { Id = 1 };\n        o.Total = o.Id * 2;", fixedSource.Replace("\r\n", "\n"))
+    Assert.Contains("var o = new Order() { Id = 1 };\n        o.Id = 2;", fixedSource.Replace("\r\n", "\n"))
+    Assert.Contains("// the parent first", fixedSource)
+    Assert.Contains("Order o = new Special();", fixedSource)
+    Assert.Contains("var o = new Order { Id = 1 };", fixedSource)
+    Assert.Contains("o.Id = Parse(s, out var v);", fixedSource)
+    Assert.Contains("o.Parent.Id = 1;", fixedSource)
+    Assert.Contains("var p = new Point() { X = 1, Y = 2 };", fixedSource)
+
+    Assert.Contains(
+        "var order = new Order()\n        {\n            Note = \"a long enough note to push this well past the wrap column of the file\",\n            Total = 1234567.89m\n        };",
+        fixedSource.Replace("\r\n", "\n")
+    )
+
+// ---- CR0180 ----
+
+[<Fact>]
+let ``a static field nothing writes becomes static readonly; a write anywhere, a ref, a mutable struct, reflection or a generic owner keep it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Threading;
+            struct Counter { public int N; public void Bump() => N++; }
+            readonly struct Frozen { public readonly int N; }
+            class Holder
+            {
+                public static string Prefix = "v";
+                public static int[] Table = { 1, 2 };
+                static DateTime Epoch = new DateTime(2000, 1, 1);
+                static Frozen Ice;
+                static int Written = 1;
+                static int Bumped;
+                static int Swapped;
+                static int Aliased;
+                static int InStatic;
+                static Counter Mutable;
+                static int Named;
+                static int ByString;
+                [ThreadStatic] static int PerThread;
+                static volatile int Flag;
+                static void Use()
+                {
+                    Written = 2;
+                    Bumped++;
+                    Interlocked.Increment(ref Swapped);
+                    ref int r = ref Aliased;
+                    Table[0] = 3;
+                    Console.WriteLine(nameof(Named) + typeof(Holder).GetField("ByString"));
+                }
+                static Holder() { InStatic = 5; }
+            }
+            class Generic<T> { static int Shared; static void Set() => Generic<int>.Shared = 1; }
+            """
+
+    // Prefix, Table (its elements are not the field), Epoch, Ice; the rest are written, aliased,
+    // named, copied, attributed, volatile or generic
+    Assert.Equal<string list>([ "Prefix"; "Table"; "Epoch"; "Ice" ], firedText source (suggestCode "CR0180" source))
+
+    let fixedSource = fixAll "CR0180" source
+    Assert.Contains("""public static readonly string Prefix = "v";""", fixedSource)
+    Assert.Contains("static readonly DateTime Epoch", fixedSource)
+    Assert.Contains("static int Written = 1;", fixedSource)
+    Assert.Contains("static Counter Mutable;", fixedSource)
+    Assert.Contains("static int InStatic;", fixedSource)
+
 // ---- CR0080 / CR0081 ----
 
 [<Fact>]
@@ -281,3 +502,257 @@ let ``a static readonly field of a constant becomes const; a public one only und
     Assert.Contains("string PublicName = \"pub\"", opened)
     Assert.Contains("string ProtectedName = \"prot\"", opened)
     Assert.Contains("""    public const string PublicName = "pub";""", fixAllWith apiOpen "CR0172" source)
+
+// ---- CR0183 ----
+
+[<Fact>]
+let ``a private Try-method whose callers only test it returns the value or null; a null true, a public one or a caller reading after keep it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            #nullable enable
+            using System;
+            using System.Collections.Generic;
+            class Order { }
+            class C
+            {
+                Dictionary<string, Order?> _map = new();
+                static void Use(object o) { }
+                private bool TryFind(string k, out Order o)
+                {
+                    if (k.Length > 0) { o = new Order(); return true; }
+                    o = null!;
+                    return false;
+                }
+                private bool TryNum(string s, out int n)
+                {
+                    n = 0;
+                    if (s.Length > 0) { n = s.Length; return true; }
+                    return false;
+                }
+                private bool TryMaybe(string k, out Order o)
+                {
+                    if (_map.TryGetValue(k, out var found)) { o = found!; return true; }
+                    o = null!;
+                    return false;
+                }
+                public bool TryPublic(string k, out int n) { n = 1; return true; }
+                private bool TryGrouped(string k, out int n) { n = 1; return true; }
+                private bool TryAfter(string k, out int n) { n = 1; return true; }
+                void Callers(string k)
+                {
+                    if (TryFind(k, out var o)) Use(o);
+                    var len = TryNum(k, out var n) ? n : -1;
+                    if (TryMaybe(k, out var m)) Use(m);
+                    TryPublic(k, out var p);
+                    Func<string, int> f = s => 0;
+                    if (TryAfter(k, out var a)) { }
+                    Use(a);
+                }
+                void Leaving(string k)
+                {
+                    if (!TryFind(k, out var o2)) return;
+                    Use(o2);
+                    if (TryNum(k, out _)) Use(1);
+                }
+                delegate bool Getter(string k, out int n);
+                Getter G => TryGrouped;
+            }
+            """
+
+    // TryFind and TryNum; TryMaybe's value may be null (the `!` only hides it), TryPublic is public,
+    // TryGrouped is taken as a method group, TryAfter's caller reads `a` after the if
+    Assert.Equal<string list>([ "TryFind"; "TryNum" ], firedText source (suggestCode "CR0183" source))
+    let fixedSource = fixAll "CR0183" source
+    Assert.Contains("private Order? TryFind(string k)", fixedSource)
+    Assert.Contains("if (k.Length > 0) { return new Order(); }", fixedSource)
+    Assert.Contains("return null;", fixedSource)
+    Assert.Contains("if (TryFind(k) is { } o) Use(o);", fixedSource)
+    Assert.Contains("if (TryFind(k) is not { } o2) return;", fixedSource)
+    Assert.Contains("private int? TryNum(string s)", fixedSource)
+    Assert.Contains("if (s.Length > 0) { return s.Length; }", fixedSource)
+    Assert.Contains("var len = (TryNum(k) is { } n) ? n : -1;", fixedSource)
+    Assert.Contains("if (TryNum(k) is { }) Use(1);", fixedSource)
+    Assert.Contains("private bool TryMaybe(string k, out Order o)", fixedSource)
+    Assert.Contains("private bool TryAfter(string k, out int n)", fixedSource)
+
+// ---- CR0185 ----
+
+[<Fact>]
+let ``a method returning a List every caller only reads returns IReadOnlyList; an Add, an in-place Reverse, a method group or a List local keep it``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class C
+            {
+                List<int> Evens() => new List<int> { 2, 4 };
+                IList<int> Odds() => new List<int> { 1 };
+                List<int> Mut() => new List<int>();
+                List<int> Rev() => new List<int>();
+                List<int> Group() => new List<int>();
+                List<int> Typed() => new List<int>();
+                static int Total(IEnumerable<int> xs) => xs.Sum();
+                IEnumerable<int> Passed() { return Evens(); }
+                void Use()
+                {
+                    foreach (var e in Evens()) Console.WriteLine(e);
+                    Console.WriteLine(Evens().Count + Evens()[0] + Total(Evens()) + Evens().Where(x => x > 2).Count());
+                    var xs = Evens();
+                    foreach (var x in xs) Console.WriteLine(x + xs.Count);
+                    Console.WriteLine(Odds().Contains(1));
+                    Mut().Add(1);
+                    var r = Rev();
+                    r.Reverse();
+                    Func<List<int>> f = Group;
+                    List<int> t = Typed();
+                }
+            }
+            """
+
+    Assert.Equal<string list>([ "Evens"; "Odds" ], firedText source (suggestCode "CR0185" source))
+    let fixedSource = fixAll "CR0185" source
+    Assert.Contains("IReadOnlyList<int> Evens() => new List<int> { 2, 4 };", fixedSource)
+    Assert.Contains("IReadOnlyList<int> Odds() => new List<int> { 1 };", fixedSource)
+    Assert.Contains("List<int> Mut() =>", fixedSource)
+    Assert.Contains("List<int> Rev() =>", fixedSource)
+    Assert.Contains("List<int> Group() =>", fixedSource)
+    Assert.Contains("List<int> Typed() =>", fixedSource)
+
+[<Fact>]
+let ``review 2026-09-28: CR0183 keeps a Try-method whose true value may still be null, an overload the new signature would take, a finally resetting the value``
+    ()
+    =
+    let source =
+        csharp
+            """
+            #nullable enable
+            using System.Collections.Generic;
+            class C
+            {
+                string[] _slots = new string[3];
+                Dictionary<string, string> _map = new();
+                private bool TrySlot(int i, out string s) { if (i < 3) { s = _slots[i]; return true; } s = ""; return false; }
+                private bool TryMap(string k, out string s) { if (k.Length > 0) { s = _map[k]; return true; } s = ""; return false; }
+                private string? TryName(object k) => null;
+                private bool TryName(string k, out string s) { if (k.Length > 0) { s = new string('a', 1); return true; } s = ""; return false; }
+                private bool TryReset(int i, out int n) { try { n = i * 2; return true; } finally { n = 0; } }
+                void Use()
+                {
+                    if (TrySlot(0, out var a)) System.Console.WriteLine(a);
+                    if (TryMap("k", out var b)) System.Console.WriteLine(b);
+                    if (TryName("k", out var c)) System.Console.WriteLine(c);
+                    if (TryReset(5, out var d)) System.Console.WriteLine(d);
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0183" source)
+
+[<Fact>]
+let ``review 2026-09-28: CR0180 keeps a static field a reflective loader, a nested deconstruction or a parenthesised store writes``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System.Reflection;
+            static class Settings { public static int Retries = 3; }
+            static class Loader
+            {
+                public static void Load()
+                {
+                    foreach (var f in typeof(Settings).GetFields(BindingFlags.Public | BindingFlags.Static)) f.SetValue(null, 7);
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0180" source)
+
+    let deconstructed =
+        csharp
+            """
+            static class Counters { public static int C = 3; public static int D = 4; public static int E = 5; public static int F = 6; }
+            static class Writers
+            {
+                public static void Write()
+                {
+                    ((Counters.C, Counters.D), _) = ((10, 20), 30);
+                    (Counters.F) = 40;
+                }
+                public static int Read() => Counters.E;
+            }
+            """
+
+    // only E: C and D are written through the nested deconstruction, F through the parentheses
+    Assert.Equal<string list>([ "E" ], firedText deconstructed (suggestCode "CR0180" deconstructed))
+
+[<Fact>]
+let ``review 2026-09-28: CR0083 keeps a System.Text.Json setter whose property has an initializer or a constructor value``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System.Text.Json.Serialization;
+            class OrderDto
+            {
+                [JsonPropertyName("qty")] public int Quantity { get; set; } = 1;
+                [JsonPropertyName("id")] public string Id { get; set; }
+                [JsonPropertyName("note")] public string Note { get; set; }
+                [JsonPropertyName("plain")] public int Plain { get; set; }
+                public OrderDto() { Note = "none"; }
+                static OrderDto Make() => new OrderDto { Quantity = 2, Id = "a", Note = "n", Plain = 3 };
+            }
+            """
+
+    // Id and Plain: no initializer, no constructor value - default(T) whoever builds it
+    Assert.Equal<string list>([ "set"; "set" ], firedText source (suggestCode "CR0083" source))
+    let fixedSource = fixAll "CR0083" source
+    Assert.Contains("""[JsonPropertyName("id")] public string Id { get; init; }""", fixedSource)
+    Assert.Contains("""[JsonPropertyName("plain")] public int Plain { get; init; }""", fixedSource)
+    Assert.Contains("public int Quantity { get; set; } = 1;", fixedSource)
+    Assert.Contains("public string Note { get; set; }", fixedSource)
+
+[<Fact>]
+let ``review 2026-09-28: CR0179 keeps a construction a goto returns over, a trailing comment, a one-line block that does not fit``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            class Item { public string Name; public string Echo; }
+            class Holder { public int A; }
+            class C
+            {
+                void Loop()
+                {
+                    int n = 0;
+                    Func<string> previous = null;
+                again:
+                    var o = new Item();
+                    o.Name = "item" + n;
+                    o.Echo = previous?.Invoke() ?? "none";
+                    previous = () => o.Name;
+                    if (++n < 3) goto again;
+                }
+                void Commented()
+                {
+                    var h = new Holder(); // keep: explains why
+                    h.A = 1;
+                }
+                void OneLine(bool b)
+                {
+                    if (b) { var o2 = new Item(); o2.Name = "a long enough name to push this well past the wrap column of the file"; o2.Echo = "x"; Console.WriteLine(o2.Name); }
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0179" source)

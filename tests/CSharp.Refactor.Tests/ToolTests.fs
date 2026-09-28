@@ -393,6 +393,49 @@ type EndToEnd() =
         Assert.Equal(0, Sweep.runTotalApplied)
 
     [<Fact>]
+    member _.``--api-changes opens a public shape whose fix stays in its own file, as the config key does``() =
+        let write (dir: string) =
+            File.WriteAllText(
+                Path.Combine(dir, "Lib.csproj"),
+                """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Library</OutputType><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
+            )
+
+            File.WriteAllText(
+                Path.Combine(dir, "Knobs.cs"),
+                csharp
+                    """
+                    public static class Knobs
+                    {
+                        public static int Limit = 10;
+                        private static int Mine = 2;
+                        public static int Sum() => Limit + Mine;
+                    }
+
+                    """
+            )
+
+            Path.Combine(dir, "Lib.csproj")
+
+        let run (args: string list) =
+            Sweep.resetRun ()
+
+            match parseArgs (Array.ofList args) with
+            | Ok opts -> Sweep.executeRun opts |> ignore
+            | Error e -> failwith e
+
+        // a library without the flag: only the private field
+        let plain = tempDir ()
+        run [ write plain; "--codes"; "CR0180" ]
+        let plainText = File.ReadAllText(Path.Combine(plain, "Knobs.cs"))
+        Assert.Contains("public static int Limit = 10;", plainText)
+        Assert.Contains("private static readonly int Mine = 2;", plainText)
+
+        // with it: the public field too, though its fix edits no other file
+        let opened = tempDir ()
+        run [ write opened; "--codes"; "CR0180"; "--api-changes" ]
+        Assert.Contains("public static readonly int Limit = 10;", File.ReadAllText(Path.Combine(opened, "Knobs.cs")))
+
+    [<Fact>]
     member _.``a fix that raises an analyzer warning the project treats as an error is held, the others stand``() =
         let dir = tempDir ()
 

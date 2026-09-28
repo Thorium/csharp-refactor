@@ -50,6 +50,12 @@
     <Compile Include="BoolReturn.fs" />
     <Compile Include="ConstLocal.fs" />
     <Compile Include="ReturnHoist.fs" />
+    <Compile Include="ObjectInitializer.fs" />
+    <Compile Include="SwitchExpression.fs" />
+    <Compile Include="DictTryGet.fs" />
+    <Compile Include="TryPattern.fs" />
+    <Compile Include="FixedArray.fs" />
+    <Compile Include="ReadOnlyReturn.fs" />
     <Compile Include="SpanShapes.fs" />
     <Compile Include="NestedIfMerge.fs" />
     <Compile Include="SwitchShapes.fs" />

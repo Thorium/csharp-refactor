@@ -114,6 +114,12 @@ module Rules =
             "BoolReturn", BoolReturn.analyze
             "ConstLocal", ConstLocal.analyze
             "ReturnHoist", ReturnHoist.analyze
+            "ObjectInitializer", ObjectInitializer.analyze
+            "SwitchExpression", SwitchExpression.analyze
+            "DictTryGet", DictTryGet.analyze
+            "TryPattern", TryPattern.analyze
+            "FixedArray", FixedArray.analyze
+            "ReadOnlyReturn", ReadOnlyReturn.analyze
             "SpanShapes", SpanShapes.analyze
             "NestedIfMerge", NestedIfMerge.analyze
             "SwitchShapes", SwitchShapes.analyze

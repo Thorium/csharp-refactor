@@ -57,15 +57,28 @@ let severityOf (options: AnalyzerConfigOptions) (id: string) : string option =
     tryGet options $"dotnet_diagnostic.{id}.severity"
     |> Option.map (fun s -> s.Trim().ToLowerInvariant())
 
-/// Is a shadowed Microsoft rule ON — set to anything but `none`? Then the
-/// CR rule stands down for that rule's shapes.
+/// `csharp_refactor.skip_microsoft_duplicates = true`: the Microsoft analyzers and
+/// their fixers really run on this code (NetAnalyzers referenced, the IDE
+/// rules enforced, `dotnet format` in the loop). Off by default: a severity
+/// in `.editorconfig` is no proof - a .NET Framework project never loads
+/// NetAnalyzers, a command-line build runs no IDE rule without
+/// `EnforceCodeStyleInBuild`, and none of them fixes anything unasked.
+let skipMicrosoftDuplicates (options: AnalyzerConfigOptions) : bool =
+    tryGet options $"{Prefix}skip_microsoft_duplicates"
+    |> Option.bind asBool
+    |> Option.defaultValue false
+
+/// Is a shadowed Microsoft rule ON — set to anything but `none` — where
+/// `skip_microsoft_duplicates` says the Microsoft tooling runs? Then the CR rule
+/// stands down for that rule's shapes; otherwise it reports and fixes them.
 let shadowedRuleOn (options: AnalyzerConfigOptions) (ids: string list) : bool =
-    ids
-    |> List.exists (fun id ->
-        match severityOf options id with
-        | Some "none" -> false
-        | Some _ -> true
-        | None -> false)
+    skipMicrosoftDuplicates options
+    && ids
+       |> List.exists (fun id ->
+           match severityOf options id with
+           | Some "none" -> false
+           | Some _ -> true
+           | None -> false)
 
 /// `csharp_refactor.public_api`: None when unset (the compilation answers).
 let publicApi (options: AnalyzerConfigOptions) : bool option =

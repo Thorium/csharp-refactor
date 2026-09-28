@@ -185,6 +185,7 @@ csharp_refactor.CR0006.then_at_least = 30         # a rule's knob
 csharp_refactor.public_api   = false              # nothing links to this assembly
 csharp_refactor.api_changes  = true               # --api-changes as a standing decision
 csharp_refactor.suppressions = no-correctness     # all | no-correctness | none
+csharp_refactor.skip_microsoft_duplicates = true  # the Microsoft analyzers run here: skip what they already report
 csharp_refactor.ignore_paths = generated;external/imported
 ```
 

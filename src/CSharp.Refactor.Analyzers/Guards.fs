@@ -391,23 +391,30 @@ let isPureFunction (model: SemanticModel) (f: ExpressionSyntax) : bool =
 /// Does the node sit inside a lambda converted to an expression tree, or
 /// a query expression over an `IQueryable`? There the shape is what a
 /// provider translates.
-let insideExpressionTree (model: SemanticModel) (node: SyntaxNode) =
-    node.Ancestors()
-    |> Seq.exists (fun a ->
-        match a with
-        | :? LambdaExpressionSyntax as lambda ->
-            let t = model.GetTypeInfo(lambda).ConvertedType
+let insideExpressionTree (model: SemanticModel) (node: SyntaxNode) = Text.insideExpressionTree model node
 
-            not (isNull t)
-            && t.Name = "Expression"
-            && t.ContainingNamespace.ToDisplayString() = "System.Linq.Expressions"
-        | :? QueryExpressionSyntax as q ->
-            let t = model.GetTypeInfo(q.FromClause.Expression).Type
-
-            not (isNull t)
-            && (t.Name = "IQueryable"
-                || t.AllInterfaces |> Seq.exists (fun i -> i.Name = "IQueryable"))
-        | _ -> false)
+/// A target whose storage nothing on the right of `=` can move: a plain
+/// local or parameter (not a `ref` one, which a condition can re-point), a
+/// field by its bare name, through `this.`, or through a type (a static).
+/// `o.F = c ? x : y` evaluates `o` before `c`, where `if (c) o.F = x; …`
+/// evaluated it after: a `c` that re-points `o` stored into the old object.
+let assignableInPlace (model: SemanticModel) (target: ExpressionSyntax) =
+    match target with
+    | :? IdentifierNameSyntax ->
+        match model.GetSymbolInfo(target).Symbol with
+        | :? ILocalSymbol as l -> l.RefKind = RefKind.None
+        | :? IParameterSymbol as p -> p.RefKind = RefKind.None
+        | :? IFieldSymbol -> true
+        | _ -> false
+    | :? MemberAccessExpressionSyntax as ma when ma.IsKind SyntaxKind.SimpleMemberAccessExpression ->
+        (match model.GetSymbolInfo(ma).Symbol with
+         | :? IFieldSymbol -> true
+         | _ -> false)
+        && (ma.Expression :? ThisExpressionSyntax
+            || (match model.GetSymbolInfo(ma.Expression).Symbol with
+                | :? INamedTypeSymbol -> true
+                | _ -> false))
+    | _ -> false
 
 /// Is the node inside an attribute argument, where an expression must
 /// stay a constant?
@@ -1988,7 +1995,15 @@ let armsConvertAlike (model: SemanticModel) (edit: TextEdit) (arms: ExpressionSy
                         None
                     else
                         match n with
-                        | :? ConditionalExpressionSyntax as c -> Some [ c.WhenTrue; c.WhenFalse ]
+                        | :? ConditionalExpressionSyntax as c ->
+                            // a ladder `c1 ? v1 : c2 ? v2 : v3` is one arm per value; a
+                            // parenthesised conditional arm stays one arm
+                            let rec leaves (c: ConditionalExpressionSyntax) =
+                                match c.WhenFalse with
+                                | :? ConditionalExpressionSyntax as next -> c.WhenTrue :: leaves next
+                                | last -> [ c.WhenTrue; last ]
+
+                            Some(leaves c)
                         | :? SwitchExpressionSyntax as s ->
                             s.Arms
                             |> Seq.map (fun a -> a.Expression)

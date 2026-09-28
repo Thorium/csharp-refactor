@@ -89,6 +89,45 @@ let private recordForReport (finding: ReportedFinding) =
 
 // ---- files ----
 
+/// A file's `.editorconfig` options with run-level keys laid over them: the
+/// command line's `--api-changes` reaches the analyzers as
+/// `csharp_refactor.api_changes = true`, so a fix that changes a public
+/// shape in its own file is reported - and suppressed, held and counted -
+/// like any other, not only the cross-file ones the reference pass adds.
+type private OverlaidOptions(inner: AnalyzerConfigOptions, extra: IReadOnlyDictionary<string, string>) =
+    inherit AnalyzerConfigOptions()
+
+    override _.TryGetValue(key: string, value: byref<string>) =
+        match extra.TryGetValue key with
+        | true, v ->
+            value <- v
+            true
+        | _ -> inner.TryGetValue(key, &value)
+
+    override _.Keys = Seq.append extra.Keys inner.Keys |> Seq.distinct
+
+type private OverlaidProvider(inner: AnalyzerConfigOptionsProvider, extra: IReadOnlyDictionary<string, string>) =
+    inherit AnalyzerConfigOptionsProvider()
+
+    override _.GlobalOptions: AnalyzerConfigOptions =
+        OverlaidOptions(inner.GlobalOptions, extra)
+
+    override _.GetOptions(tree: SyntaxTree) : AnalyzerConfigOptions =
+        OverlaidOptions(inner.GetOptions tree, extra)
+
+    override _.GetOptions(file: AdditionalText) : AnalyzerConfigOptions =
+        OverlaidOptions(inner.GetOptions file, extra)
+
+/// The project's analyzer options, with `--api-changes` laid over them.
+let private runAnalyzerOptions (opts: Options) (options: AnalyzerOptions) =
+    if opts.ApiChanges then
+        let extra =
+            Dictionary<string, string>(dict [ Configuration.Prefix + "api_changes", "true" ])
+
+        AnalyzerOptions(options.AdditionalFiles, OverlaidProvider(options.AnalyzerConfigOptionsProvider, extra))
+    else
+        options
+
 let private encodingOf (path: string) : Text.Encoding =
     let bom =
         try
@@ -498,7 +537,7 @@ let private analyzeProject
 
     let analyzerOptions =
         CompilationWithAnalyzersOptions(
-            project.AnalyzerOptions,
+            runAnalyzerOptions opts project.AnalyzerOptions,
             (fun ex analyzer _ ->
                 eprintfn $"  (analyzer {analyzer.GetType().Name} failed: {ex.GetType().Name}: {ex.Message})"),
             concurrentAnalysis = true,
