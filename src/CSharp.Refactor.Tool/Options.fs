@@ -35,6 +35,9 @@ type Options =
         MaxPasses: int
         Jobs: int
         Framework: string
+        /// `--define`: preprocessor symbols the run defines (RunDefines),
+        /// on top of the config's `csharp_refactor.defines`.
+        Defines: string list
     }
 
 let helpText =
@@ -67,6 +70,13 @@ OPTIONS
                         multi-targeted project is worked through framework by
                         framework, narrowest first, because code behind another
                         framework's #if is not in the parse tree at all
+  --define <symbols>    preprocessor symbols the run defines, like
+                        `csc -define:` or a DefineConstants entry: repeatable,
+                        or ;-separated (--define:A and -d:A work too). Code
+                        under #if A is otherwise not analysed at all, and a
+                        fix elsewhere can break it unseen. Projects keep
+                        their own DEBUG, TRACE and DefineConstants; the
+                        config's csharp_refactor.defines adds more
   --api-changes         also apply fixes that change internal or public
                         signatures and shapes, rewriting call sites across
                         the solution. Held back and merely counted without
@@ -134,6 +144,7 @@ let private valueFlags =
         "--max-passes"
         "--codes"
         "--categories"
+        "--define"
     ]
 
 [<TailCall>]
@@ -214,6 +225,12 @@ let rec private parseArgsLoop opts args =
     | "--create-config" :: rest -> parseArgsLoop { opts with CreateConfig = true } rest
     | "--mcp" :: rest -> parseArgsLoop { opts with Mcp = true } rest
     | "--framework" :: tfm :: rest -> parseArgsLoop { opts with Framework = tfm } rest
+    | "--define" :: value :: rest when not (value.StartsWith '-') -> defineThen opts value rest
+    | flag :: rest when
+        flag.StartsWith("--define:", StringComparison.Ordinal)
+        || flag.StartsWith("-d:", StringComparison.Ordinal)
+        ->
+        defineThen opts (flag.Substring(flag.IndexOf ':' + 1)) rest
     | "--jobs" :: n :: rest ->
         match Int32.TryParse n with
         | true, jobs when jobs > 0 -> parseArgsLoop { opts with Jobs = jobs } rest
@@ -225,7 +242,20 @@ let rec private parseArgsLoop opts args =
     | path :: rest when not (path.StartsWith '-') && opts.Target = "" -> parseArgsLoop { opts with Target = path } rest
     | extra :: _ when not (extra.StartsWith '-') -> Error $"'{extra}' is a second target; one target per run"
     | [ flag ] when List.contains flag valueFlags -> Error $"'{flag}' needs a value after it"
+    // `--define --dry-run`: the next token is a flag, not a symbol
+    | "--define" :: _ -> Error "'--define' needs a value after it"
     | unknown :: _ -> Error $"Unknown argument '{unknown}'"
+
+/// One `--define` value added to the options, then the rest parsed.
+and private defineThen opts value rest =
+    match RunDefines.parse value with
+    | Error message -> Error message
+    | Ok symbols ->
+        parseArgsLoop
+            { opts with
+                Defines = List.distinct (opts.Defines @ symbols)
+            }
+            rest
 
 /// Fold `--categories` into `--codes`, order-independently.
 let applyCategories (opts: Options) =
@@ -267,6 +297,7 @@ let defaults =
         MaxPasses = 5
         Jobs = min 4 (max 2 Environment.ProcessorCount)
         Framework = ""
+        Defines = []
     }
 
 let parseArgs (argv: string[]) =

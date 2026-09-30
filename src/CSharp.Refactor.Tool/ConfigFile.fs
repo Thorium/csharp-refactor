@@ -57,6 +57,13 @@ let defaultConfigText () =
     line "# node_modules, generated sources). Semicolon-separated; segment, path or glob."
     line "csharp_refactor.ignore_paths ="
     line ""
+    line "# Preprocessor symbols every run defines, like --define: code under"
+    line "# #if LOCAL_BUILD is otherwise not analysed at all, and a fix elsewhere can"
+    line "# break it unseen. Semicolon-separated; added to each project's own"
+    line "# DefineConstants (DEBUG, TRACE stay), never replacing them. Read for the"
+    line "# whole run from the .editorconfig nearest the target."
+    line "csharp_refactor.defines ="
+    line ""
     line "# Every rule this build knows, at its default. `none` turns one off;"
     line "# `suggestion` turns a default-off one on."
 
@@ -97,6 +104,95 @@ let defaultConfigText () =
                     | None -> line $"# csharp_refactor.{code}.{knob.Name} =  # {knob.Summary}"
 
     text.ToString()
+
+/// The run-level keys (`csharp_refactor.<key>`): reserved, so none is ever
+/// taken for a rule code or a rule's knob, and `csharp_refactor.defines`
+/// in particular never for a rule named DEFINES.
+let runLevelKeys =
+    set
+        [
+            "public_api"
+            "api_changes"
+            "suppressions"
+            "skip_microsoft_duplicates"
+            "ignore_paths"
+            "hints"
+            "defines"
+        ]
+
+/// The key `--define`'s config twin is read from.
+[<Literal>]
+let DefinesKey = "csharp_refactor.defines"
+
+/// `csharp_refactor.defines` in one `.editorconfig`'s text: None when the
+/// file does not set it, else the symbols and the entries that are no
+/// symbol (for the run to name). `;`- or `,`-separated; a trailing
+/// `# comment` is not part of the value. Any section counts: the key is
+/// run-level, not per file. The last assignment in the file wins, as an
+/// ini reader takes it. Also whether the file says `root = true`.
+let definesInText (text: string) : (string list * string list) option * bool =
+    let mutable value = None
+    let mutable isRoot = false
+    let mutable inPreamble = true
+
+    for raw in text.Split '\n' do
+        let line = raw.Trim()
+
+        if line.StartsWith "[" then
+            inPreamble <- false
+        elif line = "" || line.StartsWith "#" || line.StartsWith ";" then
+            ()
+        else
+            match line.IndexOf '=' with
+            | -1 -> ()
+            | eq ->
+                let key = line.Substring(0, eq).Trim().ToLowerInvariant()
+                let v = line.Substring(eq + 1).Split('#').[0].Trim()
+
+                if inPreamble && key = "root" then
+                    isRoot <- String.Equals(v, "true", StringComparison.OrdinalIgnoreCase)
+                elif key = DefinesKey then
+                    value <- Some v
+
+    let parsed =
+        value
+        |> Option.map (fun v ->
+            let entries = RunDefines.pieces v |> List.distinct
+            entries |> List.filter RunDefines.isSymbol, entries |> List.filter (RunDefines.isSymbol >> not))
+
+    parsed, isRoot
+
+/// The run's `csharp_refactor.defines`: from the `.editorconfig` nearest
+/// `directory` that sets it, walking up to a `root = true` file — the file
+/// it came from, its symbols, and its entries that are no symbol.
+let definesFrom (directory: string) : (string * string list * string list) option =
+    let rec walk (dir: string) =
+        if String.IsNullOrEmpty dir then
+            None
+        else
+            let path = Path.Combine(dir, ".editorconfig")
+
+            let found, isRoot =
+                try
+                    if File.Exists path then
+                        definesInText (File.ReadAllText path)
+                    else
+                        None, false
+                with
+                | :? IOException
+                | :? UnauthorizedAccessException -> None, false
+
+            match found with
+            | Some(symbols, invalid) -> Some(path, symbols, invalid)
+            | None when isRoot -> None
+            | None -> walk (Path.GetDirectoryName dir)
+
+    try
+        walk (Path.GetFullPath directory)
+    with
+    | :? ArgumentException
+    | :? PathTooLongException
+    | :? NotSupportedException -> None
 
 /// Write or append the block. Keys the existing file already sets are
 /// left as they are and their lines dropped from the block.

@@ -29,6 +29,7 @@
 
   <ItemGroup>
     <Compile Include="Out.fs" />
+    <Compile Include="RunDefines.fs" />
     <Compile Include="Options.fs" />
     <Compile Include="Processes.fs" />
     <Compile Include="FileWalk.fs" />

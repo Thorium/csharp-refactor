@@ -62,6 +62,12 @@ let private toolsJson =
                                                                 "string"
                                                                 "comma-separated: correctness,performance,idiom,cosmetic"
                                                         )
+                                                        "defines",
+                                                        box (
+                                                            prop
+                                                                "string"
+                                                                "preprocessor symbols to define, ;-separated, like --define"
+                                                        )
                                                         "parseOnly",
                                                         box (prop "boolean" "no references, syntactic rules only")
                                                         "apply",
@@ -106,6 +112,9 @@ let private handleAnalyze (args: JsonElement) =
                 | None -> ()
                 match getString "categories" with
                 | Some categories -> yield! [ "--categories"; categories ]
+                | None -> ()
+                match getString "defines" with
+                | Some defines -> yield! [ "--define"; defines ]
                 | None -> ()
             |]
 

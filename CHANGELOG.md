@@ -4,6 +4,7 @@ The analyzers package, the `csharp-refactor` tool and both editor extensions sha
 
 ## 0.1.13
 
+- `--define <symbols>` (also `--define:A`, `-d:A`, repeatable or `;`-separated) and `csharp_refactor.defines` in `.editorconfig` define preprocessor symbols for the run, so code under `#if LOCAL_BUILD` is analysed, fixed and verified. They are added to each project's own `DefineConstants` (DEBUG and TRACE stay), and reach scripts and legacy projects too; a script whose `#r` sits under an undefined `#if` gets the hint (same spelling as fsharp-refactor). A resident host (`--mcp`) gives a script or legacy project it loaded earlier each run's symbols, not the first run's.
 - A git worktree nested inside its own repository (`.claude/worktrees/...`) is no longer swept as more of the tree; a worktree beside its repository and a submodule still are.
 
 ## 0.1.12

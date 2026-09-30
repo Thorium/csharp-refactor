@@ -31,6 +31,17 @@ let runProcessIn (workingDirectory: string option) (timeout: TimeSpan) (fileName
     // end. Nodes that end with their build hold nothing of ours.
     psi.Environment.["MSBUILDDISABLENODEREUSE"] <- "1"
 
+    // --define / csharp_refactor.defines: appended to DefineConstants
+    // (RunDefines.environmentValue says why an environment variable and
+    // not a global property)
+    let inherited =
+        match psi.Environment.TryGetValue "DefineConstants" with
+        | true, value when not (isNull value) -> value
+        | _ -> ""
+
+    RunDefines.environmentValue inherited
+    |> Option.iter (fun value -> psi.Environment.["DefineConstants"] <- value)
+
     // MSBuildLocator points THIS process at the .NET SDK's MSBuild through the
     // environment; a Visual Studio MSBuild.exe launched with those inherited
     // would load the SDK's net472 task assemblies and fail (MSB4062). A child

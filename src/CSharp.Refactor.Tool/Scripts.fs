@@ -172,6 +172,9 @@ type LoadReport =
 
 let private loaded = Dictionary<string, ProjectId>(StringComparer.OrdinalIgnoreCase)
 
+/// Each loaded script's parse options before any run's symbols (RunDefines.refresh).
+let private ownParseOptions = Dictionary<ProjectId, ParseOptions>()
+
 let private reports =
     Dictionary<string, ResizeArray<string>>(StringComparer.OrdinalIgnoreCase)
 
@@ -182,13 +185,65 @@ let unresolvedOf (scriptPath: string) : string list =
     | true, xs -> xs |> Seq.distinct |> List.ofSeq
     | _ -> []
 
+let private ifDirectiveRegex = Regex @"^\s*#\s*(if|elif)\b(.*)$"
+let private elseDirectiveRegex = Regex @"^\s*#\s*else\b"
+let private endifDirectiveRegex = Regex @"^\s*#\s*endif\b"
+let private referenceDirectiveRegex = Regex @"^\s*#\s*r\s"
+let private conditionSymbolRegex = Regex @"(?<![!\w])([A-Za-z_]\w*)"
+
+/// The symbols of the `#if`/`#elif` conditions around a script's `#r`
+/// directives that `defined` does not define: the references the script
+/// reads only when one of them is defined (`#if LOCAL_BUILD` `#r
+/// "../bin/Lib.dll"` `#else` `#r "nuget: Lib"` `#endif`), which a run
+/// without `--define` never sees. Only a symbol a condition tests
+/// positively counts (`#if !LOCAL_BUILD` is the branch taken without it),
+/// and `true`/`false` are no symbols. Read from the text: the parser marks
+/// an inactive `#r` inactive but keeps no trace of the condition that
+/// made it so.
+let symbolsGuardingReferences (source: string) (defined: string list) : string list =
+    // one frame per open #if: the symbols its current branch tests
+    let frames = Stack<string list>()
+    let found = ResizeArray<string>()
+
+    for line in source.Split '\n' do
+        let m = ifDirectiveRegex.Match line
+
+        if m.Success then
+            let condition = m.Groups.[2].Value.Split("//").[0]
+
+            let symbols =
+                conditionSymbolRegex.Matches condition
+                |> Seq.map (fun s -> s.Groups.[1].Value)
+                |> Seq.filter (fun s -> s <> "true" && s <> "false")
+                |> List.ofSeq
+
+            if m.Groups.[1].Value = "elif" && frames.Count > 0 then
+                frames.Pop() |> ignore
+
+            frames.Push symbols
+        elif elseDirectiveRegex.IsMatch line then
+            if frames.Count > 0 then
+                frames.Pop() |> ignore
+
+            frames.Push []
+        elif endifDirectiveRegex.IsMatch line then
+            if frames.Count > 0 then
+                frames.Pop() |> ignore
+        elif referenceDirectiveRegex.IsMatch line then
+            for symbols in frames do
+                for symbol in symbols do
+                    if not (List.contains symbol defined) then
+                        found.Add symbol
+
+    found |> Seq.distinct |> List.ofSeq
+
 /// Load a script into the workspace as a project of one document; returns
 /// the project.
 let load (workspace: AdhocWorkspace) (scriptPath: string) : Project =
     let scriptPath = Path.GetFullPath scriptPath
 
     match loaded.TryGetValue scriptPath with
-    | true, id -> workspace.CurrentSolution.GetProject id
+    | true, id -> RunDefines.refresh workspace id ownParseOptions.[id]
     | _ ->
         let dir = Path.GetDirectoryName scriptPath
         let projectId = ProjectId.CreateNewId scriptPath
@@ -215,6 +270,9 @@ let load (workspace: AdhocWorkspace) (scriptPath: string) : Project =
                 metadataReferenceResolver = ScriptReferenceResolver(dir, unresolved)
             )
 
+        let ownOptions =
+            CSharpParseOptions(LanguageVersion.Latest, kind = SourceCodeKind.Script) :> ParseOptions
+
         let info =
             ProjectInfo.Create(
                 projectId,
@@ -224,11 +282,14 @@ let load (workspace: AdhocWorkspace) (scriptPath: string) : Project =
                 LanguageNames.CSharp,
                 filePath = scriptPath,
                 compilationOptions = compilationOptions,
-                parseOptions = CSharpParseOptions(LanguageVersion.Latest, kind = SourceCodeKind.Script),
+                // --define / csharp_refactor.defines: a script has no project
+                // to define anything, so the run's symbols are all it gets
+                parseOptions = RunDefines.addTo ownOptions,
                 documents = [ document ],
                 metadataReferences = (frameworkReferences.Value |> List.map (fun r -> r :> MetadataReference))
             )
 
         let project = workspace.AddProject info
         loaded.[scriptPath] <- project.Id
+        ownParseOptions.[project.Id] <- ownOptions
         project

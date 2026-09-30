@@ -136,6 +136,7 @@ csharp-refactor Your.csproj [--dry-run] [--codes CR0090,CR0103] [--categories co
 | `--dry-run` | Report only: lists every fix it would make, writes nothing. |
 | `--codes CR0090,CR0103` | Restrict the run to chosen rules; the other rules do not run at all. Naming a rule is an ask: it outranks the rule's default-off status and a config `none`. |
 | `--categories <list>` | Restrict to kinds of rule: `correctness`, `performance`, `idiom`, `cosmetic`. The rules of the other kinds do not run. For a repository you do not maintain, `correctness,performance` is the set worth a pull request. |
+| `--define <symbols>` | Preprocessor symbols the run defines, like `csc -define:` or a `DefineConstants` entry: repeatable, or `;`/`,`-separated (`--define:A` and `-d:A` work too). Added to each project's own `DefineConstants` — DEBUG, TRACE and the project's constants stay. See [Code under `#if`](#code-under-if-local_build). |
 | `--api-changes` | Also apply fixes that change internal or public signatures and shapes, rewriting call sites across the solution (the reference oracle finds them in every project; a caller in a VB project holds the fix, an F# consumer holds the surface). Held back and counted without it. |
 | `--report <file>` | Write every finding: `.sarif`, `.html` (a self-contained page) or `.csv`. |
 | `--baseline <sarif>` | The ratchet: findings whose fingerprints appear in this earlier report are neither reported nor fixed. |
@@ -171,6 +172,34 @@ every loose script). Nothing builds a script, so the run is verified in
 memory: the error count may not grow, and a script host's globals (`Args`)
 count as errors on both sides.
 
+### Code under `#if LOCAL_BUILD`
+
+Code behind a preprocessor symbol nothing defines is not in the parse tree
+at all: the tool neither analyses it nor sees what a fix elsewhere does to
+it, and the verification build compiles without it too. A repository that
+keeps, say, a local-development path under `#if LOCAL_BUILD` names the
+symbol for the run:
+
+```bash
+csharp-refactor Your.sln --define LOCAL_BUILD        # or --define:LOCAL_BUILD, -d:LOCAL_BUILD
+csharp-refactor Your.sln --define "LOCAL_BUILD;CI"   # several at once
+```
+
+or once for every run, in `.editorconfig` (`csharp_refactor.defines =
+LOCAL_BUILD`, below). The run uses both, and says at the start which symbols
+are active and where each came from. The symbols are **added** to what each
+project defines, exactly as `dotnet build` would see them with
+`DefineConstants` set in the environment: the SDK's `DEBUG`/`TRACE`, the
+target framework's `NET8_0_OR_GREATER` and the project's own
+`$(DefineConstants);FOO` all stay. (`-p:DefineConstants=LOCAL_BUILD` would
+not do: a global property replaces every one of them.) Every MSBuild the run
+starts — the workspace's design-time build, restores, the verification
+builds — gets them that way, and the loaded C# projects, legacy projects and
+`.csx` scripts get them in their parse options as well, so a project that
+assigns `DefineConstants` outright is still analysed with them. A script
+whose `#r` cannot be resolved while another `#r` sits under `#if LOCAL_BUILD`
+gets the hint to pass `--define LOCAL_BUILD`.
+
 ## Configuration
 
 Rules are configured the way every Roslyn analyzer is, in `.editorconfig`,
@@ -187,7 +216,12 @@ csharp_refactor.api_changes  = true               # --api-changes as a standing 
 csharp_refactor.suppressions = no-correctness     # all | no-correctness | none
 csharp_refactor.skip_microsoft_duplicates = true  # the Microsoft analyzers run here: skip what they already report
 csharp_refactor.ignore_paths = generated;external/imported
+csharp_refactor.defines = LOCAL_BUILD             # like --define on every run
 ```
+
+`csharp_refactor.defines` is a run-level key: it is read once per run, from
+the `.editorconfig` nearest the target (the walk stops at `root = true`),
+and adds to `--define`, never replacing it.
 
 `csharp-refactor --create-config` writes the block for you, every value at
 this build's default, so it changes nothing until you edit a line. Each

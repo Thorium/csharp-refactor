@@ -53,6 +53,40 @@ let ``notes only implies a dry run`` () =
         Assert.True o.DryRun
     | Error e -> failwith e
 
+[<Fact>]
+let ``--define takes every spelling, lists and repeats, and keeps each symbol once`` () =
+    let definesOf args =
+        match parseArgs args with
+        | Ok o -> o.Defines
+        | Error e -> failwith e
+
+    Assert.Equal<string list>([ "LOCAL_BUILD" ], definesOf [| "X.csproj"; "--define"; "LOCAL_BUILD" |])
+    Assert.Equal<string list>([ "LOCAL_BUILD" ], definesOf [| "X.csproj"; "--define:LOCAL_BUILD" |])
+    Assert.Equal<string list>([ "LOCAL_BUILD" ], definesOf [| "-d:LOCAL_BUILD"; "X.csproj" |])
+    Assert.Equal<string list>([ "A"; "B"; "_C1" ], definesOf [| "X.csproj"; "--define"; "A;B, _C1" |])
+
+    Assert.Equal<string list>(
+        [ "A"; "B"; "C" ],
+        definesOf [| "X.csproj"; "--define"; "A"; "-d:B;A"; "--define:C"; "--dry-run" |]
+    )
+
+    Assert.Empty(definesOf [| "X.csproj" |])
+
+[<Fact>]
+let ``--define refuses a symbol #if cannot test, and a missing value`` () =
+    let err args =
+        match parseArgs args with
+        | Error e -> e
+        | Ok _ -> failwith "expected an error"
+
+    Assert.Contains("'1ABC' is not a preprocessor symbol", err [| "X.csproj"; "--define"; "1ABC" |])
+    Assert.Contains("'LOCAL-BUILD' is not a preprocessor symbol", err [| "X.csproj"; "--define:A;LOCAL-BUILD" |])
+    Assert.Contains("'A B' is not a preprocessor symbol", err [| "X.csproj"; "-d:A B" |])
+    Assert.Contains("'--define' needs a value after it", err [| "X.csproj"; "--define" |])
+    Assert.Contains("'--define' needs a value after it", err [| "X.csproj"; "--define"; "--dry-run" |])
+    Assert.Contains("'--define' needs a value after it", err [| "X.csproj"; "--define:" |])
+    Assert.Contains("'--define' needs a value after it", err [| "X.csproj"; "-d:;" |])
+
 // ---- config file ----
 
 let private tempDir () =
@@ -93,6 +127,95 @@ let ``create-config writes a block with every rule and keeps existing keys`` () 
     match ConfigFile.writeInto dir with
     | Error e -> Assert.Contains("already carries", e)
     | Ok _ -> failwith "a second write must refuse"
+
+[<Fact>]
+let ``csharp_refactor.defines is read from the nearest .editorconfig, as symbols and the entries that are none`` () =
+    let text =
+        csharp
+            """
+            root = true
+            [*.cs]
+            dotnet_diagnostic.CR0103.severity = none
+            csharp_refactor.defines = LOCAL_BUILD; OTHER,bad-one  # why
+            csharp_refactor.defines.nested = NOT_READ
+            csharp_refactor.CR0090.defines = NOT_READ_EITHER
+            """
+
+    match ConfigFile.definesInText text with
+    | Some(symbols, invalid), isRoot ->
+        Assert.Equal<string list>([ "LOCAL_BUILD"; "OTHER" ], symbols)
+        Assert.Equal<string list>([ "bad-one" ], invalid)
+        Assert.True isRoot
+    | other -> failwithf "unexpected %A" other
+
+    Assert.Equal((None, false), ConfigFile.definesInText "[*.cs]\ncsharp_refactor.ignore_paths = gen\n")
+
+    // nearest file wins; the walk stops at root = true
+    let dir = tempDir ()
+    let sub = Path.Combine(dir, "src", "App")
+    Directory.CreateDirectory sub |> ignore
+    File.WriteAllText(Path.Combine(dir, ".editorconfig"), "root = true\n[*]\ncsharp_refactor.defines = TOP\n")
+    File.WriteAllText(Path.Combine(dir, "src", ".editorconfig"), "[*.cs]\ndotnet_diagnostic.CR0103.severity = none\n")
+
+    match ConfigFile.definesFrom sub with
+    | Some(path, symbols, []) ->
+        Assert.True(Workspace.samePath (Path.Combine(dir, ".editorconfig")) path)
+        Assert.Equal<string list>([ "TOP" ], symbols)
+    | other -> failwithf "unexpected %A" other
+
+    File.WriteAllText(Path.Combine(sub, ".editorconfig"), "root = true\n[*.cs]\ncsharp_refactor.defines = NEAR\n")
+
+    match ConfigFile.definesFrom sub with
+    | Some(_, symbols, _) -> Assert.Equal<string list>([ "NEAR" ], symbols)
+    | other -> failwithf "unexpected %A" other
+
+    File.WriteAllText(Path.Combine(sub, ".editorconfig"), "root = true\n")
+    Assert.Equal(None, ConfigFile.definesFrom sub)
+
+[<Fact>]
+let ``defines is a reserved run-level key, never a rule, and --create-config writes it`` () =
+    Assert.Contains("defines", ConfigFile.runLevelKeys)
+    Assert.False(CSharp.Refactor.RuleCatalog.known.Contains "DEFINES")
+
+    for key in ConfigFile.runLevelKeys do
+        Assert.False(CSharp.Refactor.RuleCatalog.known.Contains(key.ToUpperInvariant()))
+
+    match parseArgs [| "X.csproj"; "--codes"; "defines" |] with
+    | Error e -> Assert.Contains("not a rule code: DEFINES", e)
+    | Ok _ -> failwith "defines is no rule code"
+
+    let block = ConfigFile.defaultConfigText ()
+    Assert.Contains("\ncsharp_refactor.defines =", block.Replace("\r\n", "\n"))
+
+[<Fact>]
+let ``a script's #r under an #if the run does not define is named`` () =
+    let source =
+        csharp
+            """
+            #if LOCAL_BUILD
+            #r "../bin/Lib.dll"
+            #else
+            #r "nuget: Lib, 1.0.0"
+            #endif
+            #if !NOT_THIS
+            #r "other.dll"
+            #endif
+            #if DEBUG // a comment
+            using System;
+            #endif
+            #if true
+            #r "always.dll"
+            #endif
+            Console.WriteLine();
+            """
+
+    Assert.Equal<string list>([ "LOCAL_BUILD" ], Scripts.symbolsGuardingReferences source [])
+    Assert.Empty(Scripts.symbolsGuardingReferences source [ "LOCAL_BUILD" ])
+
+    Assert.Equal<string list>(
+        [ "B" ],
+        Scripts.symbolsGuardingReferences "#if A\n#elif B\n#r \"x.dll\"\n#endif\n" [ "A" ]
+    )
 
 // ---- targets ----
 
@@ -894,6 +1017,136 @@ type EndToEnd() =
         )
         // everything before the edit is byte for byte the original
         Assert.Equal<byte[]>(original.[0..39], bytes.[0..39])
+
+/// `--define` end to end: code under `#if LOCAL_BUILD` is analysed and
+/// fixed only when the run defines it, and the symbols are ADDED to the
+/// project's own DefineConstants: the DEBUG/TRACE/project-constant guard
+/// below does not compile without them, and the project's own target fails
+/// the verification build unless every one of them is there. A global
+/// property (-p:DefineConstants=...) would replace them and fail both.
+[<Collection("Tool")>]
+type DefinesEndToEnd() =
+
+    [<Fact>]
+    member _.``--define LOCAL_BUILD analyses and fixes #if LOCAL_BUILD code, and DEBUG and TRACE stay defined``() =
+        let dir = tempDir ()
+        let project = Path.Combine(dir, "Defines.csproj")
+
+        File.WriteAllText(
+            project,
+            csharp
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net10.0</TargetFramework>
+                    <DefineConstants>$(DefineConstants);PROJ_OWN</DefineConstants>
+                  </PropertyGroup>
+                  <Target Name="RequireDefines" BeforeTargets="CoreCompile" Condition="'$(DesignTimeBuild)' != 'true'">
+                    <Error Condition="'$(DefineConstants.Contains(`LOCAL_BUILD`))' != 'true' Or '$(DefineConstants.Contains(`DEBUG`))' != 'true' Or '$(DefineConstants.Contains(`TRACE`))' != 'true' Or '$(DefineConstants.Contains(`PROJ_OWN`))' != 'true'" Text="DefineConstants is '$(DefineConstants)'" />
+                  </Target>
+                </Project>
+                """
+        )
+
+        let source =
+            csharp
+                """
+                using System;
+                namespace Defines;
+                public static class Demo
+                {
+                #if LOCAL_BUILD
+                    public static Guid Local() => new Guid();
+                #endif
+                #if DEBUG && TRACE && PROJ_OWN
+                    public static int Keep() => 1;
+                #else
+                    public static int Keep() => this_does_not_compile;
+                #endif
+                }
+                """
+
+        let path = Path.Combine(dir, "Program.cs")
+        File.WriteAllText(path, source)
+
+        let run (args: string[]) =
+            Sweep.resetRun ()
+
+            match parseArgs args with
+            | Ok opts -> Sweep.executeRun opts
+            | Error e -> failwith e
+
+        let before = Environment.GetEnvironmentVariable "DefineConstants"
+
+        // without the symbol the code is not in the parse tree: nothing to fix
+        Assert.Equal(0, run [| project; "--codes"; "CR0090" |])
+        Assert.Equal(0, Sweep.runTotalApplied)
+        Assert.Equal(source, File.ReadAllText path)
+
+        // with it: analysed, fixed, and the verification build (whose target
+        // demands every symbol) passes
+        Assert.Equal(0, run [| project; "--codes"; "CR0090"; "--define"; "LOCAL_BUILD" |])
+        Assert.Equal(1, Sweep.runTotalApplied)
+        Assert.Contains("public static Guid Local() => Guid.Empty;", File.ReadAllText path)
+
+        // the run leaves the process environment as it found it
+        Assert.Equal(before, Environment.GetEnvironmentVariable "DefineConstants")
+        Assert.Empty(RunDefines.current ())
+
+    [<Fact>]
+    member _.``the run's symbols are appended to DefineConstants and parse options, never repeated``() =
+        try
+            RunDefines.set [ "LOCAL_BUILD"; "EXTRA"; "LOCAL_BUILD" ]
+            Assert.Equal<string list>([ "LOCAL_BUILD"; "EXTRA" ], RunDefines.current ())
+            Assert.Equal(Some "LOCAL_BUILD;EXTRA", RunDefines.environmentValue "")
+            Assert.Equal(Some "OWN;EXTRA;LOCAL_BUILD", RunDefines.environmentValue "OWN;EXTRA;")
+
+            let parse =
+                CSharpParseOptions(preprocessorSymbols = [ "DEBUG"; "EXTRA" ])
+                |> RunDefines.addTo
+                :?> CSharpParseOptions
+
+            Assert.Equal<string list>([ "DEBUG"; "EXTRA"; "LOCAL_BUILD" ], List.ofSeq parse.PreprocessorSymbolNames)
+            // nothing missing: the same options back
+            Assert.Same(parse, RunDefines.addTo parse)
+        finally
+            RunDefines.set []
+
+        Assert.Equal(None, RunDefines.environmentValue "OWN")
+
+    [<Fact>]
+    member _.``a script or legacy project cached by a resident host takes each run's symbols, not the first run's``() =
+        let dir = tempDir ()
+        let script = Path.Combine(dir, "build.csx")
+        File.WriteAllText(script, "System.Console.WriteLine(1);\n")
+        let project = Path.Combine(dir, "Legacy.csproj")
+
+        File.WriteAllText(
+            project,
+            """<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003"><PropertyGroup><TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion><OutputType>Library</OutputType><DefineConstants>OWN</DefineConstants></PropertyGroup><ItemGroup><Compile Include="A.cs" /></ItemGroup></Project>"""
+        )
+
+        File.WriteAllText(Path.Combine(dir, "A.cs"), "class A { }\n")
+        use workspace = new Microsoft.CodeAnalysis.AdhocWorkspace()
+
+        let symbolsOf (p: Microsoft.CodeAnalysis.Project) =
+            List.ofSeq (p.ParseOptions :?> CSharpParseOptions).PreprocessorSymbolNames
+
+        try
+            RunDefines.set [ "LOCAL_BUILD" ]
+            Assert.Contains("LOCAL_BUILD", symbolsOf (Scripts.load workspace script))
+            Assert.Equal<string list>([ "OWN"; "LOCAL_BUILD" ], symbolsOf (LegacyProjects.load workspace project))
+
+            // a later run of the same host without the symbol: the cached projects lose it
+            RunDefines.set []
+            Assert.DoesNotContain("LOCAL_BUILD", symbolsOf (Scripts.load workspace script))
+            Assert.Equal<string list>([ "OWN" ], symbolsOf (LegacyProjects.load workspace project))
+
+            // and one with another symbol gets that one, not the first run's
+            RunDefines.set [ "OTHER" ]
+            Assert.Equal<string list>([ "OWN"; "OTHER" ], symbolsOf (LegacyProjects.load workspace project))
+        finally
+            RunDefines.set []
 
 // ---- legacy projects ----
 

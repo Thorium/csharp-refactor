@@ -1402,17 +1402,48 @@ let private legacyWorkspace = lazy (new AdhocWorkspace())
 let private legacyBaseline =
     Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
 
+/// A project with the run's symbols (--define, csharp_refactor.defines) in
+/// its parse options: a script or legacy project loaded by an earlier run
+/// of a resident host (--mcp) was read with that run's.
+let private withRunDefines (project: Project) =
+    (RunDefines.addToSolution project.Solution).GetProject project.Id
+
+/// Hand a solution's new texts to the workspace and take its current
+/// solution back with the run's symbols in every C# project's parse options.
+/// MSBuildWorkspace cannot apply a parse-option change (TryApplyChanges
+/// throws), so where the run added symbols the workspace did not load with,
+/// the workspace's own options go back in before the texts are applied.
+let private applyToWorkspace (ws: Workspace) (solution: Solution) : Solution =
+    let current = ws.CurrentSolution
+
+    let applicable =
+        if ws.CanApplyChange ApplyChangesKind.ChangeParseOptions then
+            solution
+        else
+            solution.Projects
+            |> Seq.fold
+                (fun (s: Solution) p ->
+                    match current.GetProject p.Id with
+                    | null -> s
+                    | q when not (obj.ReferenceEquals(q.ParseOptions, p.ParseOptions)) ->
+                        s.WithProjectParseOptions(p.Id, q.ParseOptions)
+                    | _ -> s)
+                solution
+
+    ws.TryApplyChanges applicable |> ignore
+    RunDefines.addToSolution ws.CurrentSolution
+
 /// Load a project: an SDK-style one through MSBuildWorkspace (every
 /// framework flavor), a legacy one through the project-file reader.
 let private loadProject (workspace: MSBuildWorkspace) (path: string) : Workspace * Project list =
     if Scripts.isScript path then
         let ws = legacyWorkspace.Value
         let project = Scripts.load ws path
-        ws :> Workspace, [ project ]
+        ws :> Workspace, [ withRunDefines project ]
     elif LegacyProjects.isLegacy path then
         let ws = legacyWorkspace.Value
         let project = LegacyProjects.load ws path
-        ws :> Workspace, (if isNull project then [] else [ project ])
+        ws :> Workspace, (if isNull project then [] else [ withRunDefines project ])
     else
         let already =
             workspace.CurrentSolution.Projects
@@ -1442,7 +1473,7 @@ let private loadProject (workspace: MSBuildWorkspace) (path: string) : Workspace
                 workspace.TryApplyChanges solution |> ignore
 
         workspace :> Workspace,
-        workspace.CurrentSolution.Projects
+        (RunDefines.addToSolution workspace.CurrentSolution).Projects
         |> Seq.filter (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)
         |> Seq.sortBy (frameworkOf >> tfmRank)
         |> List.ofSeq
@@ -1691,6 +1722,24 @@ let private executeRunCore (opts: Options) : int =
                         Out.dim
                             $"  (script: verified in memory — nothing builds a script; {unresolved.Length} #r unresolved: {shown})"
 
+                        // the references the script reads only under a symbol
+                        // this run does not define: likely what it builds with
+                        let source =
+                            try
+                                File.ReadAllText projectPath
+                            with
+                            | :? IOException
+                            | :? UnauthorizedAccessException -> ""
+
+                        match Scripts.symbolsGuardingReferences source (RunDefines.current ()) with
+                        | [] -> ()
+                        | symbols ->
+                            let named = String.Join(", ", symbols)
+                            let flags = String.Join(" ", symbols |> List.map (fun s -> $"--define {s}"))
+
+                            Out.skip
+                                $"  (the script also #r's references under #if {named}, which this run does not define, so they are not read; {flags} reads the script the way a build defining them does)"
+
                 let baselineErrors =
                     if opts.ParseOnly then
                         parseErrorsOf compilation
@@ -1726,7 +1775,7 @@ let private executeRunCore (opts: Options) : int =
 
                     let mutable pass = 1
                     let mutable go = true
-                    let mutable solution = projectWorkspace.CurrentSolution
+                    let mutable solution = RunDefines.addToSolution projectWorkspace.CurrentSolution
                     let mutable projectApplied = 0
 
                     // the first pass analyses every file; a later one only what the pass
@@ -1767,8 +1816,7 @@ let private executeRunCore (opts: Options) : int =
 
                         // the workspace must see the new text for the next pass
                         if outcome.Applied > 0 then
-                            projectWorkspace.TryApplyChanges solution |> ignore
-                            solution <- projectWorkspace.CurrentSolution
+                            solution <- applyToWorkspace projectWorkspace solution
 
                         go <- outcome.Applied > 0 && pass < opts.MaxPasses && not opts.DryRun
                         pass <- pass + 1
@@ -2006,13 +2054,91 @@ let private executeRunCore (opts: Options) : int =
         else
             0
 
+/// Where the run's `csharp_refactor.defines` is looked up from: the target
+/// directory, the directory of a target file, or the fixed part of a glob.
+let private configDirectoryOf (target: string) =
+    let path =
+        match target.IndexOfAny [| '*'; '?' |] with
+        | -1 -> target
+        | wildcard ->
+            let head = target.Substring(0, wildcard).Replace('\\', '/')
+
+            match head.LastIndexOf '/' with
+            | -1 -> "."
+            | slash -> head.Substring(0, slash + 1)
+
+    try
+        if path <> "" && Directory.Exists path then
+            Path.GetFullPath path
+        elif path <> "" && File.Exists path then
+            Path.GetDirectoryName(Path.GetFullPath path)
+        else
+            Directory.GetCurrentDirectory()
+    with
+    | :? ArgumentException
+    | :? PathTooLongException
+    | :? NotSupportedException -> Directory.GetCurrentDirectory()
+
 /// A run of the tool. The rule modules outside `--codes`/`--categories` are
 /// switched off for its length (Rules.restrictTo) and on again after it, so
 /// no later run - an MCP request, a test calling in - inherits the set.
 let executeRun (opts: Options) : int =
     Rules.restrictTo opts.Codes
 
+    // --define and csharp_refactor.defines, before anything can start an
+    // MSBuild: the build host MSBuildWorkspace launches inherits this
+    // process's environment, and a DefineConstants there is appended to
+    // (RunDefines.environmentValue), so the design-time build sees the
+    // symbols beside the project's own DEBUG, TRACE and constants
+    let fromConfig = ConfigFile.definesFrom (configDirectoryOf opts.Target)
+
+    let configSymbols =
+        match fromConfig with
+        | Some(path, symbols, invalid) ->
+            for bad in invalid do
+                Out.skip
+                    $"  ({ConfigFile.DefinesKey} in {path}: '{bad}' is not a preprocessor symbol (a letter or _, then letters, digits, _); left out)"
+
+            symbols
+        | None -> []
+
+    RunDefines.set (opts.Defines @ configSymbols)
+
+    match RunDefines.current () with
+    | [] -> ()
+    | active ->
+        let origin (symbol: string) =
+            let viaFlag = List.contains symbol opts.Defines
+
+            let viaConfig =
+                fromConfig |> Option.filter (fun (_, xs, _) -> List.contains symbol xs)
+
+            match viaFlag, viaConfig with
+            | true, Some(path, _, _) -> $"--define and {path}"
+            | true, None -> "--define"
+            | false, Some(path, _, _) -> path
+            | false, None -> "?"
+
+        let described =
+            active
+            |> List.groupBy origin
+            |> List.map (fun (from, symbols) -> $"""{String.Join(", ", symbols)} (from {from})""")
+
+        printfn $"""defines: {String.Join("; ", described)} — added to each project's own DefineConstants"""
+
+    let inheritedDefines = Environment.GetEnvironmentVariable "DefineConstants"
+
+    RunDefines.environmentValue (Option.ofObj inheritedDefines |> Option.defaultValue "")
+    |> Option.iter (fun value -> Environment.SetEnvironmentVariable("DefineConstants", value))
+
     try
         executeRunCore opts
     finally
         Rules.restrictTo None
+
+        // a resident host (--mcp) starts its next run from the environment
+        // it was given
+        if not (RunDefines.current ()).IsEmpty then
+            Environment.SetEnvironmentVariable("DefineConstants", inheritedDefines)
+
+        RunDefines.set []

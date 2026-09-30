@@ -200,6 +200,9 @@ type LoadReport =
 
 let private loaded = Dictionary<string, ProjectId>(StringComparer.OrdinalIgnoreCase)
 
+/// Each loaded project's parse options before any run's symbols (RunDefines.refresh).
+let private ownParseOptions = Dictionary<ProjectId, ParseOptions>()
+
 /// The projects being read right now: a reference back into one of them (a
 /// cycle) is dropped rather than followed.
 let private loading = HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -213,7 +216,7 @@ let rec load (workspace: AdhocWorkspace) (projectPath: string) : Project =
     let projectPath = Path.GetFullPath projectPath
 
     match loaded.TryGetValue projectPath with
-    | true, id -> workspace.CurrentSolution.GetProject id
+    | true, id -> RunDefines.refresh workspace id ownParseOptions.[id]
     | _ ->
         let dir = Path.GetDirectoryName projectPath
         let text = Workspace.projectTextWithoutComments (File.ReadAllText projectPath)
@@ -262,8 +265,14 @@ let rec load (workspace: AdhocWorkspace) (projectPath: string) : Project =
                     LanguageVersion.CSharp7_3
             | None -> LanguageVersion.CSharp7_3
 
-        let parseOptions =
-            CSharpParseOptions(languageVersion, preprocessorSymbols = defines)
+        // --define / csharp_refactor.defines after the project's own: a
+        // legacy project assigns DefineConstants outright, so the environment
+        // variable its MSBuild.exe build gets is overwritten there; the
+        // analysis still sees the symbols
+        let ownOptions =
+            CSharpParseOptions(languageVersion, preprocessorSymbols = defines) :> ParseOptions
+
+        let parseOptions = RunDefines.addTo ownOptions
 
         // compile items
         let documents =
@@ -396,6 +405,7 @@ let rec load (workspace: AdhocWorkspace) (projectPath: string) : Project =
         // recorded only once it is in the workspace: a failure above leaves no
         // entry that a later lookup would answer with nothing
         loaded.[projectPath] <- projectId
+        ownParseOptions.[projectId] <- ownOptions
         project
 
 // ---- the verification build ----
