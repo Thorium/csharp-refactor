@@ -134,6 +134,40 @@ let ``a directory takes its solution's C# projects, a glob everything it matches
     | Ok [ Targets.Target.Project(p, None) ] -> Assert.True(Workspace.samePath a p)
     | other -> failwithf "unexpected %A" other
 
+/// A linked worktree nested inside its own repository is another checkout
+/// of the same code: walking it builds and fixes every project twice. A
+/// worktree beside its repository (a workspace of checkouts) and a
+/// submodule are code of their own and are walked.
+[<Fact>]
+let ``a directory walk skips a worktree nested in its own repository only`` () =
+    let dir = tempDir ()
+    let repo = Path.Combine(dir, "Repo").Replace('\\', '/')
+
+    let write (relative: string) (content: string) =
+        let full = Path.Combine(dir, relative)
+        Directory.CreateDirectory(Path.GetDirectoryName full) |> ignore
+        File.WriteAllText(full, content)
+
+    let project = """<Project Sdk="Microsoft.NET.Sdk"></Project>"""
+    write "Repo/A/A.csproj" project
+    // absolute, as `git worktree add` writes it by default
+    write "Repo/.claude/worktrees/agent-1/.git" $"gitdir: {repo}/.git/worktrees/agent-1\n"
+    write "Repo/.claude/worktrees/agent-1/A/A.csproj" project
+    // relative, as worktree.useRelativePaths writes it
+    write "Repo/.claude/worktrees/agent-2/.git" "gitdir: ../../../.git/worktrees/agent-2\n"
+    write "Repo/.claude/worktrees/agent-2/A/A.csproj" project
+    write "Repo/vendor/lib/.git" "gitdir: ../../.git/modules/lib\n"
+    write "Repo/vendor/lib/L.csproj" project
+    write "Repo-branch/.git" $"gitdir: {repo}/.git/worktrees/Repo-branch\n"
+    write "Repo-branch/B.csproj" project
+
+    let found =
+        FileWalk.files "*.csproj" dir
+        |> Seq.map (fun p -> Path.GetRelativePath(dir, p).Replace('\\', '/'))
+        |> Set.ofSeq
+
+    Assert.Equal<Set<string>>(set [ "Repo/A/A.csproj"; "Repo/vendor/lib/L.csproj"; "Repo-branch/B.csproj" ], found)
+
 // ---- end to end ----
 
 let private sampleSource =

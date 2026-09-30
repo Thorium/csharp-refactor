@@ -2,6 +2,10 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.13
+
+- A git worktree nested inside its own repository (`.claude/worktrees/...`) is no longer swept as more of the tree; a worktree beside its repository and a submodule still are.
+
 ## 0.1.12
 
 - New CR0186: trivial backing-field property becomes an auto-property (F# twin FR0026).

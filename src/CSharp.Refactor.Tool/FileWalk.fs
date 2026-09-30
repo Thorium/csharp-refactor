@@ -2,6 +2,7 @@
 /// repositories actually contain. Mirrors fsharp-refactor's.
 module CSharp.Refactor.Tool.FileWalk
 
+open System
 open System.Collections.Generic
 open System.IO
 
@@ -12,8 +13,40 @@ open System.IO
 let private pruned =
     set [ "obj"; "bin"; "packages"; "node_modules"; ".git"; ".vs"; ".fable"; ".fsdocs" ]
 
+/// A linked worktree (`git worktree add`, an agent's scratch checkout)
+/// nested INSIDE the repository it belongs to: another checkout of the
+/// code the walk already has, so its projects would be built, swept and
+/// fixed twice. Its `.git` is a file naming `<repo>/.git/worktrees/<name>`
+/// with `<repo>` an ancestor of it. A worktree beside its repository (a
+/// branch checked out next to the clone in a workspace) is a checkout of
+/// its own and is walked, as is a submodule (`.git/modules`).
+let private isNestedWorktree (directory: string) =
+    let marker = Path.Combine(directory, ".git")
+
+    try
+        File.Exists marker
+        && (let text = (File.ReadAllText marker).Trim()
+
+            text.StartsWith("gitdir:", StringComparison.OrdinalIgnoreCase)
+            && (let gitdir =
+                    Path
+                        .GetFullPath(Path.Combine(directory, text.Substring("gitdir:".Length).Trim()))
+                        .Replace('\\', '/')
+
+                let at = gitdir.IndexOf("/.git/worktrees/", StringComparison.OrdinalIgnoreCase)
+
+                at > 0
+                && (Path.GetFullPath(directory).Replace('\\', '/') + "/")
+                    .StartsWith(gitdir.Substring(0, at) + "/", StringComparison.OrdinalIgnoreCase)))
+    with
+    | :? IOException
+    | :? UnauthorizedAccessException
+    | :? ArgumentException
+    | :? NotSupportedException -> false
+
 let private isPruned (directory: string) =
     pruned.Contains((Path.GetFileName directory).ToLowerInvariant())
+    || isNestedWorktree directory
 
 /// One directory's own files and subdirectories, or None if it cannot be
 /// read. Materialized inside the guard: enumeration is lazy, so a `seq` that
@@ -26,7 +59,7 @@ let private listing (pattern: string) (directory: string) =
         )
     with
     | :? IOException
-    | :? System.UnauthorizedAccessException
+    | :? UnauthorizedAccessException
     | :? System.Security.SecurityException -> None
 
 /// Files matching `pattern` anywhere under `root`, and — through `skipped`,
@@ -70,7 +103,7 @@ let filesNoting (pattern: string) (root: string) (skipped: string -> unit) : str
                             File.GetAttributes(subdirectory).HasFlag FileAttributes.ReparsePoint
                         with
                         | :? IOException
-                        | :? System.UnauthorizedAccessException -> true
+                        | :? UnauthorizedAccessException -> true
 
                     if isReparse then
                         skipped subdirectory
