@@ -63,7 +63,7 @@ a section, and its category and default state match the code.
 | CR0061 | Correctness | v | | v | CA1001 | a type constructing a disposable field without `IDisposable` | note; editor: `: IDisposable` and a `Dispose` releasing the fields |
 | CR0062 | Correctness | v | | v | CA2213 | a `Dispose` that never releases an owned disposable field | note (`Cancel` without `Dispose` named separately); editor: `field?.Dispose();` first in `Dispose` |
 | CR0063 | Correctness | v | | | | `public void Dispose()` on a type not implementing `IDisposable` | note |
-| CR0064 | Correctness | v | | | CA1031 | `catch { }`, `catch (Exception) { return null; }`, a filter never reading the exception | note; editor: a divisor guard, `catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)`, a log line in the file's idiom |
+| CR0064 | Correctness | v | | | CA1031 | `catch { }`, `catch (Exception) { return null; }`, `catch when (true)` | note; editor: a divisor guard, `catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)`, a log line in the file's idiom |
 | CR0065 | Idiom | v | | | | `catch (E ex) { if (!Cond(ex)) throw; … }` | `catch (E ex) when (Cond(ex)) { … }` |
 | CR0066 | Correctness | v | | v | CA2219 | `throw` inside `finally` | note |
 | CR0067 | Correctness | v | | | CA1065 | `throw` inside `Equals`/`GetHashCode`/`ToString`/`Dispose`/a static constructor | note |
@@ -894,8 +894,7 @@ a base type either, typed — nothing can `using` it. Note. F# twin: FR0148.
 ### CR0064 — correctness
 
 A catch-all that swallows — `catch { }`, `catch (Exception) { return
-null; }`, `catch (Exception e) when (flag)` never reading `e` — hides
-every failure, the ones it did not mean too. Note; the editor offers
+null; }` — hides every failure, the ones it did not mean too. Note; the editor offers
 FR0055's three repairs, never a sweep: a divisor guard where the body is
 one integer division by a name (`if (b == 0) return d; return a / b;`),
 `catch (Exception ex) when (ex is IOException or
@@ -903,7 +902,9 @@ UnauthorizedAccessException)` where the body does file IO, and a log line
 in the file's own logging idiom (`_log.LogError(ex, "M failed");`,
 Serilog's `Log.Error`) as the handler's first statement; `TryParse` is
 CR0166's. Not a swallow: a handler that reads the exception (logs it,
-inspects it, filters on it) or rethrows; a comment on the handler, the
+inspects it, filters on it) or rethrows; a filter on state (`when
+(_stopping)` lets every failure outside it surface), other than a
+constant `when (true)`; a comment on the handler, the
 author's own acknowledgement; the `bool` probe idiom, the try body
 answering `true` and the handler `false`; a `Try…` method returning
 `false`; a returned value that carries the failure (an `Exception`, a

@@ -1,14 +1,15 @@
 /// Exception shapes.
 ///
 /// CR0064 (correctness, note): a catch-all that swallows — `catch { }`,
-/// `catch (Exception) { return null; }`, `catch (Exception e) when
-/// (flag)` never reading `e` — hides every failure, the ones it did not
-/// mean too. Note; the editor offers FR0055's three repairs — a guard where
+/// `catch (Exception) { return null; }` — hides every failure, the ones it
+/// did not mean too. Note; the editor offers FR0055's three repairs — a guard where
 /// the body is one integer division by a name, `catch (Exception ex) when
 /// (ex is IOException or UnauthorizedAccessException)` where the body does
 /// file IO, and a log line in the file's own logging idiom as the
 /// handler's first statement. Not a swallow: a handler
-/// that reads the exception (logs it, inspects it) or rethrows; a
+/// that reads the exception (logs it, inspects it) or rethrows; a filter,
+/// on the exception or on state (`when (_stopping)`), other than a
+/// constant `when (true)`; a
 /// comment on the handler (the author's own acknowledgement); the `bool`
 /// probe idiom (`try { …; return true; } catch { return false; }`, the
 /// body answering with the opposite literal); a `Try…` method returning
@@ -153,6 +154,15 @@ let private readsBinder (c: CatchClauseSyntax) =
         name <> ""
         && (Text.mentionsName name c.Block
             || (not (isNull c.Filter) && Text.mentionsName name c.Filter))
+
+/// A filter limits the catch to the cases it names, on the exception or on
+/// state (`when (_stopping)` lets every failure outside it surface): a
+/// decision, like a specific type. Only a constant `when (true)` still
+/// catches everything.
+let private unfiltered (model: SemanticModel) (c: CatchClauseSyntax) =
+    isNull c.Filter
+    || (let v = model.GetConstantValue c.Filter.FilterExpression
+        v.HasValue && v.Value = box true)
 
 let private hasComment (node: SyntaxNode) =
     node.DescendantTrivia(descendIntoTrivia = true)
@@ -403,7 +413,12 @@ let private swallows (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
         tree.GetRoot().DescendantNodes()
         |> Seq.choose (fun n ->
             match n with
-            | :? CatchClauseSyntax as c when isCatchAll model c && not (readsBinder c) && not (throwsIn c.Block) ->
+            | :? CatchClauseSyntax as c when
+                isCatchAll model c
+                && unfiltered model c
+                && not (readsBinder c)
+                && not (throwsIn c.Block)
+                ->
                 let tryStmt = c.Parent :?> TryStatementSyntax
                 let enclosingMethod = Text.enclosingMember c
 

@@ -810,7 +810,7 @@ Guards.
 | CR0061 | correctness | v | | v | a type that constructs a disposable field and does not implement `IDisposable` | note | FR0032 | CA1001 |
 | CR0062 | correctness | v | | v | a `Dispose` that never releases one of the type's own `new`-constructed disposable fields | note (`Cancel` without `Dispose` named separately) | FR0047 | CA2213 |
 | CR0063 | correctness | v | | | `public void Dispose()` on a type not implementing `IDisposable` | note: nothing can `using` it | FR0148 | — |
-| CR0064 | correctness | v | | | `catch { }`, `catch (Exception) { return null; }`, `catch (Exception e) when (false)`… | note; editor: `TryParse` for a one-call `Parse` body, a zero guard for a pure division, an IO-only catch for file IO, a log line in the file's logging idiom | FR0055 | CA1031 |
+| CR0064 | correctness | v | | | `catch { }`, `catch (Exception) { return null; }`, `catch (Exception) when (true)`… | note; editor: `TryParse` for a one-call `Parse` body, a zero guard for a pure division, an IO-only catch for file IO, a log line in the file's logging idiom | FR0055 | CA1031 |
 | CR0065 | idiom | v | | | `catch (E ex) { if (!Cond(ex)) throw; … }` | `catch (E ex) when (Cond(ex)) { … }` | — | — |
 | CR0066 | correctness | v | | v | `throw` inside `finally` | note | FR0063 | CA2219 |
 | CR0067 | correctness | v | | | `throw` inside `Equals`/`GetHashCode`/`ToString`/`Dispose`/a static constructor | note | FR0054 | CA1065 |
@@ -843,8 +843,9 @@ Guards.
   `Dispose(bool)`; `base.Dispose()` hand-off and a `System.Reactive` file
   (unsubscribe-not-release) stay quiet; `Cancel`/`Close` without `Dispose`
   gets its own wording.
-- **CR0064** — catch-all means `catch`, `catch (Exception)`, or a filter
-  that never reads the exception; a specific type ignored is a decision;
+- **CR0064** — catch-all means `catch` or `catch (Exception)` without a
+  filter, or with a constant `when (true)`; a specific type ignored is a
+  decision, and so is a filter, on the exception or on state;
   the `bool` probe idiom (`try { …; return true; } catch { return false; }`)
   is quiet; a catch-all after a cancellation rethrow arm, or followed by an
   unconditional failure, is a decision; the one-call teardown idiom

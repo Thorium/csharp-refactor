@@ -2,9 +2,16 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
-## 0.1.13
+## 0.1.15
+
+- CR0064 stays quiet on a catch-all with a filter, on the exception or on state (`catch when (_stopping) { }` lets every failure surface while not stopping); only a constant `when (true)` is still noted (F# twin FR0055).
+
+## 0.1.14
 
 - `--define <symbols>` (also `--define:A`, `-d:A`, repeatable or `;`-separated) and `csharp_refactor.defines` in `.editorconfig` define preprocessor symbols for the run, so code under `#if LOCAL_BUILD` is analysed, fixed and verified. They are added to each project's own `DefineConstants` (DEBUG and TRACE stay), and reach scripts and legacy projects too; a script whose `#r` sits under an undefined `#if` gets the hint (same spelling as fsharp-refactor). A resident host (`--mcp`) gives a script or legacy project it loaded earlier each run's symbols, not the first run's.
+
+## 0.1.13
+
 - A git worktree nested inside its own repository (`.claude/worktrees/...`) is no longer swept as more of the tree; a worktree beside its repository and a submodule still are.
 
 ## 0.1.12

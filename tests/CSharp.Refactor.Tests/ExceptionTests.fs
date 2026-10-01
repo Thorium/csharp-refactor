@@ -28,12 +28,16 @@ let ``a catch-all that never reads the exception is noted, the idioms and acknow
                 int J(string s) { try { return Parse(s); } catch (FormatException) { return 0; } }
                 int K(string s) { try { return Parse(s); } catch (OperationCanceledException) { throw; } catch { return 0; } }
                 int L(string s) { try { return Parse(s); } catch (Exception e) when (s.Length > 3) { return 0; } }
+                bool _stopping;
+                void M(Action serve) { try { serve(); } catch when (_stopping) { } }
+                int N(string s) { try { return Parse(s); } catch (Exception) when (true) { return 0; } }
             }
             """
 
     let fired = suggestCode "CR0064" source
     let texts = firedText source fired
-    // A, B, H (teardown), I (probe), L (a filter that never reads the exception)
+    // A, B, H (teardown), I (probe), N (a constant filter); L and M filter
+    // on state, which lets every failure outside it surface
     assertFired 5 source fired
     Assert.True(fired |> List.exists (fun s -> s.Message.Contains "teardown"))
     Assert.True(fired |> List.exists (fun s -> s.Message.Contains "probe"))
