@@ -106,6 +106,9 @@
     <Compile Include="ClosureCaptures.fs" />
     <Compile Include="GuardedRegions.fs" />
     <Compile Include="ParseAndNumbers.fs" />
+    <Compile Include="DateShapes.fs" />
+    <Compile Include="DefectNotes.fs" />
+    <Compile Include="ConditionDefects.fs" />
     <Compile Include="EnumerationMutation.fs" />
     <Compile Include="Analyzers.fs" />
     <Compile Include="References.fs" />

@@ -21,6 +21,74 @@ let holdsCommentOrDirective (node: SyntaxNode) : bool =
         || t.IsKind SyntaxKind.SingleLineDocumentationCommentTrivia
         || t.IsKind SyntaxKind.MultiLineDocumentationCommentTrivia)
 
+/// Does the node hold a comment, its own leading ones included? A fix
+/// that removes the node would lose it.
+let holdsComment (node: SyntaxNode) : bool =
+    node.DescendantTrivia(descendIntoTrivia = true)
+    |> Seq.exists (fun t ->
+        t.IsKind SyntaxKind.SingleLineCommentTrivia
+        || t.IsKind SyntaxKind.MultiLineCommentTrivia
+        || t.IsKind SyntaxKind.SingleLineDocumentationCommentTrivia
+        || t.IsKind SyntaxKind.MultiLineDocumentationCommentTrivia)
+
+/// Does a preprocessor directive stand between the node's first and last
+/// token? An edit over the node's span would take one half of a pair. A
+/// directive before the node (the `#if` whose branch it sits in) or after
+/// it is outside the span and stays.
+let crossesDirective (node: SyntaxNode) : bool =
+    node.ContainsDirectives
+    && node.DescendantTrivia(descendIntoTrivia = true)
+       |> Seq.exists (fun t -> t.IsDirective && node.Span.Contains t.Span)
+
+/// Has the author switched one of these compiler warnings off where the
+/// position is — a `#pragma warning disable` not restored before it, or
+/// the compilation's own setting (`NoWarn`)? A rule that reads the shape
+/// the warning is about stands down with it.
+let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list) : bool =
+    let numbers =
+        ids
+        |> List.choose (fun id ->
+            match System.Int32.TryParse(id.Substring 2) with
+            | true, n -> Some n
+            | _ -> None)
+
+    let names (code: Syntax.ExpressionSyntax) =
+        match code with
+        | :? Syntax.LiteralExpressionSyntax as l ->
+            (match l.Token.Value with
+             | :? int as n -> List.contains n numbers
+             | _ -> false)
+        | :? Syntax.IdentifierNameSyntax as name ->
+            ids
+            |> List.exists (fun id ->
+                System.String.Equals(id, name.Identifier.ValueText, System.StringComparison.OrdinalIgnoreCase))
+        | _ -> false
+
+    let byPragma =
+        let root = model.SyntaxTree.GetRoot()
+
+        root.ContainsDirectives
+        && (root.DescendantNodes(descendIntoTrivia = true)
+            |> Seq.fold
+                (fun (off: bool) n ->
+                    match n with
+                    | :? Syntax.PragmaWarningDirectiveTriviaSyntax as pragma when
+                        pragma.SpanStart < position
+                        && (pragma.ErrorCodes.Count = 0 || pragma.ErrorCodes |> Seq.exists names)
+                        ->
+                        pragma.DisableOrRestoreKeyword.IsKind SyntaxKind.DisableKeyword
+                    | _ -> off)
+                false)
+
+    let byOption =
+        ids
+        |> List.exists (fun id ->
+            match model.Compilation.Options.SpecificDiagnosticOptions.TryGetValue id with
+            | true, setting -> setting = ReportDiagnostic.Suppress
+            | _ -> false)
+
+    byPragma || byOption
+
 /// Is the node inside an expression tree — a lambda converted to
 /// `Expression<TDelegate>`, or a query expression over an `IQueryable`,
 /// whose clauses are such lambdas without the arrow? There the shape is what

@@ -15,6 +15,10 @@
 /// inside an expression tree the whole suggestion stands down (a LINQ
 /// provider resolves `Parse` by signature and the two-argument overload
 /// can turn a translatable call into a runtime `NotSupportedException`).
+/// `Convert.ToDecimal(s)`/`ToDouble`/`ToSingle`/`ToDateTime` on one argument
+/// typed `string` read the same culture and gain the provider the same way;
+/// the overloads taking a number or an `object` are other conversions and
+/// stay quiet.
 ///
 /// CR0106 (correctness): `DateTime.Now` is a local clock that jumps at
 /// DST and differs per machine; `DateTime.UtcNow` is the instant. Fix
@@ -50,6 +54,10 @@ let ClockCode = "CR0106"
 let private cultureSensitive =
     set [ "Double"; "Single"; "Decimal"; "DateTime"; "DateTimeOffset"; "TimeSpan" ]
 
+/// The `Convert` calls that parse a string by the current culture.
+let private cultureConverts =
+    set [ "ToDecimal"; "ToDouble"; "ToSingle"; "ToDateTime" ]
+
 let private parses (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     let invariantApplies = RuleContext.knobBool ctx ParseCultureCode "invariant" false
 
@@ -58,6 +66,33 @@ let private parses (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) 
             "CultureInfo." + culture
         else
             "System.Globalization.CultureInfo." + culture
+
+    // the one-argument call gains the provider as its second argument
+    let gainsProvider (inv: InvocationExpressionSyntax) (called: string) =
+        let position = inv.ArgumentList.CloseParenToken.SpanStart
+
+        let offer (culture: string) (title: string) =
+            Suggestion.fix
+                title
+                ($"{ParseCultureCode}.{culture}")
+                [ Suggestion.insert position (", " + spelling inv.SpanStart culture) ]
+
+        let invariant = offer "InvariantCulture" "Parse with the invariant culture"
+
+        {
+            Code = ParseCultureCode
+            Message = $"{called} without a provider reads the machine's culture: say which culture the text is in"
+            Span = inv.Span
+            Fixes =
+                [
+                    (if invariantApplies then
+                         invariant
+                     else
+                         Suggestion.editorOnly invariant)
+                    offer "CurrentCulture" "Parse with the current culture (spelled out)"
+                    |> Suggestion.editorOnly
+                ]
+        }
 
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
@@ -77,32 +112,7 @@ let private parses (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) 
                 let typeName = m.ContainingType.Name
 
                 if m.Name = "Parse" && inv.ArgumentList.Arguments.Count = 1 then
-                    let position = inv.ArgumentList.CloseParenToken.SpanStart
-
-                    let offer (culture: string) (title: string) =
-                        Suggestion.fix
-                            title
-                            ($"{ParseCultureCode}.{culture}")
-                            [ Suggestion.insert position (", " + spelling inv.SpanStart culture) ]
-
-                    let invariant = offer "InvariantCulture" "Parse with the invariant culture"
-
-                    Some
-                        {
-                            Code = ParseCultureCode
-                            Message =
-                                $"{typeName}.Parse without a provider reads the machine's culture: say which culture the text is in"
-                            Span = inv.Span
-                            Fixes =
-                                [
-                                    (if invariantApplies then
-                                         invariant
-                                     else
-                                         Suggestion.editorOnly invariant)
-                                    offer "CurrentCulture" "Parse with the current culture (spelled out)"
-                                    |> Suggestion.editorOnly
-                                ]
-                        }
+                    Some(gainsProvider inv $"{typeName}.Parse")
                 else
                     Some(
                         Suggestion.note
@@ -110,6 +120,27 @@ let private parses (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) 
                             $"{typeName}.{m.Name} without a provider reads the machine's culture: pass the culture the text is in"
                             inv.Span
                     )
+            | _ -> None
+        | :? InvocationExpressionSyntax as inv when
+            cultureConverts.Contains(Linq.nameOf inv)
+            && inv.ArgumentList.Arguments.Count = 1
+            && not (Text.insideExpressionTree model inv)
+            ->
+            // the typed gate: the overload bound is the `string` one and the
+            // argument is a string as written, not something converted to one
+            let argument = inv.ArgumentList.Arguments.[0].Expression
+
+            match model.GetSymbolInfo(inv).Symbol, model.GetTypeInfo(argument).Type with
+            | (:? IMethodSymbol as m), argumentType when
+                m.IsStatic
+                && m.ContainingType.Name = "Convert"
+                && m.ContainingType.ContainingNamespace.ToDisplayString() = "System"
+                && m.Parameters.Length = 1
+                && m.Parameters.[0].Type.SpecialType = SpecialType.System_String
+                && not (isNull argumentType)
+                && argumentType.SpecialType = SpecialType.System_String
+                ->
+                Some(gainsProvider inv $"Convert.{m.Name}")
             | _ -> None
         | _ -> None)
     |> List.ofSeq

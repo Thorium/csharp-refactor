@@ -83,6 +83,10 @@ let main argv =
             let findings = Sweep.reportedSoFar ()
 
             printfn
-                $"{Reports.findingsAsJson findings Sweep.baselineSuppressed Sweep.commentSuppressed Sweep.suppressionOverridden}"
+                $"{Reports.findingsAsJson
+                       findings
+                       (Sweep.baselineSuppressed ())
+                       (Sweep.commentSuppressed ())
+                       (Sweep.suppressionOverridden ())}"
 
         code

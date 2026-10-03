@@ -204,6 +204,7 @@ let symbolsGuardingReferences (source: string) (defined: string list) : string l
     // one frame per open #if: the symbols its current branch tests
     let frames = Stack<string list>()
     let found = ResizeArray<string>()
+    let isDefined = HashSet<string>(defined)
 
     for line in source.Split '\n' do
         let m = ifDirectiveRegex.Match line
@@ -232,7 +233,7 @@ let symbolsGuardingReferences (source: string) (defined: string list) : string l
         elif referenceDirectiveRegex.IsMatch line then
             for symbols in frames do
                 for symbol in symbols do
-                    if not (List.contains symbol defined) then
+                    if not (isDefined.Contains symbol) then
                         found.Add symbol
 
     found |> Seq.distinct |> List.ofSeq

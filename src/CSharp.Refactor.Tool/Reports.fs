@@ -37,7 +37,7 @@ type ReportedFinding =
         /// The finding's own line(s) with one line of margin.
         Snippet: string
         /// The 1-based first and last line the snippet covers.
-        SnippetLines: int * int
+        SnippetLines: struct (int * int)
         /// The text of the finding's range itself, as the source spells it.
         RegionText: string
     }
@@ -72,14 +72,27 @@ let fingerprintAndSnippet (text: SourceText) (file: string) (code: string) (span
 
         (sha.ComputeHash bytes)[..7] |> Array.map (sprintf "%02x") |> String.concat ""
 
-    let snippetFirst = clamp (startLine - 2)
-    let snippetLast = clamp (endLine - 1)
+    // a finding that is a secret is shown by its place, its text masked: the
+    // report travels further than the source does
+    let mask = "\"***\""
+
+    let shown, shownSpan =
+        if CSharp.Refactor.RuleCatalog.hidesSource code then
+            text.WithChanges(TextChange(span, mask)), TextSpan(span.Start, mask.Length)
+        else
+            text, span
+
+    let shownLines = shown.Lines
+    let shownClamp l = max 0 (min (shownLines.Count - 1) l)
+    let snippetFirst = shownClamp (startLine - 2)
+
+    let snippetLast = shownClamp (shownLines.GetLinePosition(shownSpan.End).Line)
 
     let snippet =
-        [ for l in snippetFirst..snippetLast -> lines.[l].ToString() ]
+        [ for l in snippetFirst..snippetLast -> shownLines.[l].ToString() ]
         |> String.concat "\n"
 
-    hash, snippet, (snippetFirst + 1, snippetLast + 1), text.ToString span
+    hash, snippet, struct (snippetFirst + 1, snippetLast + 1), shown.ToString shownSpan
 
 /// The tool's version as Directory.Build.props set it: the informational
 /// version, minus any +sha suffix a source build carries.
@@ -247,7 +260,7 @@ let private writeSarifReport (path: string) (target: string) (findings: Reported
     let results =
         [
             for f in findings ->
-                let snippetStart, snippetEnd = f.SnippetLines
+                let struct (snippetStart, snippetEnd) = f.SnippetLines
 
                 let entries =
                     [
@@ -513,7 +526,7 @@ let private writeHtmlReport (path: string) (target: string) (findings: ReportedF
     // the snippet starts at SnippetLines' first line, and the range's
     // columns are 0-based offsets into its lines
     let highlighted (f: ReportedFinding) =
-        let snippetStart, _ = f.SnippetLines
+        let struct (snippetStart, _) = f.SnippetLines
         let lines = f.Snippet.Split '\n'
         let firstIndex = f.StartLine - snippetStart
         let lastIndex = f.EndLine - snippetStart

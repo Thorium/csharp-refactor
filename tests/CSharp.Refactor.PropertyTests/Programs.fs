@@ -253,6 +253,22 @@ type Shape =
     | MixedKinds
     /// CR0170: a loop that awaits under an unobserved token
     | UnobservedToken
+    /// CR0190: minutes where the month belongs, a 12-hour clock without AM/PM
+    | WrongDateFormat
+    /// CR0191: the year of one instant, the month of it shifted
+    | MixedInstant
+    /// CR0192: `x != 1 || x != 2`
+    | AlwaysTrue
+    /// CR0193: `.Value` where the nullable was tested empty
+    | EmptyValueRead
+    /// CR0194: `xs.Add(1);` on an immutable list
+    | DroppedImmutableResult
+    /// CR0195: `if (a = b)`
+    | AssignmentTest
+    /// CR0196: a struct compared with null
+    | NeverNullTest
+    /// CR0197: a specific catch around a blocking wait
+    | WrappedCatch
 
 let private parameters =
     variables |> Array.map (fun v -> $"int {v}") |> String.concat ", "
@@ -922,6 +938,48 @@ static string M{i}() {{ var local = \"{w}\"; int n = 3; return local + n + Name{
                 "    foreach (var x in xs) { await Task.Delay(x); }"
                 "}"
             ]
+    | WrongDateFormat ->
+        $"static string M{i}(DateTime d) => d.ToString(\"yyyy-mm-dd hh:mm\", CultureInfo.InvariantCulture);"
+    | MixedInstant -> $"static DateTime M{i}(DateTime now) => new DateTime(now.Year, now.AddMonths(-1).Month, 25);"
+    | AlwaysTrue -> $"static bool M{i}(int x) => x != 1 || x != 2;"
+    | EmptyValueRead -> $"static int M{i}(int? x) {{ if (!x.HasValue) {{ return x.Value; }} return 0; }}"
+    | DroppedImmutableResult ->
+        lines
+            [
+                $"static System.Collections.Immutable.ImmutableList<int> M{i}(System.Collections.Immutable.ImmutableList<int> xs)"
+                "{"
+                "    xs.Add(1);"
+                "    return xs;"
+                "}"
+            ]
+    | AssignmentTest -> $"static int M{i}(bool a, bool b) {{ if (a = b) return 1; return 0; }}"
+    | NeverNullTest ->
+        lines
+            [
+                $"static int M{i}(DateTime d, int n)"
+                "{"
+                "    if (d != null)"
+                "    {"
+                "        n++;"
+                "    }"
+                "    return n;"
+                "}"
+            ]
+    | WrappedCatch ->
+        lines
+            [
+                $"static void M{i}(Task t)"
+                "{"
+                "    try"
+                "    {"
+                "        t.Wait();"
+                "    }"
+                "    catch (IOException e)"
+                "    {"
+                "        Console.WriteLine(e.Message);"
+                "    }"
+                "}"
+            ]
 
 /// The usings every program starts with.
 [<Literal>]
@@ -1110,6 +1168,14 @@ let genShape (size: int) : Gen<Shape> =
             1, Gen.constant IntDivision
             1, Gen.constant MixedKinds
             1, Gen.constant UnobservedToken
+            1, Gen.constant WrongDateFormat
+            1, Gen.constant MixedInstant
+            1, Gen.constant AlwaysTrue
+            1, Gen.constant EmptyValueRead
+            1, Gen.constant DroppedImmutableResult
+            1, Gen.constant AssignmentTest
+            1, Gen.constant NeverNullTest
+            1, Gen.constant WrappedCatch
         ]
 
 let genProgram: Gen<Shape list> =
@@ -1278,6 +1344,14 @@ let targetedCodes =
         "CR0168"
         "CR0169"
         "CR0170"
+        "CR0190"
+        "CR0191"
+        "CR0192"
+        "CR0193"
+        "CR0194"
+        "CR0195"
+        "CR0196"
+        "CR0197"
     ]
 
 /// Instances of every shape, built by reflection over the union so a shape

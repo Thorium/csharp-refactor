@@ -21,7 +21,8 @@
 /// reader may see a half-published one. `LazyInitializer.EnsureInitialized
 /// (ref _x, () => new X())` publishes exactly one. Guards: the field is
 /// static, not `volatile`/`readonly`/`[ThreadStatic]`; the assignment is
-/// the whole `if` body, or the shape is `_x ??= expr`; `EnsureInitialized`
+/// the whole `if` body, or the shape is `_x ??= expr` or the older `_x ??
+/// (_x = expr)` as a value anywhere; `EnsureInitialized`
 /// only for an expression provably non-null (it throws on a null factory
 /// result): a `new`, an array or collection expression, a string, a `??`
 /// with such a right side, or a not-null flow state under `#nullable`. Any
@@ -524,6 +525,38 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                             $"{fieldText} ?? {exchange fieldText a.Right} ?? {fieldText}"
                                     ]
                             )
+                | _ -> None
+            // `_x ?? (_x = expr)`: the same check-then-assign, as a value
+            | :? BinaryExpressionSyntax as b when
+                b.IsKind SyntaxKind.CoalesceExpression
+                && not (Text.crossesDirective b)
+                && not (serialised b)
+                ->
+                let rec bare (e: ExpressionSyntax) =
+                    match e with
+                    | :? ParenthesizedExpressionSyntax as p -> bare p.Expression
+                    | _ -> e
+
+                match staticCacheField model b.Left, bare b.Right with
+                | Some field, (:? AssignmentExpressionSyntax as a) when
+                    a.IsKind SyntaxKind.SimpleAssignmentExpression
+                    && Guards.sameReference model a.Left b.Left
+                    && not (Text.mentionsName field.Name a.Right)
+                    // the factory becomes a lambda, or runs on a path it did not: no `await` in it
+                    && not (
+                        a.Right.DescendantNodesAndSelf()
+                        |> Seq.exists (fun d -> d :? AwaitExpressionSyntax)
+                    )
+                    ->
+                    let fieldText = b.Left.ToString()
+
+                    let replacement, viaExchange =
+                        if provablyNonNull model a.Right then
+                            call fieldText a.Right, false
+                        else
+                            $"{fieldText} ?? {exchange fieldText a.Right} ?? {fieldText}", true
+
+                    Some(suggestion fieldText b.Span viaExchange b.SpanStart [ Suggestion.replace b.Span replacement ])
                 | _ -> None
             | _ -> None)
         |> List.ofSeq

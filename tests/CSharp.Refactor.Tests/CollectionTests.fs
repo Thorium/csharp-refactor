@@ -73,6 +73,139 @@ let ``a parameterless Random used for calls becomes Random.Shared, a seeded or s
     Assert.Contains("int A() => Random.Shared.Next(10);", fixedSource)
     Assert.Contains("int B() { var r = Random.Shared; return r.Next(1, 6) + r.Next(); }", fixedSource)
 
+[<Fact>]
+let ``CR0031 takes a seed read off the clock, a thread or a fresh GUID for no seed; any other operand keeps it`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Threading;
+            class C
+            {
+                int _seed;
+                int A() => new Random(DateTime.Now.Millisecond).Next(10);
+                int B() { var r = new Random((int)DateTime.Now.Ticks); return r.Next(); }
+                int D() => new Random(DateTime.Now.Second + DateTime.Now.Millisecond + Thread.CurrentThread.ManagedThreadId).Next();
+                int E() => new Random(Environment.TickCount).Next();
+                int F() => new Random(Guid.NewGuid().GetHashCode()).Next();
+                int G() => new Random(unchecked((int)DateTime.UtcNow.Ticks * 31)).Next();
+                int H(int seed) => new Random(seed).Next();
+                int I() => new Random(_seed + Environment.TickCount).Next();
+                int J() => new Random(42).Next();
+                int K() => new Random(40 + 2).Next();
+                int L(DateTime at) => new Random(at.Millisecond).Next();
+                Random M() { var r = new Random(Environment.TickCount); return r; }
+                int N() => new Random(DateTime.Today.DayOfYear).Next();
+                int O() => new Random(DateTime.Now.Hour).Next();
+            }
+            """
+
+    let fired = fires 6 "CR0031" source
+    Assert.Contains("seeded from the clock", fired.Head.Message)
+    let fixedSource = fixAll "CR0031" source
+    Assert.Contains("int A() => Random.Shared.Next(10);", fixedSource)
+    Assert.Contains("int B() { var r = Random.Shared; return r.Next(); }", fixedSource)
+    Assert.Contains("int D() => Random.Shared.Next();", fixedSource)
+    Assert.Contains("int E() => Random.Shared.Next();", fixedSource)
+    Assert.Contains("int F() => Random.Shared.Next();", fixedSource)
+    Assert.Contains("int G() => Random.Shared.Next();", fixedSource)
+    Assert.Contains("new Random(seed).Next();", fixedSource)
+    Assert.Contains("new Random(_seed + Environment.TickCount).Next();", fixedSource)
+    Assert.Contains("new Random(42).Next();", fixedSource)
+    Assert.Contains("new Random(40 + 2).Next();", fixedSource)
+    Assert.Contains("new Random(at.Millisecond).Next();", fixedSource)
+    Assert.Contains("var r = new Random(Environment.TickCount); return r;", fixedSource)
+    // a seed that holds for the day or the hour is a decision
+    Assert.Contains("new Random(DateTime.Today.DayOfYear).Next();", fixedSource)
+    Assert.Contains("new Random(DateTime.Now.Hour).Next();", fixedSource)
+
+[<Fact>]
+let ``review 2026-10-03b CR0031 reads a clock seed through operators; a seed in a variable, a field's Random and a locked or rebound one stay``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Diagnostics;
+            using System.Threading;
+            class C
+            {
+                static Random _shared = new Random(Environment.TickCount);
+                Random _mine = new Random((int)DateTime.Now.Ticks);
+                int A() => new Random(Environment.TickCount ^ Thread.CurrentThread.ManagedThreadId).Next();
+                int B() => new Random((int)DateTime.Now.Ticks & 0xFFFF).Next();
+                int D() => new Random(unchecked((int)Stopwatch.GetTimestamp())).Next();
+                int E() { var seed = Environment.TickCount; return new Random(seed).Next(); }
+                int F() { var r = new Random(Environment.TickCount); lock (r) { return r.Next(); } }
+                int G() { var r = new Random(Environment.TickCount); r = new Random(2); return r.Next(); }
+            }
+            """
+
+    fires 3 "CR0031" source |> ignore
+    let fixedSource = fixAll "CR0031" source
+    Assert.Contains("int A() => Random.Shared.Next();", fixedSource)
+    Assert.Contains("int B() => Random.Shared.Next();", fixedSource)
+    Assert.Contains("int D() => Random.Shared.Next();", fixedSource)
+    Assert.Contains("static Random _shared = new Random(Environment.TickCount);", fixedSource)
+    Assert.Contains("return new Random(seed).Next();", fixedSource)
+    Assert.Contains("var r = new Random(Environment.TickCount); lock (r)", fixedSource)
+    Assert.Contains("var r = new Random(Environment.TickCount); r = new Random(2);", fixedSource)
+
+[<Fact>]
+let ``CR0031 without Random.Shared in the framework only notes the clock seed`` () =
+    // the netstandard2.0 reference assembly, where the NuGet cache holds it:
+    // a framework whose Random has no Shared
+    let reference =
+        System.IO.Path.Combine(
+            System.Environment.GetFolderPath System.Environment.SpecialFolder.UserProfile,
+            ".nuget",
+            "packages",
+            "netstandard.library",
+            "2.0.3",
+            "build",
+            "netstandard2.0",
+            "ref",
+            "netstandard.dll"
+        )
+
+    if System.IO.File.Exists reference then
+        let source =
+            normalize (
+                csharp
+                    """
+                    using System;
+                    class C
+                    {
+                        int A() => new Random(Environment.TickCount).Next(10);
+                        int B() => new Random().Next(10);
+                    }
+                    """
+            )
+
+        let tree =
+            Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(source, parseOptions, path = "Sample.cs")
+
+        let compilation =
+            Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create(
+                "Old",
+                [ tree ],
+                [
+                    Microsoft.CodeAnalysis.MetadataReference.CreateFromFile reference
+                    :> Microsoft.CodeAnalysis.MetadataReference
+                ],
+                Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(
+                    Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary
+                )
+            )
+
+        Assert.Empty(errorsOf compilation)
+
+        let fired = suggestRaw compilation tree |> List.filter (fun s -> s.Code = "CR0031")
+
+        Assert.Equal<string list>([ "new Random(Environment.TickCount)" ], firedText source fired)
+        Assert.Empty fired.Head.Fixes
+
 // ---- CR0032 ----
 
 [<Fact>]

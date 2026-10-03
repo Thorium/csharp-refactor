@@ -132,6 +132,159 @@ let ``key-shaped literals and constant connection strings with credentials are n
     Assert.Equal(2, (suggestCode "CR0123" source).Length)
     Assert.Equal(1, (suggestCode "CR0124" source).Length)
 
+[<Fact>]
+let ``CR0124 notes a literal given to something named as a credential, never showing it; keys, placeholders and prose are quiet``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System.Net;
+            class Settings { public string Password { get; set; } = ""; public string ApiKey = ""; public string PasswordHint = ""; }
+            class C
+            {
+                string servicePassword = "Tr0ub4dor&3";
+                const string ClientSecret = @"s3cr3t-Value-91";
+                string this[string key] => key;
+                void Login(string user, string password) { }
+                void Use(string name) { }
+                void A()
+                {
+                    Login("admin", "hunter2-Xy");
+                    Login(user: "admin", password: "hunter2-Xz");
+                    var s = new Settings { Password = "Winter2024!", ApiKey = "9f8e7d6c5b4a" };
+                    s.Password = "Summer2024!";
+                    var token = "abc123def456";
+                    var cred = new NetworkCredential("svc", "Pa55w0rd!");
+                }
+                void B()
+                {
+                    Login("admin", "");
+                    Login("admin", "password");
+                    Login("admin", "changeme");
+                    Login("admin", "<password>");
+                    Login("admin", "***");
+                    var passwordKey = "Jwt:Password";
+                    var password = "Password";
+                    var secret = this["ClientSecret"];
+                    var apiKey = "X-Api-Key";
+                    var pwd = "Enter password:";
+                    var s = new Settings { PasswordHint = "your first pet" };
+                    Use(nameof(servicePassword));
+                    var tokenEndpoint = "https://login.example/token";
+                    var token = "Bearer";
+                    var accessToken = "https://x/y";
+                    var clientSecret = "client_secret";
+                    var nextToken = "IDENT_7";
+                    var endToken = "while-loop";
+                    var pwd2 = "abc";
+                }
+            }
+            """
+
+    let fired = suggestCode "CR0124" source
+
+    Assert.Equal<string list>(
+        [
+            "\"Tr0ub4dor&3\""
+            "@\"s3cr3t-Value-91\""
+            "\"hunter2-Xy\""
+            "\"hunter2-Xz\""
+            "\"Winter2024!\""
+            "\"9f8e7d6c5b4a\""
+            "\"Summer2024!\""
+            "\"abc123def456\""
+            "\"Pa55w0rd!\""
+        ],
+        firedText source fired
+    )
+
+    Assert.True(fired |> List.forall (fun s -> s.Fixes.IsEmpty))
+    Assert.Contains("'servicePassword'", fired.Head.Message)
+    Assert.DoesNotContain("Tr0ub4dor", fired.Head.Message)
+    Assert.DoesNotContain("hunter2", fired.[2].Message)
+
+[<Fact>]
+let ``review 2026-10-03b CR0124 reads an attribute's and a static field's credential and a hole-less interpolation; names, messages and templates are quiet``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            [AttributeUsage(AttributeTargets.All)]
+            class CredentialAttribute : Attribute
+            {
+                public string Password { get; set; } = "";
+                public string Name { get; set; } = "";
+                public string ErrorMessage { get; set; } = "";
+                public CredentialAttribute() { }
+                public CredentialAttribute(string name) { }
+            }
+            class Log { public void Info(string message, params object[] args) { } }
+            class C
+            {
+                [Credential(Password = "Winter2024!")] int a;
+                [Credential(Name = "password")] int b;
+                [Credential("token")] int c;
+                [Credential(ErrorMessage = "Password is required")] int d;
+                static readonly string ApiKey = "9f8e7d6c5b4a";
+                void A(Log log, bool live, string pwdIn)
+                {
+                    log.Info("Password {Pwd} rejected", pwdIn);
+                    var password = $"Summer2024!";
+                    var secret = "Sum" + "mer2024!";
+                    var token = live ? "abc123def456" : "zzz999yyy888";
+                }
+            }
+            """
+
+    Assert.Equal<string list>(
+        [ "\"Winter2024!\""; "\"9f8e7d6c5b4a\""; "$\"Summer2024!\"" ],
+        firedText source (suggestCode "CR0124" source)
+    )
+
+[<Fact>]
+let ``review 2026-10-03b a report's snippet of a credential finding does not carry the credential`` () =
+    let line = "        Login(\"admin\", \"hunter2-Xy\");"
+
+    let text =
+        Microsoft.CodeAnalysis.Text.SourceText.From("class C\n{\n" + line + "\n}\n")
+
+    let start = text.ToString().IndexOf "\"hunter2-Xy\""
+    let span = Microsoft.CodeAnalysis.Text.TextSpan(start, "\"hunter2-Xy\"".Length)
+
+    for code in [ "CR0123"; "CR0124" ] do
+        let _, snippet, _, region =
+            CSharp.Refactor.Tool.Reports.fingerprintAndSnippet text "Sample.cs" code span
+
+        Assert.DoesNotContain("hunter2", snippet)
+        Assert.DoesNotContain("hunter2", region)
+        Assert.Contains("Login(\"admin\", ", snippet)
+
+    // any other rule's snippet is the source as written
+    let _, snippet, _, region =
+        CSharp.Refactor.Tool.Reports.fingerprintAndSnippet text "Sample.cs" "CR0001" span
+
+    Assert.Contains("hunter2-Xy", snippet)
+    Assert.Contains("hunter2-Xy", region)
+
+[<Fact>]
+let ``CR0124 leaves a test file's credentials alone`` () =
+    let source =
+        csharp
+            """
+            using Xunit;
+            public class C
+            {
+                void Login(string user, string password) { }
+                [Fact]
+                public void A() { Login("admin", "hunter2-Xy"); var apiKey = "9f8e7d6c5b4a"; }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0124" source)
+
 // ---- CR0125 / CR0126 ----
 
 [<Fact>]

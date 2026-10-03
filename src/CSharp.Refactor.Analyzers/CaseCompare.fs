@@ -69,12 +69,10 @@ let private agreeingLiteral (model: SemanticModel) (lowers: bool) (e: Expression
     match model.GetConstantValue e with
     | v when v.HasValue ->
         match v.Value with
+        // ASCII holds no letter of the other case: the fold would leave it as it is
         | :? string as s when
-            s |> Seq.forall (fun c -> int c < 128)
-            && (if lowers then
-                    s = s.ToLowerInvariant()
-                else
-                    s = s.ToUpperInvariant())
+            s
+            |> Seq.forall (fun c -> int c < 128 && (if lowers then c < 'A' || c > 'Z' else c < 'a' || c > 'z'))
             ->
             true
         | _ -> false

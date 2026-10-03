@@ -11,11 +11,19 @@
 ///
 /// CR0031 (performance, fix): `new Random()` per call is
 /// `Random.Shared` (.NET 6+): no allocation, no seeding, thread-safe.
-/// Guards: parameterless (a seed is a decision), the type exactly
-/// `System.Random`; either called on directly (`new Random().Next(…)`) or
-/// bound to a local whose every use is a call receiver in its own block —
-/// an instance stored, returned or passed is the author's; `Random.Shared`
-/// resolves in the compilation.
+/// Guards: parameterless, or seeded from nothing but the clock, a thread
+/// or process id or a fresh GUID (`new Random(DateTime.Now.Millisecond)`,
+/// `new Random((int)DateTime.Now.Ticks)`, `new Random(Environment.TickCount)`,
+/// `new Random(Guid.NewGuid().GetHashCode())`, with literals, casts and
+/// arithmetic over those) — no seed anyone chose, and two created in one
+/// tick repeat each other; any other operand, a constant alone, or a
+/// coarse part of the clock (`.Hour`, `.DayOfYear`: a seed that holds for a
+/// while) is a decision. The type exactly `System.Random`; either called on
+/// directly (`new Random().Next(…)`) or bound to a local whose every use is
+/// a call receiver in its own block — an instance stored, returned or
+/// passed is the author's. Where the framework has no `Random.Shared`
+/// (before .NET 6) the unseeded form is quiet and the clock-seeded one a
+/// note.
 ///
 /// CR0032 (performance, fix): `foreach (var k in d.Keys) use(k, d[k])`
 /// looks every key up again; `foreach (var (k, v) in d)` reads the pair.
@@ -149,6 +157,127 @@ let private addRange (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
 
 // ---- CR0031 ----
 
+/// The static reads a clock seed starts from: the time, the tick count,
+/// the thread or process id, a fresh GUID.
+let private clockRoots =
+    set
+        [
+            "System.DateTime.Now"
+            "System.DateTime.UtcNow"
+            "System.DateTimeOffset.Now"
+            "System.DateTimeOffset.UtcNow"
+            "System.Environment.TickCount"
+            "System.Environment.TickCount64"
+            "System.Environment.CurrentManagedThreadId"
+            "System.Environment.ProcessId"
+            "System.Threading.Thread.CurrentThread"
+            "System.Diagnostics.Process.GetCurrentProcess"
+            "System.Diagnostics.Stopwatch.GetTimestamp"
+            "System.Guid.NewGuid"
+        ]
+
+/// The members read off a clock root that still change from one call to
+/// the next. A coarse part of the clock (`.Hour`, `.DayOfYear`, `.Date`)
+/// is a seed that holds for a while, which is a decision.
+let private fineGrained =
+    set
+        [
+            "Ticks"
+            "UtcTicks"
+            "Millisecond"
+            "Milliseconds"
+            "Microsecond"
+            "Nanosecond"
+            "Second"
+            "Seconds"
+            "TotalMilliseconds"
+            "TimeOfDay"
+            "UtcDateTime"
+            "LocalDateTime"
+            "DateTime"
+            "GetHashCode"
+            "ToBinary"
+            "ToFileTime"
+            "ToFileTimeUtc"
+            "ToUnixTimeMilliseconds"
+            "ManagedThreadId"
+            "Id"
+        ]
+
+/// A seed built only from clock, thread or process reads — the reads
+/// themselves, the fine-grained members read off them (`.Ticks`,
+/// `.Millisecond`, `.ManagedThreadId`, `.GetHashCode()`), and literals,
+/// casts, arithmetic and `unchecked` over those — with at least one such
+/// read in it. Any other operand (a parameter, a field, a constant alone)
+/// makes the seed a decision.
+let private isClockSeed (model: SemanticModel) (seed: ExpressionSyntax) : bool =
+    let mutable reads = 0
+
+    let frameworkMember (s: ISymbol) =
+        not (isNull s)
+        && fineGrained.Contains s.Name
+        && not (isNull s.ContainingType)
+        && not (isNull s.ContainingNamespace)
+        && (let ns = s.ContainingNamespace.ToDisplayString()
+            ns = "System" || ns.StartsWith "System.")
+
+    // a member chain down to one of the roots
+    let rec clockRead (e: ExpressionSyntax) : bool =
+        match e with
+        | :? ParenthesizedExpressionSyntax as p -> clockRead p.Expression
+        | :? InvocationExpressionSyntax as inv when inv.ArgumentList.Arguments.Count = 0 ->
+            match model.GetSymbolInfo(inv).Symbol, inv.Expression with
+            | (:? IMethodSymbol as m), (:? MemberAccessExpressionSyntax as ma) ->
+                (m.IsStatic
+                 && not (isNull m.ContainingType)
+                 && clockRoots.Contains(m.ContainingType.ToDisplayString() + "." + m.Name))
+                || (not m.IsStatic && frameworkMember m && clockRead ma.Expression)
+            | _ -> false
+        | :? MemberAccessExpressionSyntax as ma ->
+            match model.GetSymbolInfo(ma).Symbol with
+            | :? IPropertySymbol as p ->
+                (p.IsStatic
+                 && not (isNull p.ContainingType)
+                 && clockRoots.Contains(p.ContainingType.ToDisplayString() + "." + p.Name))
+                || (not p.IsStatic && frameworkMember p && clockRead ma.Expression)
+            | _ -> false
+        | _ -> false
+
+    let rec builtFromClock (e: ExpressionSyntax) : bool =
+        match e with
+        | :? ParenthesizedExpressionSyntax as p -> builtFromClock p.Expression
+        | :? LiteralExpressionSyntax as l -> l.IsKind SyntaxKind.NumericLiteralExpression
+        | :? CastExpressionSyntax as c -> builtFromClock c.Expression
+        | :? CheckedExpressionSyntax as c -> builtFromClock c.Expression
+        | :? PrefixUnaryExpressionSyntax as u when
+            u.IsKind SyntaxKind.UnaryMinusExpression
+            || u.IsKind SyntaxKind.BitwiseNotExpression
+            ->
+            builtFromClock u.Operand
+        | :? BinaryExpressionSyntax as b when
+            (match b.Kind() with
+             | SyntaxKind.AddExpression
+             | SyntaxKind.SubtractExpression
+             | SyntaxKind.MultiplyExpression
+             | SyntaxKind.DivideExpression
+             | SyntaxKind.ModuloExpression
+             | SyntaxKind.ExclusiveOrExpression
+             | SyntaxKind.BitwiseAndExpression
+             | SyntaxKind.BitwiseOrExpression
+             | SyntaxKind.LeftShiftExpression
+             | SyntaxKind.RightShiftExpression -> true
+             | _ -> false)
+            ->
+            builtFromClock b.Left && builtFromClock b.Right
+        | _ ->
+            if clockRead e then
+                reads <- reads + 1
+                true
+            else
+                false
+
+    builtFromClock seed && reads > 0
+
 let private sharedRandom (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     let randomType = model.Compilation.GetTypeByMetadataName "System.Random"
 
@@ -156,19 +285,30 @@ let private sharedRandom (tree: SyntaxTree) (model: SemanticModel) : Suggestion 
         not (isNull randomType)
         && randomType.GetMembers("Shared") |> Seq.exists (fun m -> m :? IPropertySymbol)
 
-    if not sharedResolves then
+    if isNull randomType then
         []
     else
-        let isRandomCreation (e: ExpressionSyntax) =
+        // Some false: no seed. Some true: a seed that is the clock's.
+        let randomCreation (e: ExpressionSyntax) : bool option =
             match e with
-            | :? BaseObjectCreationExpressionSyntax as c when
-                (isNull c.ArgumentList || c.ArgumentList.Arguments.Count = 0)
-                && (isNull c.Initializer)
-                ->
-                match model.GetTypeInfo(c).Type with
-                | null -> false
-                | t -> SymbolEqualityComparer.Default.Equals(t, randomType)
-            | _ -> false
+            // a seed written across a directive is not replaced
+            | :? BaseObjectCreationExpressionSyntax as c when isNull c.Initializer && not (Text.crossesDirective c) ->
+                let seeded =
+                    if isNull c.ArgumentList || c.ArgumentList.Arguments.Count = 0 then
+                        Some false
+                    elif
+                        c.ArgumentList.Arguments.Count = 1
+                        && isNull c.ArgumentList.Arguments.[0].NameColon
+                        && isClockSeed model c.ArgumentList.Arguments.[0].Expression
+                    then
+                        Some true
+                    else
+                        None
+
+                match seeded, model.GetTypeInfo(c).Type with
+                | Some _, t when not (isNull t) && SymbolEqualityComparer.Default.Equals(t, randomType) -> seeded
+                | _ -> None
+            | _ -> None
 
         let spelling (position: int) =
             if Linq.resolvesBare model position "System" "Random" then
@@ -176,71 +316,81 @@ let private sharedRandom (tree: SyntaxTree) (model: SemanticModel) : Suggestion 
             else
                 "System.Random.Shared"
 
-        tree.GetRoot().DescendantNodes()
-        |> Seq.choose (fun node ->
-            match node with
-            // `new Random().Next(…)`
-            | :? MemberAccessExpressionSyntax as m when isRandomCreation m.Expression ->
+        // without `Random.Shared` (before .NET 6) an unseeded Random has nothing
+        // better to become, and a clock-seeded one is still a defect to name
+        let finding (creation: ExpressionSyntax) (clockSeeded: bool) : Suggestion option =
+            if sharedResolves then
                 Some
                     {
                         Code = SharedRandomCode
-                        Message = "A Random per call is Random.Shared: no allocation, no seeding, thread-safe"
-                        Span = m.Expression.Span
+                        Message =
+                            if clockSeeded then
+                                "A Random seeded from the clock or a thread id is seeded no better than Random.Shared, and two created in the same tick repeat each other: Random.Shared — no allocation, thread-safe"
+                            else
+                                "A Random per call is Random.Shared: no allocation, no seeding, thread-safe"
+                        Span = creation.Span
                         Fixes =
                             [
                                 Suggestion.fix
                                     "Use Random.Shared"
                                     SharedRandomCode
-                                    [ Suggestion.replace m.Expression.Span (spelling m.SpanStart) ]
+                                    [ Suggestion.replace creation.Span (spelling creation.SpanStart) ]
                             ]
                     }
+            elif clockSeeded then
+                Some(
+                    Suggestion.note
+                        SharedRandomCode
+                        "A Random seeded from the clock or a thread id: two created in the same tick produce the same sequence — create one and share it (under a lock: Random is not thread-safe)"
+                        creation.Span
+                )
+            else
+                None
+
+        tree.GetRoot().DescendantNodes()
+        |> Seq.choose (fun node ->
+            match node with
+            // `new Random().Next(…)`
+            | :? MemberAccessExpressionSyntax as m ->
+                match randomCreation m.Expression with
+                | Some clockSeeded -> finding m.Expression clockSeeded
+                | None -> None
             // `var r = new Random();` used only as a call receiver
             | :? LocalDeclarationStatementSyntax as d when
                 d.Declaration.Variables.Count = 1
                 && not (isNull d.Declaration.Variables.[0].Initializer)
-                && isRandomCreation d.Declaration.Variables.[0].Initializer.Value
                 ->
                 let v = d.Declaration.Variables.[0]
-                let symbol = model.GetDeclaredSymbol v
 
-                let uses =
-                    (Text.enclosingMember d).DescendantNodes()
-                    |> Seq.choose (fun n ->
-                        match n with
-                        | :? IdentifierNameSyntax as id when
-                            id.Identifier.ValueText = v.Identifier.ValueText
-                            && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol)
-                            ->
-                            Some id
-                        | _ -> None)
-                    |> List.ofSeq
+                match randomCreation v.Initializer.Value with
+                | None -> None
+                | Some clockSeeded ->
+                    let symbol = model.GetDeclaredSymbol v
 
-                let onlyCalls =
-                    uses
-                    |> List.forall (fun id ->
-                        match id.Parent with
-                        | :? MemberAccessExpressionSyntax as m when obj.ReferenceEquals(m.Expression, id) ->
-                            m.Parent :? InvocationExpressionSyntax
-                        | _ -> false)
+                    let uses =
+                        (Text.enclosingMember d).DescendantNodes()
+                        |> Seq.choose (fun n ->
+                            match n with
+                            | :? IdentifierNameSyntax as id when
+                                id.Identifier.ValueText = v.Identifier.ValueText
+                                && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol)
+                                ->
+                                Some id
+                            | _ -> None)
+                        |> List.ofSeq
 
-                if onlyCalls && not uses.IsEmpty then
-                    let init = v.Initializer.Value
+                    let onlyCalls =
+                        uses
+                        |> List.forall (fun id ->
+                            match id.Parent with
+                            | :? MemberAccessExpressionSyntax as m when obj.ReferenceEquals(m.Expression, id) ->
+                                m.Parent :? InvocationExpressionSyntax
+                            | _ -> false)
 
-                    Some
-                        {
-                            Code = SharedRandomCode
-                            Message = "A Random per call is Random.Shared: no allocation, no seeding, thread-safe"
-                            Span = init.Span
-                            Fixes =
-                                [
-                                    Suggestion.fix
-                                        "Use Random.Shared"
-                                        SharedRandomCode
-                                        [ Suggestion.replace init.Span (spelling init.SpanStart) ]
-                                ]
-                        }
-                else
-                    None
+                    if onlyCalls && not uses.IsEmpty then
+                        finding v.Initializer.Value clockSeeded
+                    else
+                        None
             | _ -> None)
         |> List.ofSeq
 

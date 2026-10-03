@@ -168,24 +168,46 @@ module RuleContext =
     let private hostSkipped =
         System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, System.Runtime.CompilerServices.StrongBox<int>>()
 
-    /// Sets the trees aside for the duration of `run`.
-    let skippingTrees (trees: SyntaxTree seq) (run: unit -> 'a) : 'a =
-        let trees = Array.ofSeq trees
-
+    let private setAside (trees: SyntaxTree[]) =
         lock hostSkipped (fun () ->
             for tree in trees do
                 let count = hostSkipped.GetOrCreateValue tree
                 count.Value <- count.Value + 1)
 
+    let private bringBack (trees: SyntaxTree[]) =
+        lock hostSkipped (fun () ->
+            for tree in trees do
+                match hostSkipped.TryGetValue tree with
+                | true, count when count.Value > 1 -> count.Value <- count.Value - 1
+                | true, _ -> hostSkipped.Remove tree |> ignore
+                | _ -> ())
+
+    /// Sets the trees aside for the duration of `run`.
+    let skippingTrees (trees: SyntaxTree seq) (run: unit -> 'a) : 'a =
+        let trees = Array.ofSeq trees
+        setAside trees
+
         try
             run ()
         finally
-            lock hostSkipped (fun () ->
-                for tree in trees do
-                    match hostSkipped.TryGetValue tree with
-                    | true, count when count.Value > 1 -> count.Value <- count.Value - 1
-                    | true, _ -> hostSkipped.Remove tree |> ignore
-                    | _ -> ())
+            bringBack trees
+
+    /// Sets the trees aside until the task `run` starts has ended — completed,
+    /// faulted or cancelled alike, and also where `run` throws before it
+    /// returns a task: every count taken is given back exactly once.
+    let skippingTreesAsync
+        (trees: SyntaxTree seq)
+        (run: unit -> System.Threading.Tasks.Task<'a>)
+        : System.Threading.Tasks.Task<'a> =
+        let trees = Array.ofSeq trees
+        setAside trees
+
+        task {
+            try
+                return! run ()
+            finally
+                bringBack trees
+        }
 
     /// Whether a host run set this tree aside.
     let skippedByHost (tree: SyntaxTree) =

@@ -207,7 +207,10 @@ let rules: Rule list =
         |> priority
         rule "CR0123" Category.Correctness "a literal in a provider's key format"
         |> priority
-        rule "CR0124" Category.Correctness "a credential in a constant connection string"
+        rule
+            "CR0124"
+            Category.Correctness
+            "a credential written in source: a connection string's, or a literal given to a password or key"
         rule "CR0125" Category.Correctness "a broken hash, cipher, certificate check or protocol"
         |> priority
         |> yields [ "CA5350"; "CA5351"; "CA5359"; "CA5364"; "CA5386"; "CA5397" ]
@@ -302,6 +305,19 @@ let rules: Rule list =
             Category.Correctness
             "a call omitting the CancellationToken in scope, where the callee takes one, passes it"
         |> yields [ "CA2016" ]
+        rule "CR0190" Category.Correctness "a date format specifier is the wrong one of a look-alike pair"
+        |> priority
+        rule "CR0191" Category.Correctness "a date is put together from parts of two instants"
+        |> priority
+        rule "CR0192" Category.Correctness "two comparisons of one chain make it always true or always false"
+        |> priority
+        rule "CR0193" Category.Correctness "the Value of a nullable is read where it was tested empty"
+        |> priority
+        rule "CR0194" Category.Correctness "the result of a call on an immutable collection or string is dropped"
+        |> priority
+        rule "CR0195" Category.Correctness "an assignment stands where a condition compares"
+        rule "CR0196" Category.Correctness "a value that is never null is compared with null"
+        rule "CR0197" Category.Correctness "a catch around a blocking wait never sees the task's exception"
     ]
 
 let private byCode = rules |> List.map (fun r -> r.Code, r) |> Map.ofList
@@ -327,6 +343,12 @@ let isDefaultOn (code: string) =
     |> Option.defaultValue true
 
 let known = byCode |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+
+/// The rules whose finding IS a secret: a report shows where it stands,
+/// never the text it spans — a report is copied further than the source.
+let private secretSpans = set [ "CR0123"; "CR0124" ]
+
+let hidesSource (code: string) = secretSpans.Contains code
 
 /// The catalog's one-line description of a rule.
 let describe (code: string) =

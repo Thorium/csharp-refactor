@@ -38,7 +38,7 @@ a section, and its category and default state match the code.
 | CR0028 | Idiom | | | | | `var r = new List<T>(); foreach (var x in xs) if (p(x)) r.Add(f(x));` then only read | `var r = xs.Where(p).Select(f).ToList();` |
 | CR0029 | Idiom | v | | | | `xs.Select(x => x.A).Select(a => a.B)`, `xs.Select(x => x)` | `xs.Select(x => x.A.B)`, `xs` |
 | CR0030 | Correctness | v | | | CA1851 | an `IEnumerable<T>` parameter enumerated twice on one path | note: a query or generator runs twice |
-| CR0031 | Performance | v | | | | `new Random().Next(…)`, `var r = new Random();` used for calls | `Random.Shared` |
+| CR0031 | Performance | v | | | | `new Random().Next(…)`, `var r = new Random();` used for calls; `new Random(DateTime.Now.Millisecond)`, `new Random(Environment.TickCount)` — a seed read off the clock | `Random.Shared` |
 | CR0032 | Performance | v | | | | `foreach (var k in d.Keys) use(k, d[k])` | `foreach (var (k, v) in d) use(k, v)` |
 | CR0033 | Performance | v | | | | `sb.Append(a + b + c)` | `sb.Append(a).Append(b).Append(c)` |
 | CR0034 | Correctness | v | | v | | `foreach (var c in customers) foreach (var o in db.Orders.Where(o => o.CustomerId == c.Id))` | note: N+1 |
@@ -85,7 +85,7 @@ a section, and its category and default state match the code.
 | CR0102 | Performance | v | | | | `$"{x.ToString()} items"`, `string.Join(", ", xs.Select(x => x.ToString()))` | `$"{x} items"`, `string.Join(", ", xs)` |
 | CR0103 | Cosmetic | v | | | | `$"no holes"` | `"no holes"` |
 | CR0104 | Idiom | v | | | | `x == null || x == ""`, `x is null || x.Length == 0`, `x == null || x.Trim() == ""` | `string.IsNullOrEmpty(x)`, `string.IsNullOrWhiteSpace(x)` |
-| CR0105 | Correctness | v | | | CA1305 | `double.Parse(s)`, `DateTime.Parse(s)` without a provider | editor: `CultureInfo.InvariantCulture` (primary) / `CurrentCulture`; CLI under `invariant` |
+| CR0105 | Correctness | v | | | CA1305 | `double.Parse(s)`, `DateTime.Parse(s)`, `Convert.ToDecimal(s)` without a provider | editor: `CultureInfo.InvariantCulture` (primary) / `CurrentCulture`; CLI under `invariant` |
 | CR0106 | Correctness | v | | | | `DateTime.Now` as an instant; `DateTime.Today`, `DateTime.Now.Date` (notes) | `DateTime.UtcNow` under `utc_now`; editor always |
 | CR0107 | Correctness | v | | v | | `new Regex("(unclosed")`, `Regex.IsMatch(s, "[")` | note: a guaranteed `ArgumentException` |
 | CR0108 | Performance | v | | | | `Regex.IsMatch(s, "^abc")`, `Regex.Replace(s, "abcd", "x")`, `Regex.Matches(s, "ab").Count`, `Regex.Split(s, ", ")` with a plain literal | `s.StartsWith("abc", StringComparison.Ordinal)`, `s.Contains("abc")`, `s.Replace("abcd", "x")`, `s.AsSpan().Count("ab")` (.NET 8), `s.Split(", ")` |
@@ -100,7 +100,7 @@ a section, and its category and default state match the code.
 | CR0121 | Correctness | v | | | | a SQL command whose text carries no parameter at all | note |
 | CR0122 | Correctness | v | | v | | `Process.Start("cmd", $"/c {input}")`, `psi.Arguments = "… " + input` | note: `ArgumentList` |
 | CR0123 | Correctness | v | | v | | a literal matching a provider's documented key format (`sk-ant-`, `sk-`, `AIza`, `ghp_`, `AKIA`, `xoxb-`, PEM headers) | note |
-| CR0124 | Correctness | v | | | | a credential in a `const` connection string on a non-loopback server | note |
+| CR0124 | Correctness | v | | | | a credential in a `const` connection string on a non-loopback server; a literal given to a parameter, field, property or local named as a credential (`password`, `clientSecret`, `apiKey`) | note |
 | CR0125 | Correctness | v | | v | CA5350, CA5351, CA5359, CA5364, CA5386, CA5397 | `MD5.Create()`, `SHA1`, `DES`, `TripleDES`, `RC2`; `ServerCertificateCustomValidationCallback = (…) => true`; `SecurityProtocolType.Tls11`/`Ssl3` | note; editor: SHA-256 |
 | CR0126 | Idiom | v | | | SYSLIB0021 | `new SHA256Managed()`, `new RNGCryptoServiceProvider()` | `SHA256.Create()`, `RandomNumberGenerator.Create()` |
 | CR0140 | Cosmetic | v | | | | `[SerializableAttribute]` | `[Serializable]` |
@@ -126,7 +126,7 @@ a section, and its category and default state match the code.
 | CR0161 | Correctness | v | | v | | `_readonlyCounter.Bump();`, `Prop.Bump();`, `list[0].Bump();`, a `foreach` variable or an `in` parameter — a mutating struct method on a receiver the compiler copies first | note: the call changes the copy, the original stays |
 | CR0162 | Correctness | v | | v | | `new Timer(cb, null, 0, 1000);` as a statement, or a local timer that never leaves the method | note: nothing references the timer once the method returns, the collector takes it and its callbacks stop |
 | CR0163 | Correctness | v | | v | | `await _gate.WaitAsync(); … _gate.Release();` (`Semaphore`/`Mutex.WaitOne`, `ReaderWriterLockSlim.Enter*Lock`) with statements between them and no `try` | `try { … } finally { _gate.Release(); }` |
-| CR0164 | Correctness | v | | | | `if (_cache == null) _cache = new X(); return _cache;`, `_cache ??= new X()` on a `static` reference-typed field outside a `lock` | `return LazyInitializer.EnsureInitialized(ref _cache, () => new X());`; a factory that may answer null: `Interlocked.CompareExchange(ref _cache, Load(), null)` |
+| CR0164 | Correctness | v | | | | `if (_cache == null) _cache = new X(); return _cache;`, `_cache ??= new X()`, `_cache ?? (_cache = new X())` on a `static` reference-typed field outside a `lock` | `return LazyInitializer.EnsureInitialized(ref _cache, () => new X());`; a factory that may answer null: `Interlocked.CompareExchange(ref _cache, Load(), null)` |
 | CR0165 | Correctness | v | | v | CA2200 | `catch (Exception ex) { throw new SyncException("failed"); }` — the wrapper has a `(…, Exception)` constructor and the caught exception is dropped | `throw new SyncException("failed", ex);` (an unnamed catch gains `ex`) |
 | CR0166 | Performance | v | | | | `try { v = int.Parse(s); } catch (FormatException) { v = -1; }`, `try { return int.Parse(s); } catch { return 0; }` | `if (!int.TryParse(s, out v)) { v = -1; }`, `return int.TryParse(s, out var parsed) ? parsed : 0;` |
 | CR0167 | Correctness | v | | | | `a == b`, `a != b` on `float`/`double`/`Half` operands, neither a literal, a constant or a rounded value | note: compare against a tolerance |
@@ -152,6 +152,14 @@ a section, and its category and default state match the code.
 | CR0187 | Correctness | v | | | CA2200 | `catch (Exception ex) { Log(ex); throw ex; }` | `catch (Exception ex) { Log(ex); throw; }` |
 | CR0188 | Performance | v | | | CA1862 | `s.ToLower() == "abc"`, `s.ToUpperInvariant().StartsWith("ID-")` | `s.Equals("abc", StringComparison.OrdinalIgnoreCase)`, `s.StartsWith("ID-", StringComparison.OrdinalIgnoreCase)` |
 | CR0189 | Correctness | v | | | CA2016 | `async Task Load(int id, CancellationToken ct) { await repo.GetAsync(id); }` | `await repo.GetAsync(id, ct);` (`ct: ct` past a skipped optional parameter) |
+| CR0190 | Correctness | v | | v | | `d.ToString("yyyyMMddhhmmss")`, `d.ToString("yyyy-mm-dd")`, `$"{d:HH:MM}"` — a 12-hour `hh` without AM/PM, minutes where the month belongs, the month where the minutes belong | `d.ToString("yyyyMMddHHmmss")`, `d.ToString("yyyy-MM-dd")`, `$"{d:HH:mm}"`; at a `ParseExact` format the editor offers it |
+| CR0191 | Correctness | v | | v | | `new DateTime(now.Year, now.AddMonths(-1).Month, 25)` — the year of one instant, the month of the same instant shifted | `new DateTime(now.AddMonths(-1).Year, now.AddMonths(-1).Month, 25)`; a note where the receiver runs a call, and for a day read from the shifted instant |
+| CR0192 | Correctness | v | | v | | `x != 1 || x != 2`, `s == "a" && s == "b"`, `x > lo && x < lo` | note: always true / always false; the editor offers `&&` for `||` (and the reverse) on the constant shapes |
+| CR0193 | Correctness | v | | v | | `if (!x.HasValue) { return x.Value; }`, `if (x.HasValue) { … } else { Use(x.Value); }`, `x == null ? x.Value : d` | note: the read throws every time the branch runs |
+| CR0194 | Correctness | v | | v | | `list.Add(x);` on an `ImmutableList<T>`, `_ = set.Remove(x);`, `s.Trim();` | note: the result is dropped and nothing changes; the editor offers `list = list.Add(x);` |
+| CR0195 | Correctness | v | | | | `if (done = false)`, `if (a = b)`, `c && (a = b)`, `where ex = true` — an assignment standing as a condition | `if (done == false)` (the editor also offers `if (!done)`), `if (a == b)`; a note for an assignment that runs something (`if (found = map.TryGetValue(k, out v))`) |
+| CR0196 | Correctness | v | | | | `if (d == null) return;`, `d != null ? a : b`, `d == null || p` on a `DateTime`, `decimal`, `Guid`, `int`, an enum — never null | the dead test goes: the statement removed or its live branch kept, `a`, `p`; a note elsewhere |
+| CR0197 | Correctness | v | | | | `try { t.Wait(); } catch (IOException) { … }` — the task's exception arrives wrapped in an `AggregateException` | note; the editor offers `catch (AggregateException ae) when (ae.InnerException is IOException)`, the same on `GetBaseException()`, or the removal of a clause nothing reaches |
 
 \*) Enabled by default. A blank cell means the rule is off until
 `.editorconfig` turns it on (`dotnet_diagnostic.CRxxxx.severity = suggestion`)
@@ -476,11 +484,26 @@ CA1851.
 `new Random()` per call is `Random.Shared` (.NET 6+): no allocation, no
 seeding, thread-safe. `new Random().Next(10)` becomes
 `Random.Shared.Next(10)`; `var r = new Random();` whose every use is a
-call receiver becomes `var r = Random.Shared;`. Guards: parameterless (a
-seed is a decision) and no initializer; the type exactly `System.Random`;
-an instance stored in a field, returned or passed is the author's;
-`Random.Shared` resolves in the compilation; the bare name is spelled
-where `System` is imported, else qualified.
+call receiver becomes `var r = Random.Shared;`. A seed read off the clock
+is no seed anyone chose, and two generators created in the same tick
+repeat each other: `new Random(DateTime.Now.Millisecond)`, `new
+Random((int)DateTime.Now.Ticks)`, `new Random(Environment.TickCount)`,
+`new Random(Guid.NewGuid().GetHashCode())`, `new
+Random(DateTime.Now.Second + DateTime.Now.Millisecond +
+Thread.CurrentThread.ManagedThreadId)` get the same fix. Guards:
+parameterless, or one seed built only from `DateTime`/`DateTimeOffset`
+`.Now`/`.UtcNow`, `Environment.TickCount`, a thread or process id,
+`Stopwatch.GetTimestamp()` or `Guid.NewGuid()` — through their
+fine-grained members (`.Ticks`, `.Millisecond`, `.Second`,
+`.GetHashCode()`…) and literals, casts, arithmetic and `unchecked` over
+those; any other operand (a parameter, a field), a constant alone (`new
+Random(42)`) or a coarse part of the clock (`.Hour`, `.DayOfYear`,
+`DateTime.Today`: a seed that holds for a while) is a decision and
+quiet; no initializer; the type exactly `System.Random`; an instance
+stored in a field, returned or passed is the author's; the bare name is
+spelled where `System` is imported, else qualified. Where the framework
+has no `Random.Shared` (before .NET 6) the unseeded form is quiet and
+the clock-seeded one a note without a fix.
 
 ### CR0032 — performance
 
@@ -1292,7 +1315,11 @@ true`, culture being a decision. Guards: `Parse`/`TryParse` on
 `double`/`float`/`decimal`/`DateTime`/`DateTimeOffset`/`TimeSpan` (integer
 parses stay quiet), bound to an overload without an `IFormatProvider`;
 only the one-argument `Parse` gains the provider — a `TryParse` needs a
-styles argument the rule will not guess and stays a note; `CultureInfo`
+styles argument the rule will not guess and stays a note;
+`Convert.ToDecimal`/`ToDouble`/`ToSingle`/`ToDateTime` with one argument
+typed `string` (the overload bound is the `string` one — a number or an
+`object` argument is another conversion, and a call already passing a
+provider is done) gains the provider the same way; `CultureInfo`
 is spelled short under an existing `using System.Globalization` and fully
 qualified otherwise; inside an expression tree the whole suggestion
 stands down (a LINQ provider resolves `Parse` by signature, and the
@@ -1803,6 +1830,33 @@ Loopback servers (`localhost`, `127.0.0.1`, `::1`, `(local)`,
 `changeme`, `secret`, `<…>`, `{…}`, `%…%`, `$(…)`, `${…}`) are never
 reported. F# twin: FR0153.
 
+Also a string literal, regular or verbatim (or an interpolated string
+with no hole), handed to something whose
+name says it is a credential: a parameter (`Login("admin", "…")` where
+the parameter is `password`), a named argument, a field, property or
+local it initialises or is assigned to, a member of an object
+initializer, an attribute's or an anonymous object's named member. The
+name ENDS in `password`, `passwd`, `pwd`, `secret`, `apikey`/`api_key`,
+`token` or `credential(s)`, in any casing, digits after it or not —
+`servicePassword`, `clientSecret`, `ApiKey`; a name that goes on
+(`passwordHint`, `tokenEndpoint`, `secretName`, `apiKeyHeader`) names
+something about a credential. The message names the sink and never shows
+the literal. Quiet there: a test file; a text shorter than six
+characters, empty, a placeholder or a sample (the lists above and
+CR0123's, one character repeated, `***`); a text that is itself a name —
+the sink's own, a setting's key (`"Password"`, `"Jwt:Secret"`,
+`"X-Api-Key"`: letters and name punctuation holding a credential word),
+a scheme word (`Bearer`, `Basic`); prose and formats (a space, a
+trailing colon, `{0}`); a URL; for a name ending in `token`, a text
+without a digit or under eight characters (a lexer's token is a word).
+`nameof(…)` and an indexer or `GetSection("…")` key are not such sinks;
+neither is an attribute's positional argument or a member named for
+something else (`[JsonPropertyName("token")]`, `[Display(Name =
+"Password")]`, `ErrorMessage = "Password is required"`, a logging
+template). A concatenation and a literal under `?:` are not read. The
+tool's reports (SARIF, the snippet of a finding) mask the text of a
+CR0123 or CR0124 finding: they show where it stands, not what it says.
+
 ### CR0125 — correctness
 
 `MD5.Create()`, `SHA1.Create()`, `new MD5CryptoServiceProvider()`, `DES`,
@@ -2184,8 +2238,10 @@ them (re-indenting would change it — a note).
 
 ### CR0164 — correctness
 
-`if (_cache == null) _cache = new X();` (also `is null`, and `_cache ??=
-new X()`) on a `static` field of a reference type outside any `lock`:
+`if (_cache == null) _cache = new X();` (also `is null`, `_cache ??=
+new X()`, and the older `_cache ?? (_cache = new X())` as a value
+anywhere in an expression) on a `static` field of a reference type
+outside any `lock`:
 two threads build two values, and on a weak memory model a reader may
 see the reference before the object behind it is complete.
 `LazyInitializer.EnsureInitialized(ref _cache, () => new X())` publishes
@@ -2205,7 +2261,11 @@ the field null and the next call loads again, as the original did. A
 Interlocked.CompareExchange(ref _x, Load(), null);` (only directly in a
 block, where the new `if` cannot capture an `else`), and a `??=` whose
 value is used becomes `_x ?? Interlocked.CompareExchange(ref _x, Load(),
-null) ?? _x`. The expression does not mention the field; not inside a
+null) ?? _x`; `_x ?? (_x = expr)` becomes the `EnsureInitialized` call
+or that same exchange, by the same test, and is left alone where the
+expression holds an `await`. Under a race the factory may still run on
+two threads, as it could before; one result is published and the other
+dropped (not disposed, if it is disposable). The expression does not mention the field; not inside a
 `lock` or a static constructor (both already serialise);
 `System.Threading.LazyInitializer` resolves (the `using System.Threading;`
 is added). Instance fields are not reported: a per-instance cache is usually
@@ -2924,3 +2984,301 @@ a list is fire-and-forget: work meant to outlive the caller, which the
 caller's token would cancel when the caller is done. A loop body under `while
 (!ct.IsCancellationRequested)` gets the token: it runs while the token is
 live.
+
+### CR0190 — correctness
+
+A literal custom format on `DateTime`, `DateTimeOffset`, `DateOnly` or
+`TimeOnly` written with the wrong specifier of a look-alike pair. The
+format is read as runs of one letter (`yyyy`, `MM`, a lone `T`), escaped
+characters (`\x`) and quoted sections (`'…'`, `"…"`) skipped as the
+formatter skips them; "beside" is the nearest run on either side with
+nothing but separator characters between — an escaped character or a
+quoted section between two runs parts them (`"yyyy'-'mm'-'dd"` is left
+alone). Three shapes:
+
+- `hh`/`h` in a format with no `t` run: a 12-hour clock without its AM/PM
+  designator gives 14:05 and 02:05 the same text. `"yyyyMMddhhmmss"`
+  becomes `"yyyyMMddHHmmss"`.
+- `mm`/`m` beside a `y` or `d` run and beside no `h`/`H`/`s` run: the
+  minutes where the month belongs. `"yyyymmdd"`, `"yyyy-mm-dd"`,
+  `"dd/mm/yyyy"` become `"yyyyMMdd"`, `"yyyy-MM-dd"`, `"dd/MM/yyyy"`.
+- `MM`/`M` after an `h`/`H` run or before an `s` run, beside no `y`/`d`
+  run: the month where the minutes belong. `"HH:MM"`, `"HH:MM:ss"`,
+  `"yyyyMMddHHMMss"` become `"HH:mm"`, `"HH:mm:ss"`, `"yyyyMMddHHmmss"`;
+  `MMM` and longer are month names and stay.
+
+A run of the other letter in its rightful place vouches for the one in
+doubt: the minutes are rewritten only when every `M` run of the format is
+itself a month among the time parts (or there is none), and the month
+only when every `m` run is itself minutes among the date parts. So the
+swapped pair `"yyyy-mm-dd HH:MM"` becomes `"yyyy-MM-dd HH:mm"`, and
+`"yyyy-MM-dd mm"` is left alone.
+
+The month and minute repairs have no other reading and a sweep applies
+them. The 12-hour repair is a sweep's only where the format proves itself
+a whole timestamp: it holds a date part (a `y`, `M` or `d` run), no other
+text of the file renders the designator — a literal or interpolated text
+holding AM/PM (`am`, `p.m.`, any casing, as a word) or a date format with
+a `t` run, as in `d.ToString("hh:mm") + " " + d.ToString("tt")` — and no
+`ParseExact`/`TryParseExact` of the file reads an `h` format (a writer
+moved to `HH` would no longer match its reader). Otherwise the finding
+stays and the repair is the editor's; a format holding both kinds then
+carries the month and minute repair for the sweep and the whole one as an
+editor offer.
+
+One format can hold several; the finding is one per literal, and the fix
+rewrites the letters inside the literal and nothing else, so a regular,
+verbatim or raw literal keeps its quoting. Read at
+`.ToString(format)` and `.ToString(format, provider)`, in an interpolation
+hole's format clause (`$"{d:yyyymmdd}"`), and at the format argument of
+`ParseExact`/`TryParseExact` — a literal, or the literals of an array
+written in place. At a parse the fix is an editor offer a sweep never
+applies: what a parser accepts is the author's call. Guards: the receiver,
+the hole or the parse's owner is one of the four types by symbol
+(`TimeSpan`, whose only hour specifier is `hh`, never matches; a
+`DateTime?` reached through `?.` or a hole does); a one-character format
+is a standard format; a format holding `%` or an unclosed quote is left
+alone; so is a literal whose source between the quotes is not its value
+(a C# escape such as `"yyyy\\-mm"`, a doubled quote), where a position in
+the format is not a position in the source; an `h` run touching an `H`
+run stays (the rewritten letters would join it); an interpolated string
+is read only where it is a `string` (a `FormattableString` or a handler
+may format by other rules); nothing inside an expression tree; nothing in
+a test file, whose formats are the text the test pins. F# twin: FR0175.
+
+### CR0191 — correctness
+
+`new DateTime(now.Year, now.AddMonths(-1).Month, 25)` reads the year from
+one instant and the month from the same instant shifted. Across a year
+boundary the two disagree: in January that is 25 December of the wrong
+year. The fix reads the year from the shifted instant too — `new
+DateTime(now.AddMonths(-1).Year, now.AddMonths(-1).Month, 25)` — which
+changes the date at a year boundary only, where it was wrong; a day
+argument stays as written. The reverse, `new DateTime(now.AddMonths(1).Year,
+now.Month, 1)`, is as wrong in December, but moving the month to the
+shifted instant changes every date and moving the year back changes none
+but December's: which instant was meant is the author's to say, so there
+the rewrite is an editor offer and a sweep leaves it. Guards: a `DateTime`, `DateTimeOffset` or `DateOnly` constructed
+through `(year, month, day, …)` (`new(…)` included) with the three passed
+by position; the year argument is `X.Year` and the month `Y.Month` on
+those types, and one receiver is the other with a single
+`AddMonths(k)`/`AddDays(k)`/`AddYears(k)` appended (compared as written,
+whitespace and outer parentheses aside). The fix needs a receiver that is
+a chain of locals, parameters, fields and properties (`now`,
+`DateTime.UtcNow`) and an amount that is a literal or a name, negated or
+not; a receiver or an amount that runs a call is a note, and a receiver
+that changes when read (`xs[i++]`, an assignment, an `await`) is not one
+instant written twice and is quiet. `AddYears` keeps
+the month, so `new DateTime(now.AddYears(1).Year, now.Month, 1)` is one
+instant and quiet, and `new DateTime(now.Year, now.AddYears(1).Month, 1)`
+— the shift is lost — is a note. Also a note: a day read from the instant
+shifted against the one the year and the month share (`new
+DateTime(now.Year, now.Month, now.AddDays(1).Day)`): the day can belong to
+another month, or not exist in this one. F# twin: FR0176.
+
+### CR0192 — correctness
+
+Two comparisons that settle the chain they stand in:
+
+- `x != A || x != B` with two different constants is always true — no
+  value equals both, so one side always holds. `&&` was almost certainly
+  meant.
+- `x == A && x == B` with two different constants is always false. `||`
+  was almost certainly meant.
+- `x > e && x < e`, `e < x && e >= x`: the same two expressions ordered
+  both ways, at least one comparison strict, is always false. `x >= e &&
+  x <= e` is an equality and quiet.
+
+A note. For the two constant shapes the editor offers the other operator
+where the chain is the two comparisons and nothing else — in a longer
+chain one swapped operator regroups the rest — and a sweep never applies
+it: which of the test and the operator is wrong is the author's to say.
+Guards: the two comparisons are direct operands of one `||` (or `&&`)
+chain, other operands between them or not; the constants are the semantic
+model's, compared by value — a literal, a `const`, an enum member and
+`null` count, two names of one value (`One` and `1`, two enum members of
+one value) are not different, and constants of different types (`1` and
+`1.0`, `'a'` and `97`) are not compared at all; `x != null || x != 0` on
+a nullable is reported (always true); the operator is the language's own
+or one a type of `System` declares (`string`, `decimal`, `DateTime`) — a
+user-defined operator may answer anything; the compared expression is
+written alike on both sides (whitespace and outer parentheses aside) and
+holds no call, `await`, assignment, `++`/`--` or construction, which
+would make the two reads two values. `x != x` (the NaN test) is not this
+shape. Runs inside expression trees: a note changes nothing a translator
+sees. F# twin: FR0177.
+
+### CR0193 — correctness
+
+`.Value` of a `Nullable<T>` read in the branch its own test proved empty:
+the `else` of `if (x.HasValue)`, the body of `if (!x.HasValue)`, `if (x ==
+null)` or `if (x is null)`, and the matching arm of a conditional
+expression (`x.HasValue ? a : f(x.Value)`, `x == null ? x.Value : b`).
+The read throws `InvalidOperationException` every time the branch runs:
+the test is inverted, or the read belongs to the other branch. A note.
+Guards: the condition is the bare test, parenthesised or negated, never
+one joined to another by `&&`/`||`; the tested expression is a
+`Nullable<T>` by type and a chain of locals, parameters, fields and
+properties, and the read is written alike; nothing in the branch assigns
+it (or a receiver it is read through), passes it by `ref`/`out`/`in`,
+takes a `ref` of it or steps it; a read inside a lambda or local function
+of the branch runs later and is not counted, nor is one in `nameof`; a
+local that a closure of the member writes, or that a `ref` is taken of
+anywhere in the member, is left alone; for a field or
+property, no call, construction or `await` completes before the read or
+shares a loop with it — `if (!_cache.HasValue) { Load(); return
+_cache.Value; }` fills the value first. Where nullable analysis is on the
+compiler reports these reads as CS8629; the rule reports them with it
+off, and names the cause. F# twin: FR0178.
+
+### CR0194 — correctness
+
+A statement that calls a method of an immutable collection and drops
+what it returns: `list.Add(x);` on an `ImmutableList<T>` changes nothing —
+the collection is immutable, the call returns the new one and the
+statement throws it away. A note; assign the result. Decided by the
+method, not by a list of names: an instance method declared on a type of
+`System.Collections.Immutable` (`ImmutableList<T>`, `ImmutableArray<T>`,
+`ImmutableDictionary<K,V>`, the sets, stack and queue, the `IImmutable…`
+interfaces) whose return type is such a type too — `Add`, `AddRange`,
+`Remove`, `SetItem`, `Insert`, `Clear`, `Push`, `Enqueue`, `Union`,
+`Sort`, `WithComparer` and the rest. The nested builders and enumerators
+are not such types: a `Builder` changes in place. `_ = list.Add(x);`
+reports as well — the discard spells the same loss out — and so does
+`list?.Add(x);`. A call passing `out` or `ref` (`stack.Pop(out var top)`)
+has another result and is quiet; a chain whose last result is assigned,
+returned or passed on is no statement and never matches.
+
+The same for a `string`: a statement calling an instance method of
+`string` that returns a `string` (`s.Trim();`, `s.Replace("a", "b");`),
+`ToString` aside (`s.ToString();` builds nothing and is written to throw
+on null). There an explicit discard is taken as meant, and the shape is left to
+CA1806 under `csharp_refactor.skip_microsoft_duplicates = true` where
+that rule is on.
+
+The editor offers `x = x.Add(…);` where the receiver is a plain local
+(not `const`, `foreach`, `using`, `fixed` or `ref`) or a value parameter
+of a method, declared in the function the statement runs in (assigning a
+captured variable from a lambda changes what the outer code sees later),
+and the result converts to its type; a sweep never applies it. An
+extension or static call that returns an immutable collection
+(`xs.Select(f).ToImmutableList();`, `ImmutableInterlocked.Update(…)`) is
+not a persistent update and never matches. F# twin: FR0179.
+
+### CR0195 — correctness
+
+A simple assignment of type `bool` standing where a condition compares:
+the whole condition of `if`, `while`, `do`, `for`, a conditional `?:` or
+a query's `where`, an operand of `&&`/`||`/`!` in one, or the expression
+body of a lambda that takes a parameter and returns `bool`. Three shapes,
+by what is assigned:
+
+- `true` or `false` — `if (done = false)`, `where ex = true`. The
+  condition is constant and the variable overwritten; the compiler says
+  so as CS0665 and offers nothing. The fix writes the comparison, `if
+  (done == false)` (CR0011 shortens it where it is on); the editor also
+  offers the bare test, `if (!done)`, since `x == true` can be a spelling
+  someone means.
+- a plain variable — a chain of locals, parameters, fields and
+  properties: `if (a = b)`. The fix writes `if (a == b)`.
+- anything that runs — a call, an `await`, a construction, an operator:
+  `if (found = map.TryGetValue(k, out v))` is the assign-and-test idiom.
+  A note; the editor offers `==` (the right side parenthesised where it
+  binds looser).
+
+A sweep applies the comparison in a statement's condition and in `?:`.
+It is an editor offer, the finding staying, where the assignment may be
+the point: in a lambda or a query clause, which run per element
+(`xs.All(x => x.Done = true)` marks every element); for a variable
+assigned in a loop's condition, read anew on every pass as an
+assign-and-test is; and where the assignment is the first write of a
+local (`==` would read it unassigned). Guards: both sides are `bool`
+themselves, so `==` is the language's; an assignment under a comparison
+(`while ((line = r.ReadLine()) != null)`) is no condition; one pair of
+parentheses more than the place needs — `if ((a = b))`, `c && ((a = b))`
+— marks the assignment as meant and is quiet; a lambda returning nothing
+or taking nothing (`() => done = true`) is quiet. A `case … when a = b:`
+guard is a condition too. An assignment that is a value — `return a =
+b;`, an arm of `?:`, an initializer — is not this shape, nor is `&=`,
+`|=` or `??=`. The fix takes a write away, a property's setter with it:
+that write is the defect named. The literal shape is the compiler's
+CS0665, a warning without a fix, so nothing is yielded to it; where the
+author switched CS0665 off (`#pragma warning disable CS0665`, `NoWarn`)
+that shape is quiet. An assignment cannot stand in an expression tree
+(CS0832), so no translated query is touched.
+
+### CR0196 — correctness
+
+A value of a non-nullable struct or enum type — `DateTime`, `decimal`,
+`Guid`, `int`, a user struct with `==` — compared with `null`: always
+false for `==`, always true for `!=`. The compiler says so as CS0472 or
+CS8073 and offers nothing. Where "no value" is possible the type should
+be nullable (`decimal?`), and the dead test often marks exactly that;
+where it is not, the test and what only it guards are dead. The fix, for
+an operand that is a chain of locals, parameters, fields and properties:
+
+- `if (d == null) S` is removed, or replaced by its `else` body; `if (d
+  != null) S` becomes `S`, its `else` dropped. A kept block loses its
+  braces and moves one level out, unless it declares a name (a local, a
+  pattern variable, a local function), which keeps the braces.
+- `d == null ? a : b` becomes `b`, `d != null ? a : b` becomes `a`.
+- `d == null || p` and `d != null && p` become `p`.
+
+Anywhere else — `d == null && p`, a `return`, an argument, a loop's
+condition — it is a note. Guards: the comparison is the lifted one (an
+operator a type declares for the null itself may answer anything);
+`Nullable<T>`, a type parameter, a pointer and a ref struct are not this
+shape, nor is a member read through `?.` (`x?.When == null` is null when
+`x` is) or a boxed value (`(object)d == null`); other spellings of a null
+test on a struct (`is { }`, `d.Equals(null)`, `ReferenceEquals(d, null)`)
+are not read; where the author switched the compiler's warning off
+(`#pragma warning disable CS0472` or `CS8073`, `NoWarn`) the rule is
+quiet, and since those are compiler warnings without a fix nothing is
+yielded to them; the `if` is a statement of a block (not an `else if`, not a
+switch section's, not another statement's unbraced body), on lines of
+its own or whole on a line it shares (`{ if (d == null) return; }`); a kept
+statement that never completes (a `return`, a `throw`) with statements
+after it stays a note — they would become unreachable; a kept arm of a
+conditional must have the conditional's type by itself (`1` beside
+`2.0`, a `default`, a `null` or a `new()` typed by the other arm stay a
+note); a rewrite that would drop a comment is an editor offer, and one
+whose span holds a preprocessor directive is not offered at all (a
+statement inside one branch of an `#if` is rewritten, the directive
+staying); "make it nullable" is advice only, never an edit; lines that cannot be re-indented (a literal spanning lines)
+keep their braces; nothing is rewritten inside an expression tree.
+
+### CR0197 — correctness
+
+`try { t.Wait(); } catch (IOException) { … }` — a blocking wait
+(`Task.Wait()`, `Task<T>.Result`, `Task.WaitAll(…)`) throws the task's
+exception wrapped in an `AggregateException`, so a catch of the
+exception's own type sees only what the `try` throws itself, never the
+task's. A note; where a later general `catch (Exception)` receives the
+wrapper the note says so. The editor offers, in this order:
+
+1. a second clause after the first, with the same body: `catch
+   (AggregateException ae) when (ae.InnerException is IOException)` —
+   one level; a clause that names its exception binds it in the filter
+   (`is IOException e`), so the copied body reads the same;
+2. the same on `ae.GetBaseException()` — the deepest;
+3. where the `try` holds nothing but waits on plain variables, so no
+   statement of it throws the type itself: the removal of the clause,
+   and of the `try` when it was the only clause and there is no
+   `finally`.
+
+A sweep applies none. Guards: no clause of the `try` catches
+`AggregateException`; the clause's type is neither it nor a base of it;
+not a type the wait itself throws — `ObjectDisposedException`, the
+thread-interruption exceptions, and `OperationCanceledException` or an
+argument exception where a wait takes a token or a timeout; a wait under
+a nested `try` or inside a lambda or local function is another
+handler's; `Task.WaitAny` reports no task's failure and
+`GetAwaiter().GetResult()` throws it unwrapped — neither is this shape,
+and the latter is never offered: it hides the block. Inside an `async`
+function the rule is quiet: there CR0040 turns the wait into an `await`,
+which unwraps. The offers need exception filters (C# 6; C# 7 for a bound
+variable), a fresh name for the wrapper (`ae`, `ae2`…), and a clause
+without a filter of its own; a clause whose body rethrows with `throw;`
+gets no copied clause (the copy would rethrow the wrapper, not the
+exception the clause names); nothing is offered across a preprocessor
+directive. `ValueTask.Result` unwraps and is not read.

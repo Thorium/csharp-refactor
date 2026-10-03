@@ -2,6 +2,24 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.16
+
+- New CR0190: a date format with the wrong specifier is corrected: `mm` among date parts to `MM`, `MM` among time parts to `mm`, `hh` without AM/PM to `HH` (swept only in a timestamp whose file renders no designator and parses no `h` format, otherwise an editor offer); editor offer only at `ParseExact` (F# twin FR0175).
+- New CR0191: `new DateTime(now.Year, now.AddMonths(-1).Month, 25)` reads the year from the shifted instant too; the reverse mix is an editor offer, a day of another instant a note (F# twin FR0176).
+- CR0105 also covers `Convert.ToDecimal`/`ToDouble`/`ToSingle`/`ToDateTime` on a string (F# twin FR0067).
+- New CR0192 (note): `x != A || x != B` is always true, `x == A && x == B` and `x > e && x < e` always false; the editor offers the other operator (F# twin FR0177).
+- New CR0193 (note): `x.Value` read in the branch where the nullable was tested empty throws every time (F# twin FR0178).
+- New CR0194 (note): `list.Add(x);` on an immutable collection, or `s.Trim();`, drops the result and changes nothing; the editor offers the assignment (F# twin FR0179; the string shape yields to CA1806).
+- New CR0195: an assignment standing as a condition becomes the comparison: `if (done = false)`, `if (a = b)`; an editor offer in lambdas, query clauses and loop conditions, a note for an assign-and-test.
+- New CR0196: a `DateTime`, `decimal`, `Guid`, `int` or enum compared with `null` loses the dead test: the `if` removed or its live branch kept, `d != null ? a : b` to `a`, `d == null || p` to `p`.
+- New CR0197 (note): a specific `catch` around `Wait()`, `Result` or `Task.WaitAll` never sees the task's exception; the editor offers an `AggregateException` clause filtered on the inner exception, or the removal of an unreachable clause.
+- CR0031 also takes a clock-seeded `new Random(DateTime.Now.Millisecond)`, `new Random(Environment.TickCount)` and the like for `Random.Shared`; a note where the framework has none.
+- CR0124 also notes a literal given to a parameter, field, property or local named as a credential (`password`, `clientSecret`, `apiKey`, `token`).
+- CR0164 also reads the older `_cache ?? (_cache = new X())` on a static field.
+- CR0195 and CR0196 are quiet where the compiler's CS0665, CS0472 or CS8073 is switched off by `#pragma` or `NoWarn`.
+- Reports mask the source text of a CR0123 or CR0124 finding.
+- A cross-project reference search that failed once is tried again on the next ask instead of holding every later fix of that symbol for the rest of the run.
+
 ## 0.1.15
 
 - CR0064 stays quiet on a catch-all with a filter, on the exception or on state (`catch when (_stopping) { }` lets every failure surface while not stopping); only a constant `when (true)` is still noted (F# twin FR0055).

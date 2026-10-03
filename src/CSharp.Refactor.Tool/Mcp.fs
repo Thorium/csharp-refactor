@@ -138,9 +138,9 @@ let private handleAnalyze (args: JsonElement) =
                         "applied", box (not opts.DryRun)
                         "findingCount", box findings.Length
                         "findings", box (Reports.findingsPayload findings)
-                        "baselineSuppressed", box Sweep.baselineSuppressed
-                        "commentSuppressed", box Sweep.commentSuppressed
-                        "suppressionsOverridden", box Sweep.suppressionOverridden
+                        "baselineSuppressed", box (Sweep.baselineSuppressed ())
+                        "commentSuppressed", box (Sweep.commentSuppressed ())
+                        "suppressionsOverridden", box (Sweep.suppressionOverridden ())
                     ]
 
             Ok(JsonSerializer.Serialize body)

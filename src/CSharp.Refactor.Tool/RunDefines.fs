@@ -47,7 +47,8 @@ let current () = symbols
 
 /// `extra` after `existing`, leaving out what `existing` already names.
 let private appendMissing (existing: string list) (extra: string list) =
-    existing @ (extra |> List.filter (fun s -> not (List.contains s existing)))
+    let named = System.Collections.Generic.HashSet<string>(existing)
+    existing @ (extra |> List.filter (named.Contains >> not))
 
 /// The value of the `DefineConstants` environment variable a child MSBuild
 /// (and the MSBuildWorkspace build host) gets, or None when the run

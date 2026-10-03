@@ -349,11 +349,11 @@ type EndToEnd() =
         Assert.Contains("=> new Guid(b);", after)
         Assert.Contains("""=> "no holes here";""", after)
         Assert.Contains("""$"value {x}";""", after)
-        Assert.Equal(2, Sweep.runTotalApplied)
+        Assert.Equal(2, Sweep.runTotalApplied ())
 
         // idempotent
         Assert.Equal(0, run [| project |])
-        Assert.Equal(0, Sweep.runTotalApplied)
+        Assert.Equal(0, Sweep.runTotalApplied ())
 
     [<Fact>]
     member _.``--codes runs only the rules asked for, and a later pass re-analyses only the files the last one touched``
@@ -396,7 +396,7 @@ type EndToEnd() =
         let after = File.ReadAllText(Path.Combine(dir, "Program.cs"))
         Assert.Contains("=> Guid.Empty;", after)
         Assert.Contains("$\"no holes here\"", after)
-        Assert.Equal(1, Sweep.runTotalApplied)
+        Assert.Equal(1, Sweep.runTotalApplied ())
         // pass 2 looks at Program.cs alone, never Quiet.cs
         Assert.Matches(@"re-analysing 1 of \d+ file\(s\)", output)
 
@@ -482,7 +482,7 @@ type EndToEnd() =
         | Error e -> failwith e
 
         Assert.Equal(0, run [| script |])
-        Assert.Equal(0, Sweep.runTotalApplied)
+        Assert.Equal(0, Sweep.runTotalApplied ())
 
     [<Fact>]
     member _.``a taskified method's callers in another file are rewritten in the same pass and the project still builds``
@@ -544,10 +544,10 @@ type EndToEnd() =
         Assert.Contains("internal static async Task<int> LoadAsync() { var x = await Source(); return x; }", service)
         Assert.Contains("var x = await Service.LoadAsync();", caller)
         Assert.Contains("var y = await Service.LoadAsync();", caller)
-        Assert.Equal(1, Sweep.runTotalApplied)
+        Assert.Equal(1, Sweep.runTotalApplied ())
 
         Assert.Equal(0, run [| project; "--codes"; "CR0041" |])
-        Assert.Equal(0, Sweep.runTotalApplied)
+        Assert.Equal(0, Sweep.runTotalApplied ())
 
     [<Fact>]
     member _.``--api-changes opens a public shape whose fix stays in its own file, as the config key does``() =
@@ -883,7 +883,7 @@ type EndToEnd() =
 
         Assert.Contains("xs.Length > 0;", File.ReadAllText(Path.Combine(dir, "Arrays.cs")))
         Assert.Contains("xs.Any();", File.ReadAllText(Path.Combine(dir, "Sequences.cs")))
-        Assert.Equal(1, Sweep.runTotalApplied)
+        Assert.Equal(1, Sweep.runTotalApplied ())
 
     [<Fact>]
     member _.``under the api pass a friend project's callers are rewritten through the reference oracle and both projects build``
@@ -950,17 +950,17 @@ type EndToEnd() =
 
         // without the api pass the friend holds the surface: nothing changes
         Assert.Equal(0, run [| dir; "--codes"; "CR0041" |])
-        Assert.Equal(0, Sweep.runTotalApplied)
+        Assert.Equal(0, Sweep.runTotalApplied ())
 
         Assert.Equal(0, run [| dir; "--api-changes"; "--codes"; "CR0041" |])
         let service = File.ReadAllText(Path.Combine(dir, "A", "Service.cs"))
         let caller = File.ReadAllText(Path.Combine(dir, "B", "Caller.cs"))
         Assert.Contains("internal static async Task<int> LoadAsync() { var x = await Source(); return x; }", service)
         Assert.Contains("var x = await A.Service.LoadAsync();", caller)
-        Assert.Equal(1, Sweep.runTotalApplied)
+        Assert.Equal(1, Sweep.runTotalApplied ())
 
         Assert.Equal(0, run [| dir; "--api-changes"; "--codes"; "CR0041" |])
-        Assert.Equal(0, Sweep.runTotalApplied)
+        Assert.Equal(0, Sweep.runTotalApplied ())
 
     [<Fact>]
     member _.``a file that is not UTF-8 goes back in its own encoding, byte for byte outside the edit``() =
@@ -1080,13 +1080,13 @@ type DefinesEndToEnd() =
 
         // without the symbol the code is not in the parse tree: nothing to fix
         Assert.Equal(0, run [| project; "--codes"; "CR0090" |])
-        Assert.Equal(0, Sweep.runTotalApplied)
+        Assert.Equal(0, Sweep.runTotalApplied ())
         Assert.Equal(source, File.ReadAllText path)
 
         // with it: analysed, fixed, and the verification build (whose target
         // demands every symbol) passes
         Assert.Equal(0, run [| project; "--codes"; "CR0090"; "--define"; "LOCAL_BUILD" |])
-        Assert.Equal(1, Sweep.runTotalApplied)
+        Assert.Equal(1, Sweep.runTotalApplied ())
         Assert.Contains("public static Guid Local() => Guid.Empty;", File.ReadAllText path)
 
         // the run leaves the process environment as it found it
@@ -1147,6 +1147,201 @@ type DefinesEndToEnd() =
             Assert.Equal<string list>([ "OWN"; "OTHER" ], symbolsOf (LegacyProjects.load workspace project))
         finally
             RunDefines.set []
+
+    [<Fact>]
+    member _.``a fix that makes the next pass's work converges pass by pass; the dry run before it reports the finding and writes nothing``
+        ()
+        =
+        let dir = tempDir ()
+
+        File.WriteAllText(
+            Path.Combine(dir, "Sample.csproj"),
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
+        )
+
+        let source =
+            csharp
+                """
+                namespace Sample;
+                public static class Flags
+                {
+                    public static int Check(bool done) { if (done = true) return 1; return 0; }
+                }
+
+                """
+
+        let file = Path.Combine(dir, "Flags.cs")
+        File.WriteAllText(file, source)
+        let project = Path.Combine(dir, "Sample.csproj")
+
+        let run (args: string[]) =
+            use captured = new StringWriter()
+            let oldOut = Console.Out
+            Console.SetOut captured
+
+            let code =
+                try
+                    Sweep.resetRun ()
+
+                    match parseArgs args with
+                    | Ok opts -> Sweep.executeRun opts
+                    | Error e -> failwith e
+                finally
+                    Console.SetOut oldOut
+
+            code, captured.ToString()
+
+        // the dry run: the finding, one pass, the file as it was
+        let dryCode, dryOutput = run [| project; "--codes"; "CR0195,CR0011"; "--dry-run" |]
+        Assert.Equal(0, dryCode)
+
+        Assert.Equal<(string * int) list>(
+            [ "CR0195", 4 ],
+            Sweep.reportedSoFar () |> List.map (fun f -> f.Code, f.StartLine)
+        )
+
+        Assert.Equal(source, File.ReadAllText file)
+        Assert.Contains("dry run: 1 fix(es) would be applied", dryOutput)
+        Assert.DoesNotContain("pass 2:", dryOutput)
+        Assert.Equal(0, Sweep.runTotalApplied ())
+
+        // the sweep: `done = true` → `done == true` in pass 1, which is what pass 2's
+        // `x == true ===> x` reads; pass 3 finds nothing and ends the run
+        let code, output = run [| project; "--codes"; "CR0195,CR0011" |]
+        Assert.Equal(0, code)
+        Assert.Contains("if (done) return 1;", File.ReadAllText file)
+        Assert.Equal(2, Sweep.runTotalApplied ())
+        Assert.Contains("1 fix(es) applied in pass 1", output)
+        Assert.Contains("1 fix(es) applied in pass 2", output)
+        Assert.Contains("pass 3:", output)
+        Assert.DoesNotContain("pass 4:", output)
+        Assert.Contains("Sample.csproj: still builds", output)
+        Assert.Contains("2 fix(es) applied in total", output)
+
+        Assert.Equal<string list>(
+            [ "CR0011"; "CR0195" ],
+            Sweep.reportedSoFar () |> List.map (fun f -> f.Code) |> List.sort
+        )
+
+    [<Fact>]
+    member _.``fixes that break the compilation together are bisected per file: the offender is put back, the rest stand, and the report lists all three``
+        ()
+        =
+        let dir = tempDir ()
+
+        File.WriteAllText(
+            Path.Combine(dir, "Sample.csproj"),
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"""
+        )
+
+        // two halves of one type, each hoisting a regex out of a method named
+        // `Match`: either field alone compiles, the two together are one name twice
+        let one =
+            csharp
+                """
+                using System.Text.RegularExpressions;
+                namespace Sample;
+                public static partial class Lines
+                {
+                    public static bool Match(string s) { return Regex.IsMatch(s, "a+b[0-9]"); }
+                }
+
+                """
+
+        let two =
+            csharp
+                """
+                using System.Text.RegularExpressions;
+                namespace Sample;
+                public static partial class Lines
+                {
+                    public static bool Match(string s, int n) { return n > 0 && Regex.IsMatch(s, "c+d[0-9]"); }
+                }
+
+                """
+
+        File.WriteAllText(Path.Combine(dir, "One.cs"), one)
+        File.WriteAllText(Path.Combine(dir, "Two.cs"), two)
+
+        File.WriteAllText(
+            Path.Combine(dir, "Three.cs"),
+            csharp
+                """
+                using System;
+                namespace Sample;
+                public static class Ids
+                {
+                    public static Guid None() => new Guid();
+                }
+
+                """
+        )
+
+        let project = Path.Combine(dir, "Sample.csproj")
+        let report = Path.Combine(dir, "findings.sarif")
+        use captured = new StringWriter()
+        let oldOut = Console.Out
+        Console.SetOut captured
+
+        let code =
+            try
+                Sweep.resetRun ()
+
+                match parseArgs [| project; "--codes"; "CR0109,CR0090"; "--report"; report |] with
+                | Ok opts -> Sweep.executeRun opts
+                | Error e -> failwith e
+            finally
+                Console.SetOut oldOut
+
+        let output = captured.ToString()
+        // a fix put back is the run's failure to report
+        Assert.Equal(1, code)
+        Assert.Contains("2 fix(es) applied in pass 1", output)
+        Assert.Contains("Sample.csproj: still builds", output)
+        Assert.Equal(2, Sweep.runTotalApplied ())
+
+        Assert.Contains(
+            "private static readonly Regex MatchRegex = new Regex(\"a+b[0-9]\");",
+            File.ReadAllText(Path.Combine(dir, "One.cs"))
+        )
+
+        Assert.Equal(two, File.ReadAllText(Path.Combine(dir, "Two.cs")))
+        Assert.Contains("=> Guid.Empty;", File.ReadAllText(Path.Combine(dir, "Three.cs")))
+
+        // the report, by what does not move between machines: rule, file, place, text
+        use sarif = System.Text.Json.JsonDocument.Parse(File.ReadAllText report)
+
+        let results =
+            sarif.RootElement.GetProperty("runs").[0].GetProperty("results").EnumerateArray()
+            |> Seq.map (fun r ->
+                let location = r.GetProperty("locations").[0].GetProperty("physicalLocation")
+                let region = location.GetProperty("region")
+                let context = location.GetProperty("contextRegion")
+
+                String.Join(
+                    "|",
+                    [
+                        r.GetProperty("ruleId").GetString()
+                        location.GetProperty("artifactLocation").GetProperty("uri").GetString()
+                        string (region.GetProperty("startLine").GetInt32())
+                        string (region.GetProperty("startColumn").GetInt32())
+                        region.GetProperty("snippet").GetProperty("text").GetString()
+                        string (context.GetProperty("startLine").GetInt32())
+                        string (context.GetProperty("endLine").GetInt32())
+                        string (r.GetProperty("properties").GetProperty("autoFixable").GetBoolean())
+                    ]
+                ))
+            |> Seq.sort
+            |> List.ofSeq
+
+        Assert.Equal<string list>(
+            [
+                "CR0090|Three.cs|5|34|new Guid()|4|5|True"
+                "CR0109|One.cs|5|49|Regex.IsMatch(s, \"a+b[0-9]\")|4|5|True"
+                "CR0109|Two.cs|5|65|Regex.IsMatch(s, \"c+d[0-9]\")|4|5|True"
+            ],
+            results
+        )
 
 // ---- legacy projects ----
 

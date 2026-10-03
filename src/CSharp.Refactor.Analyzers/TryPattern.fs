@@ -118,9 +118,9 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                 )
                 ->
                 match model.GetDeclaredSymbol md with
+                | null -> None
                 | m when
-                    not (isNull m)
-                    && m.ReturnType.SpecialType = SpecialType.System_Boolean
+                    m.ReturnType.SpecialType = SpecialType.System_Boolean
                     && not m.IsVirtual
                     && not m.IsOverride
                     && not m.IsAbstract

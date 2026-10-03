@@ -2,7 +2,7 @@
     "name": "csharp-refactor-vscode",
     "displayName": "CSharp.Refactor",
     "description": "Functional refactoring hints with one-click fixes for C# - the CSharp.Refactor Roslyn analyzers, wired into every C# project on this machine with your consent.",
-    "version": "0.1.15",
+    "version": "0.1.16",
     "publisher": "TuomasHietanen",
     "icon": "icon.png",
     "license": "Unlicense",
@@ -70,7 +70,7 @@
         ]
     },
     "csharpRefactorBuild": {
-        "analyzers": "0.1.15",
+        "analyzers": "0.1.16",
         "built": "2026-10-01 10:46 UTC"
     },
     "scripts": {

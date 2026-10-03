@@ -171,6 +171,9 @@ module Rules =
             "ClosureCaptures", ClosureCaptures.analyze
             "GuardedRegions", GuardedRegions.analyze
             "ParseAndNumbers", ParseAndNumbers.analyze
+            "DateShapes", DateShapes.analyze
+            "DefectNotes", DefectNotes.analyze
+            "ConditionDefects", ConditionDefects.analyze
             "EnumerationMutation", EnumerationMutation.analyze
         ]
 

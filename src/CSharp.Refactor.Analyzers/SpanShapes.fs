@@ -90,10 +90,15 @@ type private Cut =
         /// `AsSpan(6, 5)`, `AsSpan(6)`, `AsSpan()[6..11]`
         SpanCall: string
         /// The prefix length, when the cut is `Substring(0, n)` / `[..n]` / `[0..n]`.
-        PrefixLength: int option
+        PrefixLength: int voption
         /// The suffix length, when the cut is `Substring(s.Length - n)` / `[^n..]`.
-        SuffixLength: int option
+        SuffixLength: int voption
     }
+
+let private flat (length: int option) : int voption =
+    match length with
+    | Some n -> ValueSome n
+    | None -> ValueNone
 
 let private intLiteral (e: ExpressionSyntax) =
     match e with
@@ -136,8 +141,8 @@ let private cutOf (model: SemanticModel) (e: ExpressionSyntax) : Cut option =
                     {
                         Receiver = ma.Expression
                         SpanCall = $"AsSpan({args.[0].Expression})"
-                        PrefixLength = None
-                        SuffixLength = lengthMinus ma.Expression args.[0].Expression
+                        PrefixLength = ValueNone
+                        SuffixLength = flat (lengthMinus ma.Expression args.[0].Expression)
                     }
             | 2 ->
                 Some
@@ -146,9 +151,9 @@ let private cutOf (model: SemanticModel) (e: ExpressionSyntax) : Cut option =
                         SpanCall = $"AsSpan({args.[0].Expression}, {args.[1].Expression})"
                         PrefixLength =
                             (match intLiteral args.[0].Expression, intLiteral args.[1].Expression with
-                             | Some 0, Some n -> Some n
-                             | _ -> None)
-                        SuffixLength = None
+                             | Some 0, Some n -> ValueSome n
+                             | _ -> ValueNone)
+                        SuffixLength = ValueNone
                     }
             | _ -> None
         | _ -> None
@@ -180,9 +185,9 @@ let private cutOf (model: SemanticModel) (e: ExpressionSyntax) : Cut option =
                      | _ -> $"AsSpan(){ea.ArgumentList}")
                 PrefixLength =
                     (match fromStart, range.RightOperand with
-                     | Some 0, (:? LiteralExpressionSyntax as r) -> intLiteral r
-                     | _ -> None)
-                SuffixLength = suffix
+                     | Some 0, (:? LiteralExpressionSyntax as r) -> flat (intLiteral r)
+                     | _ -> ValueNone)
+                SuffixLength = flat suffix
             }
     | _ -> None
 
@@ -735,8 +740,8 @@ let private prefixes (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
                     // same for its `Substring` form)
                     let call =
                         match cut.PrefixLength, cut.SuffixLength with
-                        | Some n, _ when stable && n = value.Length -> Some("StartsWith", isGuarded n)
-                        | _, Some n when stable && n = value.Length -> Some("EndsWith", isGuarded n)
+                        | ValueSome n, _ when stable && n = value.Length -> Some("StartsWith", isGuarded n)
+                        | _, ValueSome n when stable && n = value.Length -> Some("EndsWith", isGuarded n)
                         | _ -> None
 
                     match call with

@@ -195,6 +195,70 @@ let ``a culture-free Parse is noted with editor offers, the CLI applies the inva
     Assert.Contains("double.Parse(s, CultureInfo.InvariantCulture)", fixedSource)
 
 [<Fact>]
+let ``CR0105 reads a Convert of a string as a culture-free parse; other overloads and a call with a provider are quiet``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System;
+            class C
+            {
+                decimal A(string s) => Convert.ToDecimal(s);
+                double B(string s) => Convert.ToDouble(s);
+                float D(string s) => Convert.ToSingle(s);
+                DateTime E(string s) => Convert.ToDateTime(s);
+                decimal F(int n) => Convert.ToDecimal(n);
+                decimal G(object o) => Convert.ToDecimal(o);
+                decimal H(string s) => Convert.ToDecimal(s, System.Globalization.CultureInfo.InvariantCulture);
+                int I(string s) => Convert.ToInt32(s);
+                System.Linq.IQueryable<decimal> J(System.Linq.IQueryable<string> xs) =>
+                    System.Linq.Queryable.Select(xs, x => Convert.ToDecimal(x));
+            }
+            """
+
+    let fired = suggestCode "CR0105" source
+
+    Assert.Equal<string list>(
+        [
+            "Convert.ToDecimal(s)"
+            "Convert.ToDouble(s)"
+            "Convert.ToSingle(s)"
+            "Convert.ToDateTime(s)"
+        ],
+        firedText source fired
+    )
+
+    Assert.True(
+        fired
+        |> List.forall (fun s -> s.Fixes.Length = 2 && s.Fixes |> List.forall (fun f -> f.EditorOnly))
+    )
+
+    Assert.Contains("CurrentCulture", fired.Head.Fixes.[1].Edits.Head.Replacement)
+    // a sweep without the knob applies nothing
+    Assert.Equal(normalize source, fixAll "CR0105" source)
+
+    let invariant =
+        Some(
+            FakeOptions(dict [ "csharp_refactor.CR0105.invariant", "true" ])
+            :> Microsoft.CodeAnalysis.Diagnostics.AnalyzerConfigOptions
+        )
+
+    let fixedSource = fixAllWith invariant "CR0105" source
+    Assert.Contains("Convert.ToDecimal(s, System.Globalization.CultureInfo.InvariantCulture);\n    double", fixedSource)
+    Assert.Contains("Convert.ToDouble(s, System.Globalization.CultureInfo.InvariantCulture)", fixedSource)
+    Assert.Contains("Convert.ToSingle(s, System.Globalization.CultureInfo.InvariantCulture)", fixedSource)
+    Assert.Contains("Convert.ToDateTime(s, System.Globalization.CultureInfo.InvariantCulture)", fixedSource)
+    Assert.Contains("Convert.ToDecimal(n)", fixedSource)
+    Assert.Contains("Convert.ToDecimal(o)", fixedSource)
+
+    // spelled short under the using
+    Assert.Contains(
+        "Convert.ToDecimal(s, CultureInfo.InvariantCulture);\n    double",
+        fixAllWith invariant "CR0105" ("using System.Globalization;\n" + source)
+    )
+
+[<Fact>]
 let ``DateTime.Now as an instant becomes UtcNow under the knob; calendar reads, Today and same-day tests are notes or quiet``
     ()
     =

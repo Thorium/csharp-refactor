@@ -439,7 +439,7 @@ as v2; CR0028 decided by measurement; the §8.I rules are on but silent
 below their language level).
 Priority: CR0034, CR0047, CR0061, CR0062, CR0066, CR0086, CR0107, CR0120,
 CR0122, CR0123, CR0125, CR0160, CR0161, CR0162, CR0163, CR0165, CR0169,
-CR0171.
+CR0171, CR0190, CR0191, CR0192, CR0193, CR0194.
 
 **The guard lists below are the summary.** The full conditions come from the
 F# implementations, read module by module on 2026-09-19 against this
@@ -475,6 +475,10 @@ has been updated in place.
 | CR0015 | idiom | v | | | `for (int i = 0; i < xs.Length; i++) use(xs[i]);` | `foreach (var x in xs) use(x);` | FR0101 | — |
 | CR0016 | idiom | | | | `bool done = false; while (!done && …) { … done = true; … }` | note: `break`/`return` at the decision | FR0141 | — |
 | CR0017 | correctness | v | | | `for (int i …) actions.Add(() => use(i));` | note: every closure sees the final `i`; copy into a loop-local | — | — |
+| CR0192 | correctness | v | | v | `x != A \|\| x != B` and `x == A && x == B` over two different constants, `x > e && x < e` | note: always true / always false; editor offers the other operator for the constant shapes when the chain is the two comparisons | FR0177 | — |
+| CR0193 | correctness | v | | v | `if (!x.HasValue) { … x.Value … }`, the `else` of `if (x.HasValue)`, `x == null ? x.Value : d` on a `Nullable<T>` | note: the read throws every time the branch runs | FR0178 | — (CS8629 where nullable analysis is on) |
+| CR0195 | correctness | v | | | `if (done = false)`, `if (a = b)`, an assignment as an operand of `&&`/`\|\|`/`!`, in `?:`, a `where` or a predicate lambda | `==` (literal: the editor also offers the bare test); editor only in lambdas, query clauses and for a variable in a loop condition; a note with the offer where the right side runs something | — (F# has no assignment expression) | — (CS0665, no fix) |
+| CR0196 | correctness | v | | | a non-nullable struct or enum compared with `null`: `if (d == null) S`, `d != null ? a : b`, `d == null \|\| p` | the dead test removed with what only it guards; a note elsewhere | — | — (CS0472/CS8073, no fix) |
 
 Guards.
 
@@ -587,6 +591,7 @@ Guards.
 | CR0033 | performance | v | | | `sb.Append(a + b + c)` | `sb.Append(a).Append(b).Append(c)` | — | — |
 | CR0034 | correctness | v | | v | `foreach (var c in customers) foreach (var o in db.Orders.Where(o => o.CustomerId == c.Id))` | note: N+1 | FR0028 | — |
 | CR0035 | performance | v | | | `IEnumerable<T> Walk(Node n) { … foreach (var c in Walk(child)) yield return c; }` | note: O(depth) per element; explicit stack | FR0058 | — |
+| CR0194 | correctness | v | | v | `list.Add(x);`, `_ = list.Add(x);` on a `System.Collections.Immutable` collection; `s.Trim();` on a `string` | note: the call returns the new value and the statement drops it; editor offers `list = list.Add(x);` for a local or value parameter | FR0179 | CA1806 (the string shape) |
 
 `*` CR0028's default was decided by PerfClaims at M2 (benchmarks/PerfClaims/RESULTS.md):
 parity on arrays and lazy sequences, 3.8× slower on `List<T>`, so it ships
@@ -671,7 +676,12 @@ Guards.
 - **CR0031** — parameterless `new Random()` (a seed is a decision) whose
   instance is used only for calls in the same expression or scope and never
   stored; `Random.Shared` resolvable; measured (allocation, and `Random`'s
-  seeding cost).
+  seeding cost). A seed built only from fine-grained clock, thread or
+  process reads (`DateTime.Now.Millisecond`, `.Ticks`,
+  `Environment.TickCount`, `Guid.NewGuid().GetHashCode()`, arithmetic and
+  casts over those) is no decision and takes the same fix; a coarse part
+  of the clock (`.Hour`, `.DayOfYear`), another operand or a constant
+  alone stays. Without `Random.Shared` the clock seed is a note.
 - **CR0032** — `d` typed `Dictionary<K,V>`/`IDictionary<K,V>`, the body
   reads `d[k]` and never writes `d`; the deconstruction form needs C# 7.
 - **CR0033** — `Append` on `System.Text.StringBuilder` with a `+` chain of
@@ -705,6 +715,7 @@ Guards.
 | CR0053 | correctness | v | | | `list.ForEach(async x => …)`, `Parallel.ForEach(xs, async x => …)`: an `async` lambda converted to a `void`-returning delegate | note: `async void` in disguise | — | VSTHRD101 |
 | CR0054 | performance | v | | | `Task.WhenAll(new[] { t })`, `Task.WaitAll(t)` | note: the direct form changes the result type | FR0079 | CA1842/CA1843 |
 | CR0055 | correctness | v | | | `Foo(x, CancellationToken.None)` / `Foo(x, default)` while a token parameter is in scope | `Foo(x, ct)` | FR0118 | CA2016 |
+| CR0197 | correctness | v | | | `try { t.Wait(); } catch (IOException) { … }` — also `Result`, `Task.WaitAll` — with no clause for `AggregateException` | note; editor: a clause for the wrapper filtered on `InnerException` or `GetBaseException()`, or the removal of a clause nothing reaches | — | — |
 
 Guards.
 
@@ -958,7 +969,7 @@ Guards.
 | CR0102 | performance | v | | | `$"{x.ToString()} items"`, `string.Join(", ", xs.Select(x => x.ToString()))` | `$"{x} items"`, `string.Join(", ", xs)` | FR0021 | — |
 | CR0103 | cosmetic | v | | | `$"no holes"` | `"no holes"` | FR0086 | — |
 | CR0104 | idiom | v | | | `x == null \|\| x == ""`, `x is null \|\| x.Length == 0`, `x == null \|\| x.Trim() == ""` | `string.IsNullOrEmpty(x)`, `string.IsNullOrWhiteSpace(x)` | FR0138 | — |
-| CR0105 | correctness | v | | | `double.Parse(s)`, `DateTime.Parse(s)` without a provider | editor: `CultureInfo.InvariantCulture` (primary) / `CurrentCulture`; CLI under `invariant` | FR0067 | CA1305 |
+| CR0105 | correctness | v | | | `double.Parse(s)`, `DateTime.Parse(s)`, `Convert.ToDecimal(s)` without a provider | editor: `CultureInfo.InvariantCulture` (primary) / `CurrentCulture`; CLI under `invariant` | FR0067 | CA1305 |
 | CR0106 | correctness | v | | | `DateTime.UtcNow.Date`, `DateTime.Today` (notes); `DateTime.Now` | `DateTime.UtcNow` under `utc_now`; editor always | FR0121 | — |
 | CR0107 | correctness | v | | v | `new Regex("(unclosed")`, `Regex.IsMatch(s, "[")` | note: guaranteed `ArgumentException` | FR0122 | — |
 | CR0108 | performance | v | | | `Regex.IsMatch(s, "^abc")`, `Regex.Replace(s, "abcd", "x")` with a plain literal | `s.StartsWith("abc", StringComparison.Ordinal)`, `s.Replace("abcd", "x")` | FR0015 | — |
@@ -969,6 +980,8 @@ Guards.
 | CR0113 | correctness | v | | | `balance + 2_000_000_000`, `seconds * 1_000_000` on `int` | note; editor: widen to `long`, or `checked(…)` | FR0105 | — |
 | CR0114 | correctness | v | | | duplicate placeholder names in a log template; Serilog templates with the shapes CA2017/CA2254 do not cover | note | FR0124 | CA2017, CA2254 |
 | CR0115 | correctness | v | | | `catch (Exception ex) { _log.LogError("sync failed {Id}", id); }` | `_log.LogError(ex, "sync failed {Id}", id);` | FR0120 | — |
+| CR0190 | correctness | v | | v | `d.ToString("yyyyMMddhhmmss")`, `d.ToString("yyyy-mm-dd")`, `$"{d:HH:MM}"` on a date or time type | `"yyyyMMddHHmmss"`, `"yyyy-MM-dd"`, `"HH:mm"`; editor only at `ParseExact`/`TryParseExact` | FR0175 | — |
+| CR0191 | correctness | v | | v | `new DateTime(now.Year, now.AddMonths(-1).Month, 25)` | `new DateTime(now.AddMonths(-1).Year, now.AddMonths(-1).Month, 25)`; a note for a receiver that runs a call and for a day of the shifted instant | FR0176 | — |
 
 Guards.
 
@@ -1008,7 +1021,9 @@ Guards.
   `x.Trim() == ""` without a null guard is editor-only (null throws today).
 - **CR0105** — `double`/`float`/`decimal`/`DateTime`/`DateTimeOffset`/
   `TimeSpan` parses; integer parses stay quiet; the primary is spelled short
-  under an existing `using System.Globalization`.
+  under an existing `using System.Globalization`. `Convert.ToDecimal`/
+  `ToDouble`/`ToSingle`/`ToDateTime` on one argument typed `string` are the
+  same parse and take the same fix; their other overloads are quiet.
 - **CR0106** — `DateTime.Now.Date`-style calendar reads are excluded from
   the `UtcNow` fix (swapping underneath one manufactures the first bug);
   `Now` handed to a non-UTC timestamp setter (`File.SetLastWriteTime`) stays.
@@ -1039,6 +1054,53 @@ Guards.
 - **CR0114/CR0115** — typed `Microsoft.Extensions.Logging` and Serilog;
   ANY mention of the exception in the arguments counts as handled, `ex.Message`
   included (a PII choice the rule must not escalate).
+- **CR0190** — a string literal format only, read as runs of one letter
+  with escaped characters and quoted sections skipped; the receiver, hole
+  or parse owner is `DateTime`/`DateTimeOffset`/`DateOnly`/`TimeOnly` by
+  symbol (never `TimeSpan`, whose only hour specifier is `hh`); `hh`→`HH`
+  with no `t` run in the format; `mm`→`MM` beside a `y`/`d` run and beside
+  no `h`/`H`/`s` run, when every `M` run is itself a month among the time
+  parts (or there is none); `MM`/`M`→`mm`/`m` after an `h`/`H` run or
+  before an `s` run and beside no `y`/`d` run, when every `m` run is
+  itself minutes among the date parts (or there is none) — a swapped pair
+  has both repaired, a rightly placed run vouches for the other; an
+  escaped character or a quoted section between two runs parts them;
+  one-character formats, `%`, an unclosed quote and a literal whose
+  source is not its value (C# escapes) stand it down; the edit changes
+  letters inside the literal only. The `hh`→`HH` repair is swept only in
+  a timestamp (a `y`/`M`/`d` run in the format) of a file where no other
+  text renders the designator (AM/PM as a word, a format with a `t` run)
+  and no `ParseExact` reads an `h` format; otherwise it is an editor
+  offer. A `ParseExact`/`TryParseExact` format
+  is an editor offer (what a parser accepts is the author's call). Not
+  inside an expression tree, not in a test file; an interpolated string
+  only where it is a `string`.
+- **CR0191** — `DateTime`/`DateTimeOffset`/`DateOnly` constructors taking
+  `(year, month, day, …)` by position; the year is `X.Year`, the month
+  `Y.Month`, one receiver the other plus a single `AddMonths`/`AddDays`/
+  `AddYears`; the fix (the part reading the plain instant reads the shifted
+  one) needs a receiver of locals, parameters, fields and properties and
+  an amount that is a literal or a name, negated or not — otherwise a
+  note; a sweep applies it only where the YEAR reads the plain instant
+  (the date then changes at a year boundary only), the reverse is an
+  editor offer. `AddYears` keeps the month: the shifted year beside the plain
+  month is quiet, the shifted month beside the plain year a note. A day
+  from the instant shifted against the year's and month's is a note.
+- **CR0195, CR0196, CR0197** (tabled in §8.A and §8.C) — the guards are
+  the rules' sections in Rules.md. A sweep applies CR0195's `==` only in
+  a statement's condition or `?:` (never per element, never a variable
+  in a loop's condition, never a first write) and CR0196's removal only
+  for a plain operand, a lifted comparison and a rewrite that drops no
+  comment and leaves nothing unreachable; CR0197 is a note with editor
+  offers and never suggests `GetAwaiter().GetResult()`.
+- **CR0192, CR0193, CR0194** (tabled in §8.A and §8.B) — notes; the
+  guards are the rules' sections in Rules.md: constants by the semantic
+  model and a compared expression that runs nothing (CR0192); a bare
+  emptiness test, nothing in the branch writing the nullable, closures not
+  counted, a field not refilled by a call before the read (CR0193); the
+  invoked method declared on, and returning, a type of
+  `System.Collections.Immutable` itself, no `out`/`ref` result, the string
+  shape yielding to CA1806 (CR0194).
 
 ### 8.G Security and hygiene
 
@@ -1065,7 +1127,12 @@ Guards.
 - **CR0123** — format anchoring, not entropy; a literal containing `test`
   is a test credential and stays quiet.
 - **CR0124** — loopback servers (`localhost`, `127.0.0.1`, `::1`, `(local)`,
-  `(localdb)\…`, `.`) are never reported.
+  `(localdb)\…`, `.`) are never reported. The second shape — a literal
+  given to a parameter, field, property, local or initializer member
+  whose name ENDS in a credential word (`password`, `passwd`, `pwd`,
+  `secret`, `apikey`, `token`, `credential`) — is quiet in test files and
+  for placeholders, samples, short texts, names and setting keys, scheme
+  words, prose, formats and URLs; the message never shows the literal.
 - **CR0125** — protocols from a curated list AND from `[Obsolete]`; the
   WebSocket handshake SHA-1 beside RFC 6455's GUID is quiet; a SHA-1 in a
   switch arm whose sibling constructs SHA-256 is a caller's format option;
@@ -1325,8 +1392,8 @@ Guards:
   which is the correction). The statements between become the `try`
   body, the release the `finally`.
 - **CR0164** — the field is `static`, of a reference type, not `volatile`,
-  not `[ThreadStatic]`, not `readonly`; the test is `== null`, `is null`
-  or the `??=` form; the assignment is the whole `if` body (or the `??=`
+  not `[ThreadStatic]`, not `readonly`; the test is `== null`, `is null`,
+  the `??=` form or the older `_x ?? (_x = expr)` as a value; the assignment is the whole `if` body (or the `??=`
   is the whole expression of a statement or a `return`); the initialising
   expression is provably non-null — a `new`, an array or collection
   expression, a string literal, an interpolated string, a `??` whose

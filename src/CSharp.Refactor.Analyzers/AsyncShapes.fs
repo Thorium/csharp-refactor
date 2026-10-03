@@ -1081,7 +1081,8 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                                 |> String.concat " "
 
                             let names =
-                                comments.Contains "None" || comments.ToLowerInvariant().Contains "cancel"
+                                comments.Contains "None"
+                                || comments.IndexOf("cancel", System.StringComparison.OrdinalIgnoreCase) >= 0
 
                             let bestEffort =
                                 match s.Parent with

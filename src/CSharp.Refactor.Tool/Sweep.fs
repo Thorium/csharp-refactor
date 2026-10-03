@@ -12,6 +12,7 @@ open System.Collections.Generic
 open System.Collections.Immutable
 open System.IO
 open System.Threading
+open System.Threading.Tasks
 open Microsoft.Build.Locator
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
@@ -32,9 +33,9 @@ let private ruleCount = RuleCatalog.rules.Length
 // ---- run-scoped state, reset per executeRun (a resident --mcp host runs many) ----
 
 let mutable private baselineFingerprints: Set<string> = Set.empty
-let mutable baselineSuppressed = 0
-let mutable commentSuppressed = 0
-let mutable suppressionOverridden = 0
+let mutable private baselineSuppressedCount = 0
+let mutable private commentSuppressedCount = 0
+let mutable private suppressionOverriddenCount = 0
 let mutable private honorAllSuppressions = false
 let mutable private showNotes = false
 let mutable private notesOnly = false
@@ -45,7 +46,7 @@ let private reportedKeys = HashSet<string>()
 let private printedNotes = HashSet<string>()
 /// The projects whose held public surface this run has announced.
 let private announcedHolds = HashSet<string>(StringComparer.OrdinalIgnoreCase)
-let mutable runTotalApplied = 0
+let mutable private runAppliedCount = 0
 let mutable private runBuildFailures = 0
 let mutable private runCrossFileHeld = 0
 /// Wall-clock milliseconds of the run, by phase: what a slow sweep spent
@@ -53,6 +54,13 @@ let mutable private runCrossFileHeld = 0
 let mutable private runCompileMs = 0L
 let mutable private runAnalysisMs = 0L
 let private exitReasons = ResizeArray<string>()
+
+/// The run's counts, for the host that prints or returns them: read here,
+/// written by the run alone.
+let baselineSuppressed () = baselineSuppressedCount
+let commentSuppressed () = commentSuppressedCount
+let suppressionOverridden () = suppressionOverriddenCount
+let runTotalApplied () = runAppliedCount
 
 let reportedSoFar () =
     lock reportedFindings (fun () -> List.ofSeq reportedFindings)
@@ -68,10 +76,10 @@ let resetRun () =
     heldNoteCounts.Clear()
     heldByScope.Clear()
     exitReasons.Clear()
-    baselineSuppressed <- 0
-    commentSuppressed <- 0
-    suppressionOverridden <- 0
-    runTotalApplied <- 0
+    baselineSuppressedCount <- 0
+    commentSuppressedCount <- 0
+    suppressionOverriddenCount <- 0
+    runAppliedCount <- 0
     runBuildFailures <- 0
     runCrossFileHeld <- 0
     runCompileMs <- 0L
@@ -431,7 +439,7 @@ let private analyzerErrorsByFile
     (project: Project)
     (compilation: Compilation)
     (ct: CancellationToken)
-    =
+    : Task<Dictionary<string, Diagnostic list>> =
     let options =
         CompilationWithAnalyzersOptions(
             project.AnalyzerOptions,
@@ -443,22 +451,27 @@ let private analyzerErrorsByFile
 
     let byFile = Dictionary<string, Diagnostic list>(StringComparer.OrdinalIgnoreCase)
 
-    for d in CompilationWithAnalyzers(compilation, analyzers, options).GetAnalyzerDiagnosticsAsync(ct).Result do
-        if
-            d.Severity = DiagnosticSeverity.Error
-            && not d.IsSuppressed
-            && d.Location.IsInSource
-            && not (String.IsNullOrEmpty d.Location.SourceTree.FilePath)
-        then
-            let file = Path.GetFullPath d.Location.SourceTree.FilePath
+    task {
+        let! diagnostics =
+            CompilationWithAnalyzers(compilation, analyzers, options).GetAnalyzerDiagnosticsAsync ct
 
-            byFile.[file] <-
-                d
-                :: (match byFile.TryGetValue file with
-                    | true, ds -> ds
-                    | _ -> [])
+        for d in diagnostics do
+            if
+                d.Severity = DiagnosticSeverity.Error
+                && not d.IsSuppressed
+                && d.Location.IsInSource
+                && not (String.IsNullOrEmpty d.Location.SourceTree.FilePath)
+            then
+                let file = Path.GetFullPath d.Location.SourceTree.FilePath
 
-    byFile
+                byFile.[file] <-
+                    d
+                    :: (match byFile.TryGetValue file with
+                        | true, ds -> ds
+                        | _ -> [])
+
+        return byFile
+    }
 
 /// Parse-phase errors only: what --parse-only can judge without references.
 let private parseErrorsOf (compilation: Compilation) =
@@ -636,194 +649,203 @@ let private analyzeProject
 
     let withAnalyzers = CompilationWithAnalyzers(withCodes, analyzers, analyzerOptions)
 
-    let diagnostics =
+    // the analyzers' answer is awaited; what is made of it runs synchronously
+    let analyzerDiagnostics () : Task<ImmutableArray<Diagnostic>> =
         match scope with
-        | None -> withAnalyzers.GetAnalyzerDiagnosticsAsync(ct).Result
+        | None -> withAnalyzers.GetAnalyzerDiagnosticsAsync ct
         | Some _ ->
             // the analyzers over the scoped trees alone: a tree is analysed
             // with the whole compilation's semantics, but only ITS findings
             // are computed. One call with the others set aside, not a call
             // per tree: each per-tree call analyses a fresh copy of the
             // compilation, and each copy builds the compilation index again
-            RuleContext.skippingTrees (withCodes.SyntaxTrees |> Seq.filter (inScope >> not)) (fun () ->
-                withAnalyzers.GetAnalyzerDiagnosticsAsync(ct).Result)
+            RuleContext.skippingTreesAsync (withCodes.SyntaxTrees |> Seq.filter (inScope >> not)) (fun () ->
+                withAnalyzers.GetAnalyzerDiagnosticsAsync ct)
 
-    let wanted (d: Diagnostic) =
-        RuleCatalog.known.Contains d.Id
-        && (match opts.Codes with
-            | Some codes -> codes.Contains d.Id
-            | None -> true)
-        && d.Location.IsInSource
+    let finish (diagnostics: ImmutableArray<Diagnostic>) : Finding list =
+        let wanted (d: Diagnostic) =
+            RuleCatalog.known.Contains d.Id
+            && (match opts.Codes with
+                | Some codes -> codes.Contains d.Id
+                | None -> true)
+            && d.Location.IsInSource
 
-    let byTree =
-        diagnostics
-        |> Seq.filter wanted
-        |> Seq.groupBy (fun d -> d.Location.SourceTree)
-        |> List.ofSeq
-
-    // the api pass may fix what only the reference oracle can see (a caller
-    // in another project), which the analyzer never reported: every tree is
-    // then run, and such a fix becomes a finding of its own where the rule
-    // is on for the tree
-    let trees =
-        if opts.ApiChanges then
-            compilation.SyntaxTrees
-            |> Seq.filter inScope
-            |> Seq.map (fun t ->
-                t,
-                byTree
-                |> List.tryFind (fun (bt, _) -> obj.ReferenceEquals(bt, t))
-                |> Option.map snd
-                |> Option.defaultValue Seq.empty)
+        let byTree =
+            diagnostics
+            |> Seq.filter wanted
+            |> Seq.groupBy (fun d -> d.Location.SourceTree)
             |> List.ofSeq
-        else
-            byTree
 
-    let ruleOnFor (tree: SyntaxTree) (code: string) =
-        let configured =
-            let provider = compilation.Options.SyntaxTreeOptionsProvider
-
-            if isNull provider then
-                None
+        // the api pass may fix what only the reference oracle can see (a caller
+        // in another project), which the analyzer never reported: every tree is
+        // then run, and such a fix becomes a finding of its own where the rule
+        // is on for the tree
+        let trees =
+            if opts.ApiChanges then
+                compilation.SyntaxTrees
+                |> Seq.filter inScope
+                |> Seq.map (fun t ->
+                    t,
+                    byTree
+                    |> List.tryFind (fun (bt, _) -> obj.ReferenceEquals(bt, t))
+                    |> Option.map snd
+                    |> Option.defaultValue Seq.empty)
+                |> List.ofSeq
             else
-                let mutable report = ReportDiagnostic.Default
+                byTree
 
-                if provider.TryGetDiagnosticValue(tree, code, ct, &report) then
-                    Some report
-                elif provider.TryGetGlobalDiagnosticValue(code, ct, &report) then
-                    Some report
-                else
+        let ruleOnFor (tree: SyntaxTree) (code: string) =
+            let configured =
+                let provider = compilation.Options.SyntaxTreeOptionsProvider
+
+                if isNull provider then
                     None
-
-        let explicitly =
-            match opts.ExplicitCodes with
-            | Some codes -> codes.Contains code
-            | None -> false
-
-        (match opts.Codes with
-         | Some codes -> codes.Contains code
-         | None -> true)
-        && (match configured with
-            | Some ReportDiagnostic.Suppress -> explicitly
-            | Some _ -> true
-            | None -> explicitly || RuleCatalog.isDefaultOn code)
-
-    // an executable another project of the solution references (its tests)
-    // is not a leaf: those callers see its public shape
-    let referencedByAnother =
-        project.Solution.Projects
-        |> Seq.exists (fun p ->
-            p.Id <> project.Id
-            && p.ProjectReferences |> Seq.exists (fun r -> r.ProjectId = project.Id))
-
-    // a consumer no verification of this run can build - an F# project,
-    // a project outside the run compiling against the dll - sees the
-    // public surface too: it is held, flag or no flag
-    let held = not heldFor.IsEmpty
-
-    // the rules again, per file, for the fixes the diagnostics do not carry:
-    // `--jobs` files at once, as fsharp-refactor typechecks them. The results
-    // keep the files' order, and so does everything printed from them
-    let perTree = Array.ofList trees
-
-    let computed: (Document * SourceText * Suggestion list * (string * exn) list) option array =
-        Array.zeroCreate perTree.Length
-
-    let compute (i: int) =
-        let tree, _ = perTree.[i]
-        let document = project.GetDocument tree
-
-        if not (isNull document) then
-            let text = tree.GetText ct
-            let model = compilation.GetSemanticModel(tree, false)
-            let options = Some(projectOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
-
-            let ruleContext =
-                let c = Context.forTree options compilation tree opts.ApiChanges
-
-                { c with
-                    IsLeaf = c.IsLeaf && not referencedByAnother && not held
-                    ApiChanges = c.ApiChanges && not held
-                    // callers in other files and projects, for the cross-file edit sets
-                    References = Some(solutionOracle tree)
-                }
-
-            let suggestions, failures =
-                if opts.ParseOnly then
-                    Rules.parseOnly tree ruleContext, []
                 else
-                    Rules.allWithFailures tree model ruleContext
+                    let mutable report = ReportDiagnostic.Default
 
-            computed.[i] <- Some(document, text, suggestions, failures)
+                    if provider.TryGetDiagnosticValue(tree, code, ct, &report) then
+                        Some report
+                    elif provider.TryGetGlobalDiagnosticValue(code, ct, &report) then
+                        Some report
+                    else
+                        None
 
-    if opts.Jobs <= 1 || perTree.Length <= 1 then
-        for i in 0 .. perTree.Length - 1 do
-            compute i
-    else
-        System.Threading.Tasks.Parallel.For(
-            0,
-            perTree.Length,
-            System.Threading.Tasks.ParallelOptions(MaxDegreeOfParallelism = opts.Jobs, CancellationToken = ct),
-            Action<int> compute
-        )
-        |> ignore
+            let explicitly =
+                match opts.ExplicitCodes with
+                | Some codes -> codes.Contains code
+                | None -> false
 
-    [
-        for i in 0 .. perTree.Length - 1 do
-            let tree, ds = perTree.[i]
+            (match opts.Codes with
+             | Some codes -> codes.Contains code
+             | None -> true)
+            && (match configured with
+                | Some ReportDiagnostic.Suppress -> explicitly
+                | Some _ -> true
+                | None -> explicitly || RuleCatalog.isDefaultOn code)
 
-            match computed.[i] with
-            | None -> ()
-            | Some(document, text, suggestions, failures) ->
+        // an executable another project of the solution references (its tests)
+        // is not a leaf: those callers see its public shape
+        let referencedByAnother =
+            project.Solution.Projects
+            |> Seq.exists (fun p ->
+                p.Id <> project.Id
+                && p.ProjectReferences |> Seq.exists (fun r -> r.ProjectId = project.Id))
+
+        // a consumer no verification of this run can build - an F# project,
+        // a project outside the run compiling against the dll - sees the
+        // public surface too: it is held, flag or no flag
+        let held = not heldFor.IsEmpty
+
+        // the rules again, per file, for the fixes the diagnostics do not carry:
+        // `--jobs` files at once, as fsharp-refactor typechecks them. The results
+        // keep the files' order, and so does everything printed from them
+        let perTree = Array.ofList trees
+
+        let computed: (Document * SourceText * Suggestion list * (string * exn) list) option array =
+            Array.zeroCreate perTree.Length
+
+        let compute (i: int) =
+            let tree, _ = perTree.[i]
+            let document = project.GetDocument tree
+
+            if not (isNull document) then
+                let text = tree.GetText ct
+                let model = compilation.GetSemanticModel(tree, false)
                 let options = Some(projectOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
 
-                for (name, ex) in failures do
-                    let file = Path.GetFileName tree.FilePath
-                    let kind = ex.GetType().Name
+                let ruleContext =
+                    let c = Context.forTree options compilation tree opts.ApiChanges
 
-                    Out.bad
-                        $"  (rule {name} threw on {file}: {kind}: {ex.Message} — its suggestions for this file are lost; the log line is the bug report)"
+                    { c with
+                        IsLeaf = c.IsLeaf && not referencedByAnother && not held
+                        ApiChanges = c.ApiChanges && not held
+                        // callers in other files and projects, for the cross-file edit sets
+                        References = Some(solutionOracle tree)
+                    }
 
-                for d in ds do
-                    let span = d.Location.SourceSpan
+                let suggestions, failures =
+                    if opts.ParseOnly then
+                        Rules.parseOnly tree ruleContext, []
+                    else
+                        Rules.allWithFailures tree model ruleContext
 
-                    let suggestion =
-                        suggestions |> List.tryFind (fun s -> s.Code = d.Id && s.Span = span)
+                computed.[i] <- Some(document, text, suggestions, failures)
 
-                    yield
-                        {
-                            Diagnostic = d
-                            Document = document
-                            Text = text
-                            Suggestion = suggestion
-                            Suppressed = d.IsSuppressed
-                        }
+        if opts.Jobs <= 1 || perTree.Length <= 1 then
+            for i in 0 .. perTree.Length - 1 do
+                compute i
+        else
+            Parallel.For(
+                0,
+                perTree.Length,
+                ParallelOptions(MaxDegreeOfParallelism = opts.Jobs, CancellationToken = ct),
+                Action<int> compute
+            )
+            |> ignore
 
-                if opts.ApiChanges && not (Configuration.isIgnoredPath options tree.FilePath) then
-                    for s in suggestions do
-                        let covered =
-                            ds |> Seq.exists (fun d -> d.Id = s.Code && d.Location.SourceSpan = s.Span)
+        [
+            for i in 0 .. perTree.Length - 1 do
+                let tree, ds = perTree.[i]
+                // read twice below: once, as a list
+                let ds = List.ofSeq ds
 
-                        if
-                            not covered
-                            && not s.Fixes.IsEmpty
-                            && s.Fixes
-                               |> List.exists (fun f -> f.Edits |> List.exists (fun e -> e.File.IsSome))
-                            && ruleOnFor tree s.Code
-                        then
-                            match Descriptors.byCode |> Map.tryFind s.Code with
-                            | Some descriptor ->
-                                yield
-                                    {
-                                        Diagnostic =
-                                            Diagnostic.Create(descriptor, Location.Create(tree, s.Span), s.Message)
-                                        Document = document
-                                        Text = text
-                                        Suggestion = Some s
-                                        Suppressed = false
-                                    }
-                            | None -> ()
-    ]
+                match computed.[i] with
+                | None -> ()
+                | Some(document, text, suggestions, failures) ->
+                    let options = Some(projectOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
+
+                    for (name, ex) in failures do
+                        let file = Path.GetFileName tree.FilePath
+                        let kind = ex.GetType().Name
+
+                        Out.bad
+                            $"  (rule {name} threw on {file}: {kind}: {ex.Message} — its suggestions for this file are lost; the log line is the bug report)"
+
+                    for d in ds do
+                        let span = d.Location.SourceSpan
+
+                        let suggestion =
+                            suggestions |> List.tryFind (fun s -> s.Code = d.Id && s.Span = span)
+
+                        yield
+                            {
+                                Diagnostic = d
+                                Document = document
+                                Text = text
+                                Suggestion = suggestion
+                                Suppressed = d.IsSuppressed
+                            }
+
+                    if opts.ApiChanges && not (Configuration.isIgnoredPath options tree.FilePath) then
+                        for s in suggestions do
+                            let covered =
+                                ds |> Seq.exists (fun d -> d.Id = s.Code && d.Location.SourceSpan = s.Span)
+
+                            if
+                                not covered
+                                && not s.Fixes.IsEmpty
+                                && s.Fixes
+                                   |> List.exists (fun f -> f.Edits |> List.exists (fun e -> e.File.IsSome))
+                                && ruleOnFor tree s.Code
+                            then
+                                match Descriptors.byCode |> Map.tryFind s.Code with
+                                | Some descriptor ->
+                                    yield
+                                        {
+                                            Diagnostic =
+                                                Diagnostic.Create(descriptor, Location.Create(tree, s.Span), s.Message)
+                                            Document = document
+                                            Text = text
+                                            Suggestion = Some s
+                                            Suppressed = false
+                                        }
+                                | None -> ()
+        ]
+
+    task {
+        let! diagnostics = analyzerDiagnostics ()
+        return finish diagnostics
+    }
 
 /// Which of a file's fixes to apply this pass: bottom-up, non-overlapping
 /// (an overlap waits for the next pass), none that swallows a comment.
@@ -880,21 +902,18 @@ let private firstSentence (text: string) =
     | cuts -> text.Substring(0, List.min cuts + 1)
 
 /// One pass: analyse, report, apply what can be applied, check in memory.
-let private runPass
+let private runPassWith
     (opts: Options)
     (solution: Solution)
     (projectId: ProjectId)
     (onlyFile: string option)
     (baselineErrors: int)
     (pass: int)
-    (scope: HashSet<string> option)
+    (project: Project)
+    (compilation: Compilation)
+    (findings: Finding list)
     (ct: CancellationToken)
-    : PassOutcome =
-    let project = solution.GetProject projectId
-    let compilation = project.GetCompilationAsync(ct).Result
-    let sw = Diagnostics.Stopwatch.StartNew()
-    let findings = analyzeProject opts project compilation scope ct
-    runAnalysisMs <- runAnalysisMs + sw.ElapsedMilliseconds
+    : Task<PassOutcome> =
 
     let suppressionPolicy =
         if honorAllSuppressions then
@@ -913,7 +932,7 @@ let private runPass
             let reported = toReported f
 
             if baselineFingerprints.Contains reported.Fingerprint then
-                baselineSuppressed <- baselineSuppressed + 1
+                baselineSuppressedCount <- baselineSuppressedCount + 1
                 None
             elif f.Suppressed then
                 let correctness =
@@ -922,13 +941,13 @@ let private runPass
 
                 match suppressionPolicy with
                 | "none" ->
-                    suppressionOverridden <- suppressionOverridden + 1
+                    suppressionOverriddenCount <- suppressionOverriddenCount + 1
                     Some(f, reported, false)
                 | "no-correctness" when correctness ->
-                    suppressionOverridden <- suppressionOverridden + 1
+                    suppressionOverriddenCount <- suppressionOverriddenCount + 1
                     Some(f, reported, false)
                 | _ ->
-                    commentSuppressed <- commentSuppressed + 1
+                    commentSuppressedCount <- commentSuppressedCount + 1
                     None
             else
                 let inScope =
@@ -1007,329 +1026,417 @@ let private runPass
             | _ -> ()
         | [] -> ()
 
-    for documentId, items in byFile do
-        let f0, _, _ = items.Head
-        let tree = f0.Document.GetSyntaxTreeAsync(ct).Result
-
-        let fixes =
-            items |> List.choose (fun (f, _, _) -> f.Suggestion |> Option.bind primaryFix)
-
-        // a file this pass already rewrote (through another file's cross-file
-        // fix) has moved: its own fixes, and any fix reaching into a file
-        // touched this pass, wait for the next one, whose spans are fresh
-        let touched (path: string) =
-            changed |> Seq.exists (fun c -> Workspace.samePath c path)
-
-        // an edit set is applied whole or not at all: a target the solution holds no
-        // document for (a `#load`ed script, a file of another workspace) holds the fix
-        let fresh (fix: Fix) =
-            not (touched f0.Document.FilePath)
-            && fix.Edits
-               |> List.forall (fun e ->
-                   match e.File with
-                   | None -> true
-                   | Some path ->
-                       not (touched path)
-                       && not (Workspace.samePath path f0.Document.FilePath)
-                       && not (Seq.isEmpty (current.GetDocumentIdsWithFilePath path)))
-
-        let treeOf (path: string) =
-            current.GetDocumentIdsWithFilePath path
-            |> Seq.tryHead
-            |> Option.map (fun id -> current.GetDocument(id).GetSyntaxTreeAsync(ct).Result)
-
-        let chosen = chooseEdits tree treeOf (fixes |> List.filter fresh)
-
-        for f, _, _ in items do
-            match f.Suggestion |> Option.bind primaryFix with
-            | Some fix when List.contains fix chosen -> Out.good (printFinding "  " f)
-            | _ ->
-                let line = printFinding "  " f
-                printfn $"{line} (held to the next pass)"
-                heldFiles.Add(Path.GetFullPath f.Document.FilePath) |> ignore
-
-        if not (opts.DryRun || chosen.IsEmpty) then
-            // this document's edits, and those addressed to other files of the
-            // solution (the callers a reshaped method rewrites): each FILE once —
-            // a file two projects compile (a signed twin, a link) is one file on
-            // disk, so every document of that path takes the same text
-            let byTarget =
-                chosen
-                |> List.collect (fun fix -> fix.Edits)
-                |> List.groupBy (fun e ->
-                    match e.File with
-                    | None -> f0.Document.FilePath
-                    | Some path -> path)
-
-            for path, edits in byTarget do
-                let ids = current.GetDocumentIdsWithFilePath path |> List.ofSeq
-
-                if not ids.IsEmpty then
-                    let text = current.GetDocument(ids.Head).GetTextAsync(ct).Result
-
-                    let changes =
-                        edits
-                        // two fixes asking for the same insertion (a `partial` on the type) need it once
-                        |> List.distinctBy (fun e -> e.Span, e.Replacement)
-                        // insertions sharing a position land in text order
-                        |> List.sortBy (fun e -> e.Span.Start, e.Replacement)
-                        |> List.map (fun e -> TextChange(e.Span, e.Replacement))
-
-                    let patched = text.WithChanges changes
-
-                    for id in ids do
-                        current <- current.WithDocumentText(id, patched)
-
-                    if not (changed.Contains path) then
-                        changed.Add path
-
-            units.Add(byTarget |> List.map fst)
-
-            (let head = List.head (byTarget |> List.map fst)
-
-             match unitFixCounts.TryGetValue head with
-             | true, n -> unitFixCounts.[head] <- n + chosen.Length
-             | _ -> unitFixCounts.[head] <- chosen.Length)
-
-            unitFingerprints.[List.head (byTarget |> List.map fst)] <-
-                items
-                |> List.choose (fun (f, reported, _) ->
-                    match f.Suggestion |> Option.bind primaryFix with
-                    | Some fix when List.contains fix chosen -> Some reported.Fingerprint
-                    | _ -> None)
-
-            let codes =
-                items
-                |> List.choose (fun (f, _, _) ->
-                    match f.Suggestion |> Option.bind primaryFix with
-                    | Some fix when List.contains fix chosen -> Some f.Diagnostic.Id
-                    | _ -> None)
-
-            for path, _ in byTarget do
-                let key = Path.GetFullPath path
-
-                if not (passCodes.ContainsKey key) then
-                    passCodes.[key] <- HashSet<string>()
-
-                passCodes.[key].UnionWith codes
-
-            applied <- applied + chosen.Length
-
-    if opts.DryRun || applied = 0 then
-        {
-            Applied = 0
-            Solution = solution
-            ChangedFiles = []
-            SweepNext = List.ofSeq heldFiles
-        }
-    else
-        // the in-memory arbiter: the error count must not rise. Where it
-        // does, the files are tried one at a time and the offenders put back
-        let errorsIn (s: Solution) (id: ProjectId) =
-            let c = s.GetProject(id).GetCompilationAsync(ct).Result
-            (if opts.ParseOnly then parseErrorsOf c else errorsOf c)
-
-        let errorsAfter (s: Solution) = errorsIn s projectId
-
-        // a cross-file edit may land in another project: that project's own
-        // count is its baseline
-        let otherProjects =
-            changed
-            |> Seq.collect solution.GetDocumentIdsWithFilePath
-            |> Seq.map (fun d -> d.ProjectId)
-            |> Seq.filter (fun p -> p <> projectId)
-            |> Seq.distinct
-            |> List.ofSeq
-
-        let othersHold (s: Solution) =
-            otherProjects
-            |> List.forall (fun p -> (errorsIn s p).Length <= (errorsIn solution p).Length)
-
-        let after = errorsAfter current
-
-        // a unit's files as the pass left them, laid over `s`
-        let withUnit (s: Solution) (unit: string list) =
-            unit
-            |> List.fold
-                (fun (s: Solution) file ->
-                    current.GetDocumentIdsWithFilePath file
-                    |> Seq.fold
-                        (fun (s: Solution) id ->
-                            s.WithDocumentText(id, current.GetDocument(id).GetTextAsync(ct).Result))
-                        s)
-                s
-
-        let keptUnits, compiledSolution =
-            if after.Length <= baselineErrors && othersHold current then
-                List.ofSeq units, current
-            else
-                Out.bad $"  the pass introduced {after.Length - baselineErrors} error(s); bisecting per file:"
-
-                for d in after |> List.truncate 5 do
-                    Out.dim $"    {d}"
-
-                let mutable kept = solution
-                let mutable ok = []
-
-                // per unit: a document's fixes with every file they reached
-                for unit in units do
-                    let candidate = withUnit kept unit
-
-                    if (errorsAfter candidate).Length <= baselineErrors && othersHold candidate then
-                        kept <- candidate
-                        ok <- unit :: ok
-                    else
-                        let names = unit |> List.map Path.GetFileName |> String.concat ", "
-
-                        Out.skip
-                            $"  ({names}: its fixes broke the compilation and were not applied — a defect of this tool)"
-
-                        reject unit
-
-                        exitReasons.Add $"fixes in {names} put back"
-
-                List.rev ok, kept
-
-        // the project's own analyzers, where its build turns their warnings
-        // into errors: the analyzer errors of a file must not rise. A unit
-        // whose files gained one goes back; one that rose where no kept unit
-        // wrote (a cross-file effect) takes every unit back — the final build
-        // would fail on it
-        let keptUnits, finalSolution =
-            let analyzers = escalatedAnalyzers project compilation
-
-            if analyzers.IsEmpty || keptUnits.IsEmpty || opts.ParseOnly then
-                keptUnits, compiledSolution
-            else
-                let sw = Diagnostics.Stopwatch.StartNew()
-                // the pass's starting count, asked for only once an error shows
-                let before = lazy (analyzerErrorsByFile analyzers project compilation ct)
-
-                let countBefore file =
-                    match before.Value.TryGetValue file with
-                    | true, ds -> ds.Length
-                    | _ -> 0
-
-                let rec hold (kept: string list list) (s: Solution) =
-                    let after =
-                        analyzerErrorsByFile
-                            analyzers
-                            (s.GetProject projectId)
-                            (s.GetProject(projectId).GetCompilationAsync(ct).Result)
-                            ct
-
-                    let risen =
-                        after
-                        |> Seq.filter (fun kv -> kv.Value.Length > countBefore kv.Key)
-                        |> List.ofSeq
-
-                    if risen.IsEmpty then
-                        kept, s
-                    else
-                        let risenFiles = risen |> List.map (fun kv -> kv.Key)
-
-                        let touches (unit: string list) =
-                            unit |> List.exists (fun f -> List.exists (Workspace.samePath f) risenFiles)
-
-                        let offending, rest =
-                            match List.partition touches kept with
-                            | [], _ -> kept, []
-                            | split -> split
-
-                        for unit in offending do
-                            let names = unit |> List.map Path.GetFileName |> String.concat ", "
-
-                            let raised =
-                                risen
-                                |> List.filter (fun kv -> List.exists (Workspace.samePath kv.Key) unit)
-                                |> List.collect (fun kv -> kv.Value)
-                                |> List.map (fun d -> d.Id)
-                                |> List.distinct
-                                |> String.concat ", "
-
-                            let codes =
-                                unit
-                                |> List.collect (fun f ->
-                                    match passCodes.TryGetValue(Path.GetFullPath f) with
-                                    | true, cs -> List.ofSeq cs
-                                    | _ -> [])
-                                |> List.distinct
-                                |> List.sort
-                                |> String.concat ", "
-
-                            let what =
-                                if raised = "" then
-                                    "an analyzer error in another file"
-                                else
-                                    raised
-
-                            Out.skip
-                                $"  ({names}: its fixes ({codes}) raised {what}, an error under the project's warnings-as-errors — not applied)"
-
-                            exitReasons.Add $"fixes in {names} put back ({what})"
-                            reject unit
-                            adviseEscalated [ for id in raised.Split ", " -> id, codes ]
-
-                        for kv in risen |> List.truncate 5 do
-                            for d in kv.Value |> List.truncate 2 do
-                                Out.dim $"    {d}"
-
-                        hold rest (rest |> List.fold withUnit solution)
-
-                let result = hold keptUnits compiledSolution
-                runAnalysisMs <- runAnalysisMs + sw.ElapsedMilliseconds
-                result
-
-        let survivors = keptUnits |> List.concat |> List.distinct
-
-        if not opts.DryRun then
-            for unit in keptUnits do
-                recordUnit unit
-
-        for file in survivors do
-            let doc =
-                finalSolution.GetDocumentIdsWithFilePath file
-                |> Seq.tryHead
-                |> Option.map finalSolution.GetDocument
-
-            match doc with
-            | Some d ->
-                rememberOriginal file
-                writeSource file (d.GetTextAsync(ct).Result)
-
-                match passCodes.TryGetValue(Path.GetFullPath file) with
-                | true, codes ->
-                    let key = Path.GetFullPath file
-
-                    if not (appliedCodes.ContainsKey key) then
-                        appliedCodes.[key] <- HashSet<string>()
-
-                    appliedCodes.[key].UnionWith codes
-                | _ -> ()
-            | None -> ()
-
-        let count =
-            if survivors.Length = changed.Count then
-                applied
-            else
-                keptUnits
-                |> List.sumBy (fun unit ->
-                    match unitFixCounts.TryGetValue(List.head unit) with
-                    | true, n -> n
-                    | _ -> 0)
-
-        Out.good $"  {count} fix(es) applied in pass {pass}"
-
-        {
-            Applied = count
-            Solution = finalSolution
-            ChangedFiles = survivors
-            SweepNext =
-                Seq.append changed heldFiles
-                |> Seq.map Path.GetFullPath
+    task {
+        for documentId, items in byFile do
+            let f0, _, _ = items.Head
+            let! tree = f0.Document.GetSyntaxTreeAsync ct
+
+            let fixes =
+                items |> List.choose (fun (f, _, _) -> f.Suggestion |> Option.bind primaryFix)
+
+            // a file this pass already rewrote (through another file's cross-file
+            // fix) has moved: its own fixes, and any fix reaching into a file
+            // touched this pass, wait for the next one, whose spans are fresh
+            let touched (path: string) =
+                changed |> Seq.exists (fun c -> Workspace.samePath c path)
+
+            // an edit set is applied whole or not at all: a target the solution holds no
+            // document for (a `#load`ed script, a file of another workspace) holds the fix
+            let fresh (fix: Fix) =
+                not (touched f0.Document.FilePath)
+                && fix.Edits
+                   |> List.forall (fun e ->
+                       match e.File with
+                       | None -> true
+                       | Some path ->
+                           not (touched path)
+                           && not (Workspace.samePath path f0.Document.FilePath)
+                           && not (Seq.isEmpty (current.GetDocumentIdsWithFilePath path)))
+
+            let candidates = fixes |> List.filter fresh
+
+            // the trees of the other files the candidates edit, awaited here: the
+            // choice below asks for them through a synchronous lookup
+            let otherTrees = Dictionary<string, SyntaxTree option>()
+
+            for path in
+                candidates
+                |> List.collect (fun fix -> fix.Edits |> List.choose (fun e -> e.File)) do
+                if not (otherTrees.ContainsKey path) then
+                    match current.GetDocumentIdsWithFilePath path |> Seq.tryHead with
+                    | Some id ->
+                        let! other = current.GetDocument(id).GetSyntaxTreeAsync ct
+                        otherTrees.[path] <- Some other
+                    | None -> otherTrees.[path] <- None
+
+            let treeOf (path: string) =
+                match otherTrees.TryGetValue path with
+                | true, other -> other
+                | _ -> None
+
+            let chosen = chooseEdits tree treeOf candidates
+
+            for f, _, _ in items do
+                match f.Suggestion |> Option.bind primaryFix with
+                | Some fix when List.contains fix chosen -> Out.good (printFinding "  " f)
+                | _ ->
+                    let line = printFinding "  " f
+                    printfn $"{line} (held to the next pass)"
+                    heldFiles.Add(Path.GetFullPath f.Document.FilePath) |> ignore
+
+            if not (opts.DryRun || chosen.IsEmpty) then
+                // this document's edits, and those addressed to other files of the
+                // solution (the callers a reshaped method rewrites): each FILE once —
+                // a file two projects compile (a signed twin, a link) is one file on
+                // disk, so every document of that path takes the same text
+                let byTarget =
+                    chosen
+                    |> List.collect (fun fix -> fix.Edits)
+                    |> List.groupBy (fun e ->
+                        match e.File with
+                        | None -> f0.Document.FilePath
+                        | Some path -> path)
+
+                for path, edits in byTarget do
+                    let ids = current.GetDocumentIdsWithFilePath path |> List.ofSeq
+
+                    if not ids.IsEmpty then
+                        let! text = current.GetDocument(ids.Head).GetTextAsync ct
+
+                        let changes =
+                            edits
+                            // two fixes asking for the same insertion (a `partial` on the type) need it once
+                            |> List.distinctBy (fun e -> e.Span, e.Replacement)
+                            // insertions sharing a position land in text order
+                            |> List.sortBy (fun e -> e.Span.Start, e.Replacement)
+                            |> List.map (fun e -> TextChange(e.Span, e.Replacement))
+
+                        let patched = text.WithChanges changes
+
+                        for id in ids do
+                            current <- current.WithDocumentText(id, patched)
+
+                        if not (changed.Contains path) then
+                            changed.Add path
+
+                units.Add(byTarget |> List.map fst)
+
+                let head = List.head (byTarget |> List.map fst)
+
+                match unitFixCounts.TryGetValue head with
+                | true, n -> unitFixCounts.[head] <- n + chosen.Length
+                | _ -> unitFixCounts.[head] <- chosen.Length
+
+                unitFingerprints.[List.head (byTarget |> List.map fst)] <-
+                    items
+                    |> List.choose (fun (f, reported, _) ->
+                        match f.Suggestion |> Option.bind primaryFix with
+                        | Some fix when List.contains fix chosen -> Some reported.Fingerprint
+                        | _ -> None)
+
+                let codes =
+                    items
+                    |> List.choose (fun (f, _, _) ->
+                        match f.Suggestion |> Option.bind primaryFix with
+                        | Some fix when List.contains fix chosen -> Some f.Diagnostic.Id
+                        | _ -> None)
+
+                for path, _ in byTarget do
+                    let key = Path.GetFullPath path
+
+                    if not (passCodes.ContainsKey key) then
+                        passCodes.[key] <- HashSet<string>()
+
+                    passCodes.[key].UnionWith codes
+
+                applied <- applied + chosen.Length
+
+        if opts.DryRun || applied = 0 then
+            return
+                {
+                    Applied = 0
+                    Solution = solution
+                    ChangedFiles = []
+                    SweepNext = List.ofSeq heldFiles
+                }
+        else
+            // the in-memory arbiter: the error count must not rise. Where it
+            // does, the files are tried one at a time and the offenders put back
+            let errorsIn (s: Solution) (id: ProjectId) =
+                task {
+                    let! c = s.GetProject(id).GetCompilationAsync ct
+                    return (if opts.ParseOnly then parseErrorsOf c else errorsOf c)
+                }
+
+            let errorsAfter (s: Solution) = errorsIn s projectId
+
+            // a cross-file edit may land in another project: that project's own
+            // count is its baseline
+            let otherProjects =
+                changed
+                |> Seq.collect solution.GetDocumentIdsWithFilePath
+                |> Seq.map (fun d -> d.ProjectId)
+                |> Seq.filter (fun p -> p <> projectId)
                 |> Seq.distinct
                 |> List.ofSeq
-        }
+
+            // every other project holds its count: asked one at a time, in order,
+            // and no further than the first that does not
+            let othersHold (s: Solution) : Task<bool> =
+                task {
+                    let mutable holds = true
+                    let mutable rest = otherProjects
+
+                    while holds && not rest.IsEmpty do
+                        let! now = errorsIn s rest.Head
+                        let! before = errorsIn solution rest.Head
+                        holds <- now.Length <= before.Length
+                        rest <- rest.Tail
+
+                    return holds
+                }
+
+            // the project's own count holds, and only then the others are asked
+            let holdsCount (errors: int) (s: Solution) : Task<bool> =
+                if errors <= baselineErrors then
+                    othersHold s
+                else
+                    Task.FromResult false
+
+            let! after = errorsAfter current
+
+            // a unit's files as the pass left them, laid over `s`
+            let withUnit (s: Solution) (unit: string list) : Task<Solution> =
+                task {
+                    let mutable laid = s
+
+                    for file in unit do
+                        for id in current.GetDocumentIdsWithFilePath file do
+                            let! text = current.GetDocument(id).GetTextAsync ct
+                            laid <- laid.WithDocumentText(id, text)
+
+                    return laid
+                }
+
+            // per unit: a document's fixes with every file they reached
+            let bisect () : Task<string list list * Solution> =
+                task {
+                    Out.bad $"  the pass introduced {after.Length - baselineErrors} error(s); bisecting per file:"
+
+                    for d in after |> List.truncate 5 do
+                        Out.dim $"    {d}"
+
+                    let mutable kept = solution
+                    let mutable ok = []
+
+                    for unit in units do
+                        let! candidate = withUnit kept unit
+                        let! errors = errorsAfter candidate
+                        let! held = holdsCount errors.Length candidate
+
+                        if held then
+                            kept <- candidate
+                            ok <- unit :: ok
+                        else
+                            let names = unit |> List.map Path.GetFileName |> String.concat ", "
+
+                            Out.skip
+                                $"  ({names}: its fixes broke the compilation and were not applied — a defect of this tool)"
+
+                            reject unit
+
+                            exitReasons.Add $"fixes in {names} put back"
+
+                    return List.rev ok, kept
+                }
+
+            let! passHolds = holdsCount after.Length current
+
+            let! keptUnits, compiledSolution =
+                if passHolds then
+                    Task.FromResult((List.ofSeq units, current))
+                else
+                    bisect ()
+
+            // the project's own analyzers, where its build turns their warnings
+            // into errors: the analyzer errors of a file must not rise. A unit
+            // whose files gained one goes back; one that rose where no kept unit
+            // wrote (a cross-file effect) takes every unit back — the final build
+            // would fail on it
+            let! keptUnits, finalSolution =
+                let analyzers = escalatedAnalyzers project compilation
+
+                if analyzers.IsEmpty || keptUnits.IsEmpty || opts.ParseOnly then
+                    Task.FromResult((keptUnits, compiledSolution))
+                else
+                    let sw = Diagnostics.Stopwatch.StartNew()
+                    // the pass's starting count: started at most once, and only once an error shows
+                    let before = lazy (analyzerErrorsByFile analyzers project compilation ct)
+
+                    let rec hold (kept: string list list) (s: Solution) : Task<string list list * Solution> =
+                        task {
+                            let! compiled = s.GetProject(projectId).GetCompilationAsync ct
+                            let! after = analyzerErrorsByFile analyzers (s.GetProject projectId) compiled ct
+
+                            let! risen =
+                                if after.Count = 0 then
+                                    Task.FromResult<KeyValuePair<string, Diagnostic list> list> []
+                                else
+                                    task {
+                                        let! start = before.Value
+
+                                        let countBefore file =
+                                            match start.TryGetValue file with
+                                            | true, ds -> ds.Length
+                                            | _ -> 0
+
+                                        return
+                                            after
+                                            |> Seq.filter (fun kv -> kv.Value.Length > countBefore kv.Key)
+                                            |> List.ofSeq
+                                    }
+
+                            if risen.IsEmpty then
+                                return kept, s
+                            else
+                                let risenFiles = risen |> List.map (fun kv -> kv.Key)
+
+                                let touches (unit: string list) =
+                                    unit |> List.exists (fun f -> List.exists (Workspace.samePath f) risenFiles)
+
+                                let offending, rest =
+                                    match List.partition touches kept with
+                                    | [], _ -> kept, []
+                                    | split -> split
+
+                                for unit in offending do
+                                    let names = unit |> List.map Path.GetFileName |> String.concat ", "
+
+                                    let raised =
+                                        risen
+                                        |> List.filter (fun kv -> List.exists (Workspace.samePath kv.Key) unit)
+                                        |> List.collect (fun kv -> kv.Value)
+                                        |> List.map (fun d -> d.Id)
+                                        |> List.distinct
+                                        |> String.concat ", "
+
+                                    let codes =
+                                        unit
+                                        |> List.collect (fun f ->
+                                            match passCodes.TryGetValue(Path.GetFullPath f) with
+                                            | true, cs -> List.ofSeq cs
+                                            | _ -> [])
+                                        |> List.distinct
+                                        |> List.sort
+                                        |> String.concat ", "
+
+                                    let what =
+                                        if raised = "" then
+                                            "an analyzer error in another file"
+                                        else
+                                            raised
+
+                                    Out.skip
+                                        $"  ({names}: its fixes ({codes}) raised {what}, an error under the project's warnings-as-errors — not applied)"
+
+                                    exitReasons.Add $"fixes in {names} put back ({what})"
+                                    reject unit
+                                    adviseEscalated [ for id in raised.Split ", " -> id, codes ]
+
+                                for kv in risen |> List.truncate 5 do
+                                    for d in kv.Value |> List.truncate 2 do
+                                        Out.dim $"    {d}"
+
+                                // the units left, laid over the pass's starting solution one by one
+                                let mutable next = solution
+
+                                for unit in rest do
+                                    let! laid = withUnit next unit
+                                    next <- laid
+
+                                return! hold rest next
+                        }
+
+                    task {
+                        let! result = hold keptUnits compiledSolution
+                        runAnalysisMs <- runAnalysisMs + sw.ElapsedMilliseconds
+                        return result
+                    }
+
+            let survivors = keptUnits |> List.concat |> List.distinct
+
+            if not opts.DryRun then
+                for unit in keptUnits do
+                    recordUnit unit
+
+            for file in survivors do
+                let doc =
+                    finalSolution.GetDocumentIdsWithFilePath file
+                    |> Seq.tryHead
+                    |> Option.map finalSolution.GetDocument
+
+                match doc with
+                | Some d ->
+                    rememberOriginal file
+                    let! written = d.GetTextAsync ct
+                    writeSource file written
+
+                    match passCodes.TryGetValue(Path.GetFullPath file) with
+                    | true, codes ->
+                        let key = Path.GetFullPath file
+
+                        if not (appliedCodes.ContainsKey key) then
+                            appliedCodes.[key] <- HashSet<string>()
+
+                        appliedCodes.[key].UnionWith codes
+                    | _ -> ()
+                | None -> ()
+
+            let count =
+                if survivors.Length = changed.Count then
+                    applied
+                else
+                    keptUnits
+                    |> List.sumBy (fun unit ->
+                        match unitFixCounts.TryGetValue(List.head unit) with
+                        | true, n -> n
+                        | _ -> 0)
+
+            Out.good $"  {count} fix(es) applied in pass {pass}"
+
+            return
+                {
+                    Applied = count
+                    Solution = finalSolution
+                    ChangedFiles = survivors
+                    SweepNext =
+                        Seq.append changed heldFiles
+                        |> Seq.map Path.GetFullPath
+                        |> Seq.distinct
+                        |> List.ofSeq
+                }
+    }
+
+/// One pass over a project: its compilation and findings awaited, then
+/// `runPassWith`.
+let private runPass
+    (opts: Options)
+    (solution: Solution)
+    (projectId: ProjectId)
+    (onlyFile: string option)
+    (baselineErrors: int)
+    (pass: int)
+    (scope: HashSet<string> option)
+    (ct: CancellationToken)
+    : Task<PassOutcome> =
+    task {
+        let project = solution.GetProject projectId
+        let! compilation = project.GetCompilationAsync ct
+        let sw = Diagnostics.Stopwatch.StartNew()
+        let! findings = analyzeProject opts project compilation scope ct
+        runAnalysisMs <- runAnalysisMs + sw.ElapsedMilliseconds
+        return! runPassWith opts solution projectId onlyFile baselineErrors pass project compilation findings ct
+    }
 
 /// Load a project (and what it references) into the workspace, once.
 /// A project that was never restored has no `project.assets.json`, and
@@ -1435,48 +1542,55 @@ let private applyToWorkspace (ws: Workspace) (solution: Solution) : Solution =
 
 /// Load a project: an SDK-style one through MSBuildWorkspace (every
 /// framework flavor), a legacy one through the project-file reader.
-let private loadProject (workspace: MSBuildWorkspace) (path: string) : Workspace * Project list =
-    if Scripts.isScript path then
-        let ws = legacyWorkspace.Value
-        let project = Scripts.load ws path
-        ws :> Workspace, [ withRunDefines project ]
-    elif LegacyProjects.isLegacy path then
-        let ws = legacyWorkspace.Value
-        let project = LegacyProjects.load ws path
-        ws :> Workspace, (if isNull project then [] else [ withRunDefines project ])
-    else
-        let already =
-            workspace.CurrentSolution.Projects
-            |> Seq.exists (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)
+let private loadProject
+    (workspace: MSBuildWorkspace)
+    (path: string)
+    (ct: CancellationToken)
+    : Task<Workspace * Project list> =
+    task {
+        if Scripts.isScript path then
+            let ws = legacyWorkspace.Value
+            let project = Scripts.load ws path
+            return ws :> Workspace, [ withRunDefines project ]
+        elif LegacyProjects.isLegacy path then
+            let ws = legacyWorkspace.Value
+            let project = LegacyProjects.load ws path
+            return ws :> Workspace, (if isNull project then [] else [ withRunDefines project ])
+        else
+            let already =
+                workspace.CurrentSolution.Projects
+                |> Seq.exists (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)
 
-        if not already then
-            ensureRestored path
-            workspace.OpenProjectAsync(path).Wait()
+            if not already then
+                ensureRestored path
+                let! _ = workspace.OpenProjectAsync(path, cancellationToken = ct)
 
-            // a file that is not UTF-8: Roslyn's loader falls back to the system
-            // page on Windows and replaces the bytes with U+FFFD elsewhere; the
-            // document takes the text read the one way, so the sweep writes the
-            // file back as it came in on every platform
-            let mutable solution = workspace.CurrentSolution
+                // a file that is not UTF-8: Roslyn's loader falls back to the system
+                // page on Windows and replaces the bytes with U+FFFD elsewhere; the
+                // document takes the text read the one way, so the sweep writes the
+                // file back as it came in on every platform
+                let mutable solution = workspace.CurrentSolution
 
-            for project in workspace.CurrentSolution.Projects do
-                if not (isNull project.FilePath) && Workspace.samePath project.FilePath path then
-                    for document in project.Documents do
-                        if
-                            not (isNull document.FilePath)
-                            && File.Exists document.FilePath
-                            && Workspace.replacedInvalidBytes document.FilePath (document.GetTextAsync().Result)
-                        then
-                            solution <- solution.WithDocumentText(document.Id, Workspace.readSource document.FilePath)
+                for project in workspace.CurrentSolution.Projects do
+                    if not (isNull project.FilePath) && Workspace.samePath project.FilePath path then
+                        for document in project.Documents do
+                            if not (isNull document.FilePath) && File.Exists document.FilePath then
+                                let! text = document.GetTextAsync ct
 
-            if not (obj.ReferenceEquals(solution, workspace.CurrentSolution)) then
-                workspace.TryApplyChanges solution |> ignore
+                                if Workspace.replacedInvalidBytes document.FilePath text then
+                                    solution <-
+                                        solution.WithDocumentText(document.Id, Workspace.readSource document.FilePath)
 
-        workspace :> Workspace,
-        (RunDefines.addToSolution workspace.CurrentSolution).Projects
-        |> Seq.filter (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)
-        |> Seq.sortBy (frameworkOf >> tfmRank)
-        |> List.ofSeq
+                if not (obj.ReferenceEquals(solution, workspace.CurrentSolution)) then
+                    workspace.TryApplyChanges solution |> ignore
+
+            return
+                workspace :> Workspace,
+                (RunDefines.addToSolution workspace.CurrentSolution).Projects
+                |> Seq.filter (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)
+                |> Seq.sortBy (frameworkOf >> tfmRank)
+                |> List.ofSeq
+    }
 
 let private buildVerify (project: string) =
     let code, out, err =
@@ -1562,7 +1676,7 @@ let private narrowPutBack
     result, [ for kv in touched -> kv.Key, kv.Value ]
 
 /// The whole run for one Options value.
-let private executeRunCore (opts: Options) : int =
+let private executeRunCore (opts: Options) : Task<int> =
     // a source file that is not UTF-8 decodes as the system code page (Roslyn's
     // fallback asks the provider for it), not as UTF-8 with every such byte
     // replaced by U+FFFD and written back so
@@ -1589,470 +1703,483 @@ let private executeRunCore (opts: Options) : int =
     match resolveTargets opts.Target with
     | Error message ->
         eprintfn $"{message}"
-        2
+        Task.FromResult 2
     | Ok targets ->
-        msbuildRegistered.Force()
+        task {
+            msbuildRegistered.Force()
 
-        let properties = Dictionary<string, string>()
+            let properties = Dictionary<string, string>()
 
-        if opts.Framework <> "" then
-            properties.["TargetFramework"] <- opts.Framework
+            if opts.Framework <> "" then
+                properties.["TargetFramework"] <- opts.Framework
 
-        use workspace = MSBuildWorkspace.Create properties
-        workspace.SkipUnrecognizedProjects <- true
+            use workspace = MSBuildWorkspace.Create properties
+            workspace.SkipUnrecognizedProjects <- true
 
-        // Roslyn's loader hands every MSBuild message over as a Failure: a
-        // NuGet warning (NU1510, a package that will not be pruned) reads the
-        // same as a missing SDK. What tells them apart is whether the project
-        // came back, so the messages wait for the load and take its colour.
-        // The handler runs on the loader's thread, but before OpenProjectAsync
-        // returns, so a flush after the load sees every message of that load.
-        let pendingWorkspace = ResizeArray<string>()
+            // Roslyn's loader hands every MSBuild message over as a Failure: a
+            // NuGet warning (NU1510, a package that will not be pruned) reads the
+            // same as a missing SDK. What tells them apart is whether the project
+            // came back, so the messages wait for the load and take its colour.
+            // The handler runs on the loader's thread, but before OpenProjectAsync
+            // returns, so a flush after the load sees every message of that load.
+            let pendingWorkspace = ResizeArray<string>()
 
-        use _failed =
-            workspace.RegisterWorkspaceFailedHandler(fun e ->
-                lock pendingWorkspace (fun () -> pendingWorkspace.Add $"  (workspace: {e.Diagnostic.Message})"))
+            use _failed =
+                workspace.RegisterWorkspaceFailedHandler(fun e ->
+                    lock pendingWorkspace (fun () -> pendingWorkspace.Add $"  (workspace: {e.Diagnostic.Message})"))
 
-        let flushWorkspace (loaded: bool) =
-            let messages =
-                lock pendingWorkspace (fun () ->
-                    let xs = List.ofSeq pendingWorkspace
-                    pendingWorkspace.Clear()
-                    xs)
+            let flushWorkspace (loaded: bool) =
+                let messages =
+                    lock pendingWorkspace (fun () ->
+                        let xs = List.ofSeq pendingWorkspace
+                        pendingWorkspace.Clear()
+                        xs)
 
-            for message in messages do
-                if loaded then Out.dim message else Out.bad message
+                for message in messages do
+                    if loaded then Out.dim message else Out.bad message
 
-        let ct = CancellationToken.None
+            let ct = CancellationToken.None
 
-        let writeReportNow () =
-            match opts.Report with
-            | Some path -> writeReport path opts.Target (reportedSoFar ())
-            | None -> ()
+            let writeReportNow () =
+                match opts.Report with
+                | Some path -> writeReport path opts.Target (reportedSoFar ())
+                | None -> ()
 
-        let changedProjects = HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        let mutable exitCode = 0
+            let changedProjects = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            let mutable exitCode = 0
 
-        // every target loads first, so the project graph (who references whom)
-        // is complete before any project is analysed: a referenced executable
-        // is not a leaf, and a dependent is verified after
-        let loadSw = Diagnostics.Stopwatch.StartNew()
+            // every target loads first, so the project graph (who references whom)
+            // is complete before any project is analysed: a referenced executable
+            // is not a leaf, and a dependent is verified after
+            let loadSw = Diagnostics.Stopwatch.StartNew()
 
-        for target in targets do
-            let loaded =
+            for target in targets do
+                let mutable loaded = false
+
                 try
-                    let _, flavors = loadProject workspace (Path.GetFullPath(projectOf target))
-                    not flavors.IsEmpty
+                    let! _, flavors = loadProject workspace (Path.GetFullPath(projectOf target)) ct
+                    loaded <- not flavors.IsEmpty
                 with _ -> // a project that does not load is not loaded; fsharpanalyzer: ignore-line FR0055
-                    false
+                    ()
 
-            flushWorkspace loaded
+                flushWorkspace loaded
 
-        loadSw.Stop()
+            loadSw.Stop()
 
-        for target in targets do
-            let projectPath = Path.GetFullPath(projectOf target)
+            for target in targets do
+                let projectPath = Path.GetFullPath(projectOf target)
 
-            let onlyFile =
-                match target with
-                | Target.Project(_, only) -> only
+                let onlyFile =
+                    match target with
+                    | Target.Project(_, only) -> only
 
-            printfn $"== {Path.GetFileName projectPath} =="
+                printfn $"== {Path.GetFileName projectPath} =="
 
-            let projectWorkspace, flavors =
+                let mutable projectWorkspace = workspace :> Workspace
+                let mutable flavors: Project list = []
+
                 try
-                    loadProject workspace projectPath
+                    let! loadedWorkspace, loadedFlavors = loadProject workspace projectPath ct
+                    projectWorkspace <- loadedWorkspace
+                    flavors <- loadedFlavors
                 with ex ->
                     Out.bad $"  could not load {Path.GetFileName projectPath}: {ex.GetBaseException().Message}"
                     exitCode <- 1
-                    (workspace :> Workspace), []
 
-            flushWorkspace (not flavors.IsEmpty)
+                flushWorkspace (not flavors.IsEmpty)
 
-            let script = Scripts.isScript projectPath
-            // a script has no build either: the in-memory check holds its error count
-            let legacy = LegacyProjects.isLegacy projectPath || script
+                let script = Scripts.isScript projectPath
+                // a script has no build either: the in-memory check holds its error count
+                let legacy = LegacyProjects.isLegacy projectPath || script
 
-            if legacy && not script && not flavors.IsEmpty then
-                for r in
-                    LegacyProjects.loadReports ()
-                    |> List.filter (fun r -> Workspace.samePath r.Project projectPath) do
-                    let framework = r.FrameworkDirectory |> Option.defaultValue "?"
-
-                    Out.dim
-                        $"  (legacy project: {r.Documents} files, framework {framework}, {r.MissingReferences.Length} reference(s) unresolved)"
-
-                    if not r.MissingReferences.IsEmpty then
-                        let shown = String.Join(", ", r.MissingReferences |> List.truncate 8)
-                        Out.dim $"   unresolved: {shown}"
-
-                // the arbiter's baseline: does the project build before any fix?
-                if not (opts.DryRun || legacyBaseline.ContainsKey projectPath) then
-                    match LegacyProjects.build projectPath with
-                    | Some(Ok()) -> legacyBaseline.[projectPath] <- true
-                    | Some(Error detail) ->
-                        Out.dim "  (the project does not build before any fix: this run is verified in memory only)"
-
-                        for line in
-                            detail.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
-                            |> Array.truncate 3 do
-                            Out.dim $"    {line.Trim()}"
-
-                        legacyBaseline.[projectPath] <- false
-                    | None ->
-                        Out.dim "  (no MSBuild.exe found: this run is verified in memory only)"
-                        legacyBaseline.[projectPath] <- false
-
-            for project in flavors do
-                let framework = frameworkOf project
-
-                if framework <> "" then
-                    Out.dim $"  ({framework})"
-
-                let compileSw = Diagnostics.Stopwatch.StartNew()
-                let compilation = project.GetCompilationAsync(ct).Result
-
-                // the #r directives resolve while the compilation is built
-                if script then
-                    match Scripts.unresolvedOf projectPath with
-                    | [] -> Out.dim "  (script: verified in memory — nothing builds a script)"
-                    | unresolved ->
-                        let shown = String.Join(", ", unresolved |> List.truncate 8)
+                if legacy && not script && not flavors.IsEmpty then
+                    for r in
+                        LegacyProjects.loadReports ()
+                        |> List.filter (fun r -> Workspace.samePath r.Project projectPath) do
+                        let framework = r.FrameworkDirectory |> Option.defaultValue "?"
 
                         Out.dim
-                            $"  (script: verified in memory — nothing builds a script; {unresolved.Length} #r unresolved: {shown})"
+                            $"  (legacy project: {r.Documents} files, framework {framework}, {r.MissingReferences.Length} reference(s) unresolved)"
 
-                        // the references the script reads only under a symbol
-                        // this run does not define: likely what it builds with
-                        let source =
-                            try
-                                File.ReadAllText projectPath
-                            with
-                            | :? IOException
-                            | :? UnauthorizedAccessException -> ""
+                        if not r.MissingReferences.IsEmpty then
+                            let shown = String.Join(", ", r.MissingReferences |> List.truncate 8)
+                            Out.dim $"   unresolved: {shown}"
 
-                        match Scripts.symbolsGuardingReferences source (RunDefines.current ()) with
-                        | [] -> ()
-                        | symbols ->
-                            let named = String.Join(", ", symbols)
-                            let flags = String.Join(" ", symbols |> List.map (fun s -> $"--define {s}"))
+                    // the arbiter's baseline: does the project build before any fix?
+                    if not (opts.DryRun || legacyBaseline.ContainsKey projectPath) then
+                        match LegacyProjects.build projectPath with
+                        | Some(Ok()) -> legacyBaseline.[projectPath] <- true
+                        | Some(Error detail) ->
+                            Out.dim "  (the project does not build before any fix: this run is verified in memory only)"
 
-                            Out.skip
-                                $"  (the script also #r's references under #if {named}, which this run does not define, so they are not read; {flags} reads the script the way a build defining them does)"
+                            for line in
+                                detail.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+                                |> Array.truncate 3 do
+                                Out.dim $"    {line.Trim()}"
 
-                let baselineErrors =
-                    if opts.ParseOnly then
-                        parseErrorsOf compilation
-                    else
-                        errorsOf compilation
+                            legacyBaseline.[projectPath] <- false
+                        | None ->
+                            Out.dim "  (no MSBuild.exe found: this run is verified in memory only)"
+                            legacyBaseline.[projectPath] <- false
 
-                // the diagnostics bind every tree: this is the compile, and the
-                // analyzers after it find the models bound
-                runCompileMs <- runCompileMs + compileSw.ElapsedMilliseconds
+                for project in flavors do
+                    let framework = frameworkOf project
 
-                // a legacy project read without its build tree carries unresolved-reference
-                // errors by construction: the run proceeds on the relative in-memory check,
-                // the typed guards standing down where a type is unknown
-                if not (baselineErrors.IsEmpty || opts.ParseOnly || legacy) then
-                    Out.bad $"The project has {baselineErrors.Length} error(s) before any fix; fix those first:"
+                    if framework <> "" then
+                        Out.dim $"  ({framework})"
 
-                    for d in baselineErrors |> List.truncate 5 do
-                        Out.dim $"    {d}"
+                    let compileSw = Diagnostics.Stopwatch.StartNew()
+                    let! compilation = project.GetCompilationAsync ct
 
-                    exitCode <- max exitCode 1
-                else
-                    if not baselineErrors.IsEmpty && script then
-                        Out.dim
-                            $"  ({baselineErrors.Length} error(s) before any fix — a script host's globals (Args) and unrestored packages are unknown here; the in-memory check holds the count)"
-                    elif not baselineErrors.IsEmpty && legacy then
-                        Out.dim
-                            $"  ({baselineErrors.Length} error(s) before any fix, expected without the build tree; the in-memory check holds the count)"
+                    // the #r directives resolve while the compilation is built
+                    if script then
+                        match Scripts.unresolvedOf projectPath with
+                        | [] -> Out.dim "  (script: verified in memory — nothing builds a script)"
+                        | unresolved ->
+                            let shown = String.Join(", ", unresolved |> List.truncate 8)
 
-                    printfn
-                        $"""{(match opts.Codes with
-                              | Some c -> $"{c.Count} of {ruleCount}"
-                              | None -> string ruleCount)} rules, {Seq.length project.Documents} files"""
-
-                    let mutable pass = 1
-                    let mutable go = true
-                    let mutable solution = RunDefines.addToSolution projectWorkspace.CurrentSolution
-                    let mutable projectApplied = 0
-
-                    // the first pass analyses every file; a later one only what the pass
-                    // before it touched (PassOutcome.SweepNext). A fix can enable one in
-                    // a file it did not touch - a callee losing its dictionary write
-                    // frees a caller's loop - which the next RUN then finds: a fix
-                    // missed, never a wrong one applied
-                    let mutable scope: HashSet<string> option = None
-
-                    while go do
-                        printfn $"pass {pass}:"
-
-                        match scope with
-                        | Some files ->
                             Out.dim
-                                $"  (re-analysing {files.Count} of {Seq.length project.Documents} file(s): the ones the last pass touched)"
+                                $"  (script: verified in memory — nothing builds a script; {unresolved.Length} #r unresolved: {shown})"
+
+                            // the references the script reads only under a symbol
+                            // this run does not define: likely what it builds with
+                            let source =
+                                try
+                                    File.ReadAllText projectPath
+                                with
+                                | :? IOException
+                                | :? UnauthorizedAccessException -> ""
+
+                            match Scripts.symbolsGuardingReferences source (RunDefines.current ()) with
+                            | [] -> ()
+                            | symbols ->
+                                let named = String.Join(", ", symbols)
+                                let flags = String.Join(" ", symbols |> List.map (fun s -> $"--define {s}"))
+
+                                Out.skip
+                                    $"  (the script also #r's references under #if {named}, which this run does not define, so they are not read; {flags} reads the script the way a build defining them does)"
+
+                    let baselineErrors =
+                        if opts.ParseOnly then
+                            parseErrorsOf compilation
+                        else
+                            errorsOf compilation
+
+                    // the diagnostics bind every tree: this is the compile, and the
+                    // analyzers after it find the models bound
+                    runCompileMs <- runCompileMs + compileSw.ElapsedMilliseconds
+
+                    // a legacy project read without its build tree carries unresolved-reference
+                    // errors by construction: the run proceeds on the relative in-memory check,
+                    // the typed guards standing down where a type is unknown
+                    if not (baselineErrors.IsEmpty || opts.ParseOnly || legacy) then
+                        Out.bad $"The project has {baselineErrors.Length} error(s) before any fix; fix those first:"
+
+                        for d in baselineErrors |> List.truncate 5 do
+                            Out.dim $"    {d}"
+
+                        exitCode <- max exitCode 1
+                    else
+                        if not baselineErrors.IsEmpty && script then
+                            Out.dim
+                                $"  ({baselineErrors.Length} error(s) before any fix — a script host's globals (Args) and unrestored packages are unknown here; the in-memory check holds the count)"
+                        elif not baselineErrors.IsEmpty && legacy then
+                            Out.dim
+                                $"  ({baselineErrors.Length} error(s) before any fix, expected without the build tree; the in-memory check holds the count)"
+
+                        printfn
+                            $"""{(match opts.Codes with
+                                  | Some c -> $"{c.Count} of {ruleCount}"
+                                  | None -> string ruleCount)} rules, {Seq.length project.Documents} files"""
+
+                        let mutable pass = 1
+                        let mutable go = true
+                        let mutable solution = RunDefines.addToSolution projectWorkspace.CurrentSolution
+                        let mutable projectApplied = 0
+
+                        // the first pass analyses every file; a later one only what the pass
+                        // before it touched (PassOutcome.SweepNext). A fix can enable one in
+                        // a file it did not touch - a callee losing its dictionary write
+                        // frees a caller's loop - which the next RUN then finds: a fix
+                        // missed, never a wrong one applied
+                        let mutable scope: HashSet<string> option = None
+
+                        while go do
+                            printfn $"pass {pass}:"
+
+                            match scope with
+                            | Some files ->
+                                Out.dim
+                                    $"  (re-analysing {files.Count} of {Seq.length project.Documents} file(s): the ones the last pass touched)"
+                            | None -> ()
+
+                            let! outcome =
+                                runPass opts solution project.Id onlyFile baselineErrors.Length pass scope ct
+
+                            projectApplied <- projectApplied + outcome.Applied
+                            solution <- outcome.Solution
+
+                            scope <- Some(HashSet<string>(outcome.SweepNext, StringComparer.OrdinalIgnoreCase))
+
+                            // a cross-file fix may have landed in another project: it is
+                            // verified with the rest
+                            for file in outcome.ChangedFiles do
+                                for id in solution.GetDocumentIdsWithFilePath file do
+                                    let owner = solution.GetProject id.ProjectId
+
+                                    if
+                                        not (isNull owner.FilePath)
+                                        && not (Workspace.samePath owner.FilePath projectPath)
+                                    then
+                                        changedProjects.Add(Path.GetFullPath owner.FilePath) |> ignore
+
+                            // the workspace must see the new text for the next pass
+                            if outcome.Applied > 0 then
+                                solution <- applyToWorkspace projectWorkspace solution
+
+                            go <- outcome.Applied > 0 && pass < opts.MaxPasses && not opts.DryRun
+                            pass <- pass + 1
+
+                        runAppliedCount <- runAppliedCount + projectApplied
+
+                        if projectApplied > 0 then
+                            changedProjects.Add projectPath |> ignore
+
+                writeReportNow ()
+
+            // what follows awaits nothing: one function, outside the resumable code
+            let conclude () : int =
+                // the final arbiter: a real build of every project the run edited
+                if changedProjects.Count > 0 && not opts.DryRun then
+                    printfn "verifying every changed project builds..."
+
+                    // a legacy project builds through MSBuild.exe, where its baseline built
+                    let verify (project: string) : Result<unit, string> option =
+                        if Scripts.isScript project then
+                            printfn $"  {Path.GetFileName project}: verified in memory (a script has no build)"
+                            None
+                        elif LegacyProjects.isLegacy project then
+                            match legacyBaseline.TryGetValue project with
+                            | true, true -> LegacyProjects.build project
+                            | _ ->
+                                printfn $"  {Path.GetFileName project}: verified in memory only (no baseline build)"
+                                None
+                        else
+                            Some(buildVerify project)
+
+                    for project in changedProjects do
+                        match verify project with
                         | None -> ()
+                        | Some(Ok()) -> printfn $"  {Path.GetFileName project}: still builds"
+                        | Some(Error detail) ->
+                            // the project's own folder, not a sibling whose name it prefixes
+                            let folder = Path.GetDirectoryName project + string Path.DirectorySeparatorChar
 
-                        let outcome =
-                            runPass opts solution project.Id onlyFile baselineErrors.Length pass scope ct
+                            let files =
+                                runOriginals.Keys
+                                |> Seq.filter (fun f -> f.StartsWith(folder, StringComparison.OrdinalIgnoreCase))
+                                |> List.ofSeq
 
-                        projectApplied <- projectApplied + outcome.Applied
-                        solution <- outcome.Solution
+                            let patched = files |> List.map (fun f -> f, File.ReadAllBytes f)
 
-                        scope <- Some(HashSet<string>(outcome.SweepNext, StringComparer.OrdinalIgnoreCase))
+                            // first only the files the errors name, each with the files its
+                            // fixes are tied to — an analyzer error under TreatWarningsAsErrors,
+                            // which the in-memory compile does not see, sits in the file whose
+                            // fix raised it
+                            match narrowPutBack verify project files detail with
+                            | Some named, _ ->
+                                runBuildFailures <- runBuildFailures + 1
 
-                        // a cross-file fix may have landed in another project: it is
-                        // verified with the rest
-                        for file in outcome.ChangedFiles do
-                            for id in solution.GetDocumentIdsWithFilePath file do
-                                let owner = solution.GetProject id.ProjectId
+                                for file, ids in named do
+                                    Out.bad
+                                        $"  put back {Path.GetFileName file}: its fixes ({codesIn file}) failed the build with {ids}"
 
-                                if
-                                    not (isNull owner.FilePath)
-                                    && not (Workspace.samePath owner.FilePath projectPath)
-                                then
-                                    changedProjects.Add(Path.GetFullPath owner.FilePath) |> ignore
+                                adviseEscalated (
+                                    named
+                                    |> List.collect (fun (f, ids) -> [ for id in ids.Split ", " -> id, codesIn f ])
+                                )
 
-                        // the workspace must see the new text for the next pass
-                        if outcome.Applied > 0 then
-                            solution <- applyToWorkspace projectWorkspace solution
+                                printfn $"  {Path.GetFileName project}: builds without them"
 
-                        go <- outcome.Applied > 0 && pass < opts.MaxPasses && not opts.DryRun
-                        pass <- pass + 1
+                                exitReasons.Add
+                                    $"{Path.GetFileName project}: verification build failed on {named.Length} file(s)"
+                            | None, touched ->
+                                // out they all come, and the project is built again: one that does
+                                // not build without them either (a package never restored, a task
+                                // host the machine lacks) is no verdict, and the in-memory check stands
+                                putBack files "checking the project builds without them"
 
-                    runTotalApplied <- runTotalApplied + projectApplied
+                                match verify project with
+                                | Some(Error _) ->
+                                    for f, bytes in patched do
+                                        File.WriteAllBytes(f, bytes)
 
-                    if projectApplied > 0 then
-                        changedProjects.Add projectPath |> ignore
+                                    // a tied file outside the folder the narrowing put back
+                                    for f, bytes in touched do
+                                        if not (List.exists (Workspace.samePath f) files) then
+                                            File.WriteAllBytes(f, bytes)
 
-            writeReportNow ()
+                                    Out.dim
+                                        $"  {Path.GetFileName project} does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
 
-        // the final arbiter: a real build of every project the run edited
-        if changedProjects.Count > 0 && not opts.DryRun then
-            printfn "verifying every changed project builds..."
+                                    eprintfn $"{detail}"
+                                | _ ->
+                                    runBuildFailures <- runBuildFailures + 1
 
-            // a legacy project builds through MSBuild.exe, where its baseline built
-            let verify (project: string) : Result<unit, string> option =
-                if Scripts.isScript project then
-                    printfn $"  {Path.GetFileName project}: verified in memory (a script has no build)"
-                    None
-                elif LegacyProjects.isLegacy project then
-                    match legacyBaseline.TryGetValue project with
-                    | true, true -> LegacyProjects.build project
-                    | _ ->
-                        printfn $"  {Path.GetFileName project}: verified in memory only (no baseline build)"
-                        None
-                else
-                    Some(buildVerify project)
+                                    Out.bad
+                                        $"  {Path.GetFileName project} does not build with the fixes; putting them back:"
 
-            for project in changedProjects do
-                match verify project with
-                | None -> ()
-                | Some(Ok()) -> printfn $"  {Path.GetFileName project}: still builds"
-                | Some(Error detail) ->
-                    // the project's own folder, not a sibling whose name it prefixes
-                    let folder = Path.GetDirectoryName project + string Path.DirectorySeparatorChar
+                                    eprintfn $"{detail}"
+                                    exitReasons.Add $"{Path.GetFileName project}: verification build failed"
+                    // a project that references a changed one sees its public shape: it
+                    // must build too, and a failure puts back what it references
+                    let allProjects () =
+                        Seq.append
+                            workspace.CurrentSolution.Projects
+                            (if legacyWorkspace.IsValueCreated then
+                                 legacyWorkspace.Value.CurrentSolution.Projects
+                             else
+                                 Seq.empty)
 
-                    let files =
-                        runOriginals.Keys
-                        |> Seq.filter (fun f -> f.StartsWith(folder, StringComparison.OrdinalIgnoreCase))
+                    let byPath =
+                        allProjects ()
+                        |> Seq.filter (fun p -> not (isNull p.FilePath))
+                        |> Seq.groupBy (fun p -> Path.GetFullPath p.FilePath)
+                        |> Seq.map (fun (path, ps) -> path, Seq.head ps)
+                        |> dict
+
+                    let rec upstream (path: string) (seen: HashSet<string>) =
+                        match byPath.TryGetValue path with
+                        | true, p ->
+                            for r in p.ProjectReferences do
+                                let q = p.Solution.GetProject r.ProjectId
+
+                                if not (isNull q || isNull q.FilePath) then
+                                    let qp = Path.GetFullPath q.FilePath
+
+                                    if seen.Add qp then
+                                        upstream qp seen
+                        | _ -> ()
+
+                    let dependents =
+                        byPath.Keys
+                        |> Seq.filter (fun path -> not (changedProjects.Contains path))
+                        |> Seq.filter (fun path ->
+                            let seen = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                            upstream path seen
+                            seen |> Seq.exists changedProjects.Contains)
                         |> List.ofSeq
 
-                    let patched = files |> List.map (fun f -> f, File.ReadAllBytes f)
+                    let buildDependent (project: string) =
+                        if LegacyProjects.isLegacy project then
+                            LegacyProjects.build project
+                        else
+                            Some(buildVerify project)
 
-                    // first only the files the errors name, each with the files its
-                    // fixes are tied to — an analyzer error under TreatWarningsAsErrors,
-                    // which the in-memory compile does not see, sits in the file whose
-                    // fix raised it
-                    match narrowPutBack verify project files detail with
-                    | Some named, _ ->
-                        runBuildFailures <- runBuildFailures + 1
+                    for project in dependents do
+                        match buildDependent project with
+                        | None -> ()
+                        | Some(Ok()) -> printfn $"  {Path.GetFileName project}: still builds (a dependent)"
+                        | Some(Error detail) ->
+                            let seen = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                            upstream project seen
 
-                        for file, ids in named do
-                            Out.bad
-                                $"  put back {Path.GetFileName file}: its fixes ({codesIn file}) failed the build with {ids}"
+                            let files =
+                                runOriginals.Keys
+                                |> Seq.filter (fun f ->
+                                    seen
+                                    |> Seq.exists (fun up ->
+                                        changedProjects.Contains up
+                                        && f.StartsWith(Path.GetDirectoryName up, StringComparison.OrdinalIgnoreCase)))
+                                |> List.ofSeq
 
-                        adviseEscalated (
-                            named
-                            |> List.collect (fun (f, ids) -> [ for id in ids.Split ", " -> id, codesIn f ])
-                        )
+                            // the fixes come out and the dependent is built again: a dependent
+                            // that does not build without them either is no verdict on them (a
+                            // missing package, a task host the machine lacks), and they stand
+                            let patched = files |> List.map (fun f -> f, File.ReadAllBytes f)
 
-                        printfn $"  {Path.GetFileName project}: builds without them"
+                            putBack files "checking the dependent builds without them"
 
-                        exitReasons.Add
-                            $"{Path.GetFileName project}: verification build failed on {named.Length} file(s)"
-                    | None, touched ->
-                        // out they all come, and the project is built again: one that does
-                        // not build without them either (a package never restored, a task
-                        // host the machine lacks) is no verdict, and the in-memory check stands
-                        putBack files "checking the project builds without them"
-
-                        match verify project with
-                        | Some(Error _) ->
-                            for f, bytes in patched do
-                                File.WriteAllBytes(f, bytes)
-
-                            // a tied file outside the folder the narrowing put back
-                            for f, bytes in touched do
-                                if not (List.exists (Workspace.samePath f) files) then
+                            match buildDependent project with
+                            | Some(Error _) ->
+                                for f, bytes in patched do
                                     File.WriteAllBytes(f, bytes)
 
-                            Out.dim
-                                $"  {Path.GetFileName project} does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
+                                Out.dim
+                                    $"  {Path.GetFileName project} (a dependent) does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
 
-                            eprintfn $"{detail}"
-                        | _ ->
-                            runBuildFailures <- runBuildFailures + 1
-                            Out.bad $"  {Path.GetFileName project} does not build with the fixes; putting them back:"
-                            eprintfn $"{detail}"
-                            exitReasons.Add $"{Path.GetFileName project}: verification build failed"
-            // a project that references a changed one sees its public shape: it
-            // must build too, and a failure puts back what it references
-            let allProjects () =
-                Seq.append
-                    workspace.CurrentSolution.Projects
-                    (if legacyWorkspace.IsValueCreated then
-                         legacyWorkspace.Value.CurrentSolution.Projects
-                     else
-                         Seq.empty)
+                                eprintfn $"{detail}"
+                            | _ ->
+                                runBuildFailures <- runBuildFailures + 1
 
-            let byPath =
-                allProjects ()
-                |> Seq.filter (fun p -> not (isNull p.FilePath))
-                |> Seq.groupBy (fun p -> Path.GetFullPath p.FilePath)
-                |> Seq.map (fun (path, ps) -> path, Seq.head ps)
-                |> dict
+                                Out.bad
+                                    $"  {Path.GetFileName project} (a dependent) does not build with the fixes; putting back what it references:"
 
-            let rec upstream (path: string) (seen: HashSet<string>) =
-                match byPath.TryGetValue path with
-                | true, p ->
-                    for r in p.ProjectReferences do
-                        let q = p.Solution.GetProject r.ProjectId
+                                eprintfn $"{detail}"
+                                exitReasons.Add $"{Path.GetFileName project}: a dependent's verification build failed"
 
-                        if not (isNull q || isNull q.FilePath) then
-                            let qp = Path.GetFullPath q.FilePath
+                // the summary
+                let heldNotes = heldNoteCounts |> List.ofSeq
 
-                            if seen.Add qp then
-                                upstream qp seen
-                | _ -> ()
+                if not heldNotes.IsEmpty then
+                    let total = heldNotes |> List.sumBy (fun kv -> kv.Value)
 
-            let dependents =
-                byPath.Keys
-                |> Seq.filter (fun path -> not (changedProjects.Contains path))
-                |> Seq.filter (fun path ->
-                    let seen = HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                    upstream path seen
-                    seen |> Seq.exists changedProjects.Contains)
-                |> List.ofSeq
+                    let breakdown =
+                        heldNotes
+                        |> List.sortByDescending (fun kv -> kv.Value)
+                        |> List.map (fun kv -> $"{kv.Value} {kv.Key}")
+                        |> String.concat ", "
 
-            let buildDependent (project: string) =
-                if LegacyProjects.isLegacy project then
-                    LegacyProjects.build project
+                    Out.note $"  {total} advisory note(s) held: {breakdown} — list with --notes, export with --report"
+
+                if baselineSuppressedCount > 0 then
+                    printfn $"  ({baselineSuppressedCount} finding(s) matched the baseline and were suppressed)"
+
+                if commentSuppressedCount > 0 then
+                    printfn $"  ({commentSuppressedCount} finding(s) silenced by pragmas or SuppressMessage)"
+
+                if suppressionOverriddenCount > 0 then
+                    printfn
+                        $"  ({suppressionOverriddenCount} suppression(s) not honored by the csharp_refactor.suppressions policy — reported above, never auto-fixed)"
+
+                // the per-module figures are summed across the analyzer's threads, so
+                // they add up to more than the analysis wall clock — that gap IS the
+                // parallelism
+                let ruleTimings = Rules.timingsMs ()
+                let rulesMs = ruleTimings |> List.sumBy snd
+
+                Out.dim
+                    $"  timing: load {loadSw.ElapsedMilliseconds} ms, compile {runCompileMs} ms, analysis {runAnalysisMs} ms wall (rules {rulesMs} ms summed across threads)"
+
+                let slowest =
+                    ruleTimings
+                    |> List.truncate 5
+                    |> List.map (fun (name, ms) -> $"{name} {ms}ms")
+                    |> String.concat ", "
+
+                if slowest <> "" then
+                    Out.dim $"  slowest rules: {slowest}"
+
+                if opts.DryRun then
+                    let n = (reportedSoFar ()) |> List.filter (fun f -> f.Fixable) |> List.length
+                    printfn $"dry run: {n} fix(es) would be applied"
                 else
-                    Some(buildVerify project)
+                    printfn $"{runAppliedCount} fix(es) applied in total"
 
-            for project in dependents do
-                match buildDependent project with
-                | None -> ()
-                | Some(Ok()) -> printfn $"  {Path.GetFileName project}: still builds (a dependent)"
-                | Some(Error detail) ->
-                    let seen = HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                    upstream project seen
+                writeReportNow ()
 
-                    let files =
-                        runOriginals.Keys
-                        |> Seq.filter (fun f ->
-                            seen
-                            |> Seq.exists (fun up ->
-                                changedProjects.Contains up
-                                && f.StartsWith(Path.GetDirectoryName up, StringComparison.OrdinalIgnoreCase)))
-                        |> List.ofSeq
+                if runBuildFailures > 0 || exitCode <> 0 || exitReasons.Count > 0 then
+                    for r in exitReasons do
+                        eprintfn $"  {r}"
 
-                    // the fixes come out and the dependent is built again: a dependent
-                    // that does not build without them either is no verdict on them (a
-                    // missing package, a task host the machine lacks), and they stand
-                    let patched = files |> List.map (fun f -> f, File.ReadAllBytes f)
+                    max exitCode 1
+                elif opts.FailOnFindings && not (reportedSoFar ()).IsEmpty then
+                    3
+                else
+                    0
 
-                    putBack files "checking the dependent builds without them"
-
-                    match buildDependent project with
-                    | Some(Error _) ->
-                        for f, bytes in patched do
-                            File.WriteAllBytes(f, bytes)
-
-                        Out.dim
-                            $"  {Path.GetFileName project} (a dependent) does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
-
-                        eprintfn $"{detail}"
-                    | _ ->
-                        runBuildFailures <- runBuildFailures + 1
-
-                        Out.bad
-                            $"  {Path.GetFileName project} (a dependent) does not build with the fixes; putting back what it references:"
-
-                        eprintfn $"{detail}"
-                        exitReasons.Add $"{Path.GetFileName project}: a dependent's verification build failed"
-
-        // the summary
-        let heldNotes = heldNoteCounts |> List.ofSeq
-
-        if not heldNotes.IsEmpty then
-            let total = heldNotes |> List.sumBy (fun kv -> kv.Value)
-
-            let breakdown =
-                heldNotes
-                |> List.sortByDescending (fun kv -> kv.Value)
-                |> List.map (fun kv -> $"{kv.Value} {kv.Key}")
-                |> String.concat ", "
-
-            Out.note $"  {total} advisory note(s) held: {breakdown} — list with --notes, export with --report"
-
-        if baselineSuppressed > 0 then
-            printfn $"  ({baselineSuppressed} finding(s) matched the baseline and were suppressed)"
-
-        if commentSuppressed > 0 then
-            printfn $"  ({commentSuppressed} finding(s) silenced by pragmas or SuppressMessage)"
-
-        if suppressionOverridden > 0 then
-            printfn
-                $"  ({suppressionOverridden} suppression(s) not honored by the csharp_refactor.suppressions policy — reported above, never auto-fixed)"
-
-        // the per-module figures are summed across the analyzer's threads, so
-        // they add up to more than the analysis wall clock — that gap IS the
-        // parallelism
-        let ruleTimings = Rules.timingsMs ()
-        let rulesMs = ruleTimings |> List.sumBy snd
-
-        Out.dim
-            $"  timing: load {loadSw.ElapsedMilliseconds} ms, compile {runCompileMs} ms, analysis {runAnalysisMs} ms wall (rules {rulesMs} ms summed across threads)"
-
-        let slowest =
-            ruleTimings
-            |> List.truncate 5
-            |> List.map (fun (name, ms) -> $"{name} {ms}ms")
-            |> String.concat ", "
-
-        if slowest <> "" then
-            Out.dim $"  slowest rules: {slowest}"
-
-        if opts.DryRun then
-            let n = (reportedSoFar ()) |> List.filter (fun f -> f.Fixable) |> List.length
-            printfn $"dry run: {n} fix(es) would be applied"
-        else
-            printfn $"{runTotalApplied} fix(es) applied in total"
-
-        writeReportNow ()
-
-        if runBuildFailures > 0 || exitCode <> 0 || exitReasons.Count > 0 then
-            for r in exitReasons do
-                eprintfn $"  {r}"
-
-            max exitCode 1
-        elif opts.FailOnFindings && not (reportedSoFar ()).IsEmpty then
-            3
-        else
-            0
+            return conclude ()
+        }
 
 /// Where the run's `csharp_refactor.defines` is looked up from: the target
 /// directory, the directory of a target file, or the fixed part of a glob.
@@ -2132,7 +2259,19 @@ let executeRun (opts: Options) : int =
     |> Option.iter (fun value -> Environment.SetEnvironmentVariable("DefineConstants", value))
 
     try
-        executeRunCore opts
+        // The tool's one sync-over-async boundary: the run is task-based and
+        // is waited for here, nowhere else. The entry point and the MCP
+        // handler are synchronous, and `Rules.restrictTo` is an AsyncLocal
+        // this frame sets and clears - it flows into the run, and a frame that
+        // awaited could not clear it for its caller.
+        let run = executeRunCore opts
+
+        try
+            run.Result
+        with :? AggregateException as wrapped when wrapped.InnerExceptions.Count = 1 ->
+            // a single failure is thrown as itself, its stack kept; several stay the aggregate
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(wrapped.InnerException).Throw()
+            0 // not reached: Throw does not return
     finally
         Rules.restrictTo None
 

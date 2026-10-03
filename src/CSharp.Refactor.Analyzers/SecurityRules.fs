@@ -40,7 +40,16 @@
 /// `Host=`, `User Id=`). Loopback servers (`localhost`, `127.0.0.1`,
 /// `::1`, `(local)`, `(localdb)\…`, `.`) and placeholder passwords
 /// (`password`, `test`, `changeme`, `<…>`, `{…}`, `%…%`, `$(…)`) are
-/// never reported.
+/// never reported. Also a string literal handed to something whose name
+/// says it is a credential — a parameter, a named argument, a field,
+/// property or local, an initializer member whose name ENDS in `password`,
+/// `passwd`, `pwd`, `secret`, `apikey`/`api_key`, `token` or `credential`
+/// (`servicePassword`, `clientSecret`; `passwordHint` and `tokenEndpoint`
+/// name something else). Quiet there: test files; empty and placeholder
+/// texts and samples; a text that is itself a name (a setting's key, the
+/// sink's own name, a scheme word such as `Bearer`); prose and formats (a
+/// space, a trailing colon, `{0}`); a URL. The message never shows the
+/// literal.
 ///
 /// CR0125 (correctness, note, priority): `MD5.Create()`, `SHA1`, `DES`,
 /// `TripleDES`, `RC2`, `new MD5CryptoServiceProvider()`;
@@ -486,6 +495,130 @@ let private connectionStrings (tree: SyntaxTree) : Suggestion list =
         | _ -> None)
     |> List.ofSeq
 
+/// A name that says its value is a credential: it ENDS in the word
+/// (`servicePassword`, `clientSecret`, `ApiKey`, `access_token`), digits
+/// after it or not. A name that goes on (`passwordHint`, `tokenEndpoint`,
+/// `secretName`, `apiKeyHeader`) names something about a credential.
+let private credentialName =
+    Regex(
+        @"(password|passwd|pwd|secret|api_?key|token|credentials?)\d*$",
+        RegexOptions.IgnoreCase
+        ||| RegexOptions.CultureInvariant
+        ||| RegexOptions.Compiled
+    )
+
+let private credentialWord =
+    Regex(
+        @"password|passwd|pwd|secret|api[_\-]?key|token|credential",
+        RegexOptions.IgnoreCase
+        ||| RegexOptions.CultureInvariant
+        ||| RegexOptions.Compiled
+    )
+
+/// A text made of letters and the punctuation of names and setting keys.
+let private nameLike =
+    Regex(@"^[A-Za-z][A-Za-z_.:\-]*$", RegexOptions.CultureInvariant ||| RegexOptions.Compiled)
+
+let private schemeWords =
+    set [ "bearer"; "basic"; "none"; "null"; "default"; "n/a" ]
+
+/// Can the literal be a credential? Not an empty or placeholder text, not
+/// a sample, not one character repeated, not prose or a format (a space, a
+/// trailing colon, a `{0}`), not a URL, not the name of a setting (a name
+/// holding a credential word, or the sink's own name).
+let private credentialValue (sink: string) (value: string) =
+    let v = value.Trim()
+    let plain (s: string) = s.Replace("_", "").ToLowerInvariant()
+
+    v.Length >= 6
+    // a `token` is also a lexer's word: there the value must look like key material
+    && (not (sink.TrimEnd([| '0' .. '9' |]).EndsWith("token", StringComparison.OrdinalIgnoreCase))
+        || (v.Length >= 8 && v |> Seq.exists Char.IsDigit))
+    && not (placeholderPassword v)
+    && not (isPlaceholder v)
+    && not (schemeWords.Contains(v.ToLowerInvariant()))
+    && (v |> Seq.distinct |> Seq.length) > 1
+    && not (v |> Seq.forall (fun c -> c = '*' || c = 'x' || c = 'X' || c = '.' || c = '-'))
+    && not (v |> Seq.exists Char.IsWhiteSpace)
+    && not (v.EndsWith ":")
+    && not (v.Contains "{0")
+    && not (v.Contains "://")
+    && plain v <> plain sink
+    && not (nameLike.IsMatch v && credentialWord.IsMatch v)
+
+/// A string literal handed to something whose NAME says it is a
+/// credential: a parameter, a named argument, a field, property or local
+/// it initialises or is assigned to, a member of an initializer.
+let private namedCredentials (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+    if Text.isTestFile tree then
+        []
+    else
+        let rec outward (n: SyntaxNode) =
+            match n.Parent with
+            | :? ParenthesizedExpressionSyntax as p -> outward p
+            | parent -> n, parent
+
+        let simpleName (e: ExpressionSyntax) =
+            match e with
+            | :? IdentifierNameSyntax as id -> Some id.Identifier.ValueText
+            | :? MemberAccessExpressionSyntax as ma -> Some ma.Name.Identifier.ValueText
+            | _ -> None
+
+        // a string literal, or an interpolated string with no hole (a literal by another spelling)
+        let literalText (n: SyntaxNode) : (ExpressionSyntax * string) option =
+            match n with
+            | :? LiteralExpressionSyntax as l when l.IsKind SyntaxKind.StringLiteralExpression ->
+                Some(l :> ExpressionSyntax, l.Token.ValueText)
+            | :? InterpolatedStringExpressionSyntax as i when i.Contents.Count = 1 ->
+                match i.Contents.[0] with
+                | :? InterpolatedStringTextSyntax as t -> Some(i :> ExpressionSyntax, t.TextToken.ValueText)
+                | _ -> None
+            | _ -> None
+
+        tree.GetRoot().DescendantNodes()
+        |> Seq.choose (fun n ->
+            match literalText n with
+            | Some(l, value) ->
+                let written, parent = outward l
+
+                // the name of what receives the literal
+                let sink =
+                    match parent with
+                    | :? ArgumentSyntax as a when not (isNull a.NameColon) ->
+                        Some a.NameColon.Name.Identifier.ValueText
+                    | :? ArgumentSyntax as a ->
+                        match model.GetOperation a with
+                        | :? Operations.IArgumentOperation as op when not (isNull op.Parameter) ->
+                            Some op.Parameter.Name
+                        | _ -> None
+                    | :? AttributeArgumentSyntax as a when not (isNull a.NameEquals) ->
+                        Some a.NameEquals.Name.Identifier.ValueText
+                    | :? AssignmentExpressionSyntax as a when
+                        a.IsKind SyntaxKind.SimpleAssignmentExpression
+                        && obj.ReferenceEquals(a.Right, written)
+                        ->
+                        simpleName a.Left
+                    | :? EqualsValueClauseSyntax as init ->
+                        match init.Parent with
+                        | :? VariableDeclaratorSyntax as v -> Some v.Identifier.ValueText
+                        | :? PropertyDeclarationSyntax as p -> Some p.Identifier.ValueText
+                        | _ -> None
+                    | :? AnonymousObjectMemberDeclaratorSyntax as m when not (isNull m.NameEquals) ->
+                        Some m.NameEquals.Name.Identifier.ValueText
+                    | _ -> None
+
+                match sink with
+                | Some name when credentialName.IsMatch name && credentialValue name value ->
+                    Some(
+                        Suggestion.note
+                            ConnectionStringCode
+                            $"A literal is given to '{name}': a credential in source is in every clone and every log of it — move it to configuration and rotate it"
+                            l.Span
+                    )
+                | _ -> None
+            | None -> None)
+        |> List.ofSeq
+
 // ---- CR0125 / CR0126 ----
 
 let private weakHashes = [ "MD5"; "SHA1"; "DES"; "TripleDES"; "RC2"; "RIPEMD160" ]
@@ -753,7 +886,9 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
     sqlSinks tree model
     @ commandLines tree model
     @ secrets tree
-    @ connectionStrings tree
+    // one literal, one note: a connection string given to a password is the connection string's
+    @ (connectionStrings tree @ namedCredentials tree model
+       |> List.distinctBy (fun s -> s.Span))
     // retiring a protocol changes what the wire negotiates: an editor action,
     // or `csharp_refactor.CR0125.drop_legacy_protocols = true` for a sweep
     @ weakCrypto (RuleContext.knobBool ctx WeakCryptoCode "drop_legacy_protocols" false) tree model

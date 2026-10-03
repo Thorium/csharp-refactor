@@ -151,9 +151,9 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
             )
             ->
             match model.GetDeclaredSymbol md with
+            | null -> None
             | m when
-                not (isNull m)
-                && not m.IsVirtual
+                not m.IsVirtual
                 && not m.IsOverride
                 && not m.IsAbstract
                 && m.ExplicitInterfaceImplementations.IsEmpty

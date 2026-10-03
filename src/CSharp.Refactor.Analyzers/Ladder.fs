@@ -428,10 +428,10 @@ let private requiredMembers (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                    |> Seq.forall (fun a -> isNull a.Body && isNull a.ExpressionBody && a.Modifiers.Count = 0)
                 ->
                 match model.GetDeclaredSymbol p with
+                | null -> None
                 | property when
-                    not (isNull property)
-                    && (property.ContainingType.TypeKind = TypeKind.Class
-                        || property.ContainingType.TypeKind = TypeKind.Struct)
+                    (property.ContainingType.TypeKind = TypeKind.Class
+                     || property.ContainingType.TypeKind = TypeKind.Struct)
                     && not (serialized property)
                     && not (serialized property.ContainingType)
                     && not (Index.isEntity index.Value property.ContainingType)

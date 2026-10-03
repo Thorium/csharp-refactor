@@ -8,6 +8,7 @@ namespace CSharp.Refactor.Roslyn
 
 open System
 open System.Collections.Generic
+open System.Collections.Concurrent
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.FindSymbols
 open CSharp.Refactor
@@ -18,58 +19,70 @@ module References =
     /// own pass alike, on as many threads as `--jobs` - and each tree is
     /// answered the sites outside its own file.
     let solutionOracle (solution: Solution) : SyntaxTree -> ISymbol -> ReferenceSite list =
-        let models =
-            System.Collections.Concurrent.ConcurrentDictionary<DocumentId, Lazy<SemanticModel>>()
+        // one computation per key however many threads ask at once; a
+        // computation that faults is forgotten, so the next asker tries
+        // again instead of being handed the same failure for good
+        let once (cache: ConcurrentDictionary<'k, Lazy<'v>>) (key: 'k) (make: 'k -> 'v) : 'v =
+            let entry = cache.GetOrAdd(key, (fun k -> lazy (make k)))
 
+            try
+                entry.Value
+            with _ ->
+                // this entry only: another thread may have put a fresh one in already
+                (cache :> ICollection<KeyValuePair<'k, Lazy<'v>>>).Remove(KeyValuePair(key, entry))
+                |> ignore
+
+                reraise ()
+
+        let models = ConcurrentDictionary<DocumentId, Lazy<SemanticModel>>()
+
+        // the rules are synchronous by contract (Roslyn calls an analyzer's
+        // actions synchronously) and the workspace answers in tasks: the
+        // oracle is where the two meet, and waits
         let modelOf (document: Document) =
-            models.GetOrAdd(document.Id, (fun _ -> lazy (document.GetSemanticModelAsync().Result))).Value
+            once models document.Id (fun _ -> document.GetSemanticModelAsync().Result)
 
-        // every site of the symbol, the asking file's included; None when the
-        // search failed
-        let sitesOf =
-            let cache =
-                System.Collections.Concurrent.ConcurrentDictionary<ISymbol, Lazy<(string * ReferenceSite) list option>>(
-                    SymbolEqualityComparer.Default
-                )
+        let sites =
+            ConcurrentDictionary<ISymbol, Lazy<(string * ReferenceSite) list>>(SymbolEqualityComparer.Default)
 
-            fun (symbol: ISymbol) ->
-                cache
-                    .GetOrAdd(
-                        symbol,
-                        fun symbol ->
-                            lazy
-                                (try
-                                    SymbolFinder.FindReferencesAsync(symbol, solution).Result
-                                    |> Seq.collect (fun r -> r.Locations)
-                                    |> Seq.choose (fun location ->
-                                        let document = location.Document
+        // every site of the symbol, the asking file's included
+        let search (symbol: ISymbol) : (string * ReferenceSite) list =
+            SymbolFinder.FindReferencesAsync(symbol, solution).Result
+            |> Seq.collect (fun r -> r.Locations)
+            |> Seq.choose (fun location ->
+                let document = location.Document
 
-                                        if location.IsImplicit || isNull document || isNull document.FilePath then
-                                            None
-                                        else
-                                            let root = document.GetSyntaxRootAsync().Result
+                if location.IsImplicit || isNull document || isNull document.FilePath then
+                    None
+                else
+                    let root = document.GetSyntaxRootAsync().Result
 
-                                            let node =
-                                                root.FindNode(
-                                                    location.Location.SourceSpan,
-                                                    getInnermostNodeForTie = true
-                                                )
+                    let node =
+                        root.FindNode(location.Location.SourceSpan, getInnermostNodeForTie = true)
 
-                                            Some(
-                                                document.FilePath,
-                                                {
-                                                    Tree = root.SyntaxTree
-                                                    Model = modelOf document
-                                                    Node = node
-                                                    Editable = document.Project.Language = LanguageNames.CSharp
-                                                }
-                                            ))
-                                    |> List.ofSeq
-                                    |> Some
-                                 with _ ->
-                                     None)
-                    )
-                    .Value
+                    Some(
+                        document.FilePath,
+                        {
+                            Tree = root.SyntaxTree
+                            Model = modelOf document
+                            Node = node
+                            Editable = document.Project.Language = LanguageNames.CSharp
+                        }
+                    ))
+            |> List.ofSeq
+
+        // None when the search failed: a task that faulted or was cancelled
+        // (the wait wraps either in an AggregateException), a location the
+        // tree no longer holds, a document without a model
+        let sitesOf (symbol: ISymbol) : (string * ReferenceSite) list option =
+            try
+                Some(once sites symbol search)
+            with
+            | :? AggregateException
+            | :? OperationCanceledException
+            | :? ArgumentException
+            | :? InvalidOperationException
+            | :? NotSupportedException -> None
 
         fun (tree: SyntaxTree) (symbol: ISymbol) ->
             match sitesOf symbol with
