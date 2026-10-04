@@ -287,6 +287,10 @@ let private tiedFiles (file: string) =
 /// reports them and leaves them be, instead of trying them again.
 let private rejectedFixes = HashSet<string>()
 
+/// The framework flavors this run swept: a wider flavor of the same project
+/// leaves the code they compile to them (Flavors).
+let private sweptFlavors = HashSet<ProjectId>()
+
 let private codesIn (file: string) =
     match appliedCodes.TryGetValue(Path.GetFullPath file) with
     | true, codes -> codes |> Seq.sort |> String.concat ", "
@@ -580,13 +584,19 @@ let private analyzeProject
     (scope: HashSet<string> option)
     (ct: CancellationToken)
     =
-    // passes after the first: only the files the previous pass touched
+    // the narrower frameworks of this project swept before it
+    let narrower =
+        Flavors.narrowerOf project |> List.filter (fun p -> sweptFlavors.Contains p.Id)
+
+    // passes after the first: only the files the previous pass touched; and
+    // never a file a narrower framework's sweep already read as it stands here
     let inScope (tree: SyntaxTree) =
-        match scope with
-        | None -> true
-        | Some files ->
-            not (String.IsNullOrEmpty tree.FilePath)
-            && files.Contains(Path.GetFullPath tree.FilePath)
+        (match scope with
+         | None -> true
+         | Some files ->
+             not (String.IsNullOrEmpty tree.FilePath)
+             && files.Contains(Path.GetFullPath tree.FilePath))
+        && not (Flavors.sweptBy narrower tree)
 
     // the projects this one's public surface is held for, and the analyzer
     // options carrying that and --api-changes, for the analyzer run and the
@@ -652,8 +662,8 @@ let private analyzeProject
     // the analyzers' answer is awaited; what is made of it runs synchronously
     let analyzerDiagnostics () : Task<ImmutableArray<Diagnostic>> =
         match scope with
-        | None -> withAnalyzers.GetAnalyzerDiagnosticsAsync ct
-        | Some _ ->
+        | None when narrower.IsEmpty -> withAnalyzers.GetAnalyzerDiagnosticsAsync ct
+        | _ ->
             // the analyzers over the scoped trees alone: a tree is analysed
             // with the whole compilation's semantics, but only ITS findings
             // are computed. One call with the others set aside, not a call
@@ -768,6 +778,9 @@ let private analyzeProject
                         Rules.parseOnly tree ruleContext, []
                     else
                         Rules.allWithFailures tree model ruleContext
+
+                // a fix in code a narrower framework compiles too is that sweep's
+                let suggestions = Flavors.narrowestOnly narrower (fun _ -> []) tree suggestions
 
                 computed.[i] <- Some(document, text, suggestions, failures)
 
@@ -1203,6 +1216,30 @@ let private runPassWith
                 else
                     Task.FromResult false
 
+            // the other projects whose count rose, with what each gained
+            let risenIn (s: Solution) : Task<(ProjectId * int * string list) list> =
+                task {
+                    let risen = ResizeArray()
+
+                    for other in otherProjects do
+                        let! now = errorsIn s other
+                        let! before = errorsIn solution other
+
+                        if now.Length > before.Length then
+                            risen.Add(
+                                (other,
+                                 now.Length - before.Length,
+                                 List.except (List.map string before) (List.map string now))
+                            )
+
+                    return List.ofSeq risen
+                }
+
+            // the same project file under another target framework: the file is
+            // compiled once per framework, and a fix must hold in each
+            let isFlavor (other: ProjectId) =
+                String.Equals(solution.GetProject(other).FilePath, project.FilePath, StringComparison.OrdinalIgnoreCase)
+
             let! after = errorsAfter current
 
             // a unit's files as the pass left them, laid over `s`
@@ -1221,10 +1258,22 @@ let private runPassWith
             // per unit: a document's fixes with every file they reached
             let bisect () : Task<string list list * Solution> =
                 task {
-                    Out.bad $"  the pass introduced {after.Length - baselineErrors} error(s); bisecting per file:"
+                    if after.Length > baselineErrors then
+                        Out.bad $"  the pass introduced {after.Length - baselineErrors} error(s); bisecting per file:"
 
-                    for d in after |> List.truncate 5 do
-                        Out.dim $"    {d}"
+                        for d in after |> List.truncate 5 do
+                            Out.dim $"    {d}"
+                    else
+                        // this project holds its count: the errors are in a
+                        // project a cross-file edit reached
+                        let! risen = risenIn current
+
+                        for other, count, gained in risen do
+                            Out.bad
+                                $"  the pass introduced {count} error(s) in {solution.GetProject(other).Name}; bisecting per file:"
+
+                            for d in gained |> List.truncate 5 do
+                                Out.dim $"    {d}"
 
                     let mutable kept = solution
                     let mutable ok = []
@@ -1240,12 +1289,29 @@ let private runPassWith
                         else
                             let names = unit |> List.map Path.GetFileName |> String.concat ", "
 
-                            Out.skip
-                                $"  ({names}: its fixes broke the compilation and were not applied — a defect of this tool)"
+                            let! risen =
+                                if errors.Length <= baselineErrors then
+                                    risenIn candidate
+                                else
+                                    Task.FromResult []
 
-                            reject unit
+                            if not risen.IsEmpty && risen |> List.forall (fun (other, _, _) -> isFlavor other) then
+                                let frameworks =
+                                    risen
+                                    |> List.map (fun (other, _, _) -> frameworkOf (solution.GetProject other))
+                                    |> String.concat ", "
 
-                            exitReasons.Add $"fixes in {names} put back"
+                                Out.skip
+                                    $"  ({names}: its fixes do not compile for {frameworks}, which builds the same file, and were not applied)"
+
+                                reject unit
+                            else
+                                Out.skip
+                                    $"  ({names}: its fixes broke the compilation and were not applied — a defect of this tool)"
+
+                                reject unit
+
+                                exitReasons.Add $"fixes in {names} put back"
 
                     return List.rev ok, kept
                 }
@@ -1687,6 +1753,7 @@ let private executeRunCore (opts: Options) : Task<int> =
     runOriginals.Clear()
     appliedCodes.Clear()
     rejectedFixes.Clear()
+    sweptFlavors.Clear()
     fileUnits.Clear()
     advisedIds.Clear()
 
@@ -1822,6 +1889,48 @@ let private executeRunCore (opts: Options) : Task<int> =
                             Out.dim "  (no MSBuild.exe found: this run is verified in memory only)"
                             legacyBaseline.[projectPath] <- false
 
+                // a wider framework with nothing of its own - every file is the
+                // narrowest's too, and none branches on a symbol - compiles what the
+                // narrowest sweep reads: one sweep covers both
+                let! flavors =
+                    task {
+                        match flavors with
+                        | narrowest :: (_ :: _ as wider) when frameworkOf narrowest <> "" ->
+                            let kept = ResizeArray [ narrowest ]
+                            // one that does not compile is not swept, and covers nothing
+                            let! compiled = narrowest.GetCompilationAsync ct
+
+                            let wider =
+                                if opts.ParseOnly || (errorsOf compiled).IsEmpty then
+                                    wider
+                                else
+                                    kept.AddRange wider
+                                    []
+
+                            for flavor in wider do
+                                let mutable own = false
+
+                                for document in flavor.Documents do
+                                    if not own then
+                                        let! tree = document.GetSyntaxTreeAsync ct
+
+                                        // the build's own files (obj/<framework>/...) are per
+                                        // framework and nobody's to sweep
+                                        own <-
+                                            not (isNull tree)
+                                            && not (Configuration.isIgnoredPath None tree.FilePath)
+                                            && not (Flavors.sweptBy [ narrowest ] tree)
+
+                                if own then
+                                    kept.Add flavor
+                                else
+                                    Out.dim
+                                        $"  ({frameworkOf flavor}: the same sources as {frameworkOf narrowest}, swept there)"
+
+                            return List.ofSeq kept
+                        | _ -> return flavors
+                    }
+
                 for project in flavors do
                     let framework = frameworkOf project
 
@@ -1864,6 +1973,9 @@ let private executeRunCore (opts: Options) : Task<int> =
                             parseErrorsOf compilation
                         else
                             errorsOf compilation
+
+                    if baselineErrors.IsEmpty then
+                        sweptFlavors.Add project.Id |> ignore
 
                     // the diagnostics bind every tree: this is the compile, and the
                     // analyzers after it find the models bound

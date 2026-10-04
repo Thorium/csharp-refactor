@@ -299,3 +299,79 @@ let ``a reference tuple spelled in two files of one compilation is retyped as on
         Assert.Empty(errorsOf after)
     }
     :> System.Threading.Tasks.Task
+
+// ---- a file two frameworks of one project compile ----
+
+[<Fact>]
+let ``the fix provider offers under a wider framework only what the narrower one offers too`` () =
+    task {
+        use workspace = new AdhocWorkspace()
+
+        let text =
+            csharp
+                """
+                using System;
+                namespace App;
+                internal class Entity
+                {
+                    public int Id { get; set; }
+                }
+                static class Use
+                {
+                    internal static Entity Make() => new Entity { Id = 1 };
+                    static Guid Shared() => new Guid();
+                }
+
+                """
+
+        // the narrower flavor parses C# 8: no `init` there
+        let flavor (name: string) (version: Microsoft.CodeAnalysis.CSharp.LanguageVersion) =
+            let info =
+                ProjectInfo.Create(
+                    ProjectId.CreateNewId(),
+                    VersionStamp.Default,
+                    name,
+                    name,
+                    LanguageNames.CSharp,
+                    filePath = "C:/fake/Lib.csproj",
+                    compilationOptions =
+                        Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary),
+                    parseOptions = Microsoft.CodeAnalysis.CSharp.CSharpParseOptions(version),
+                    metadataReferences = metadataReferences
+                )
+
+            workspace.AddProject(info).AddDocument("Model.cs", text, filePath = "C:/fake/Model.cs")
+
+        let narrow =
+            flavor "Lib(net48)" Microsoft.CodeAnalysis.CSharp.LanguageVersion.CSharp8
+
+        workspace.TryApplyChanges narrow.Project.Solution |> ignore
+        let wide = flavor "Lib(net8.0)" Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest
+        workspace.TryApplyChanges wide.Project.Solution |> ignore
+
+        let document =
+            workspace.CurrentSolution.Projects
+            |> Seq.find (fun p -> p.Name = "Lib(net8.0)")
+            |> fun p -> Seq.head p.Documents
+
+        let! compilation = document.Project.GetCompilationAsync()
+        let diagnostics = analyze compilation
+
+        let titlesFor (code: string) =
+            task {
+                let actions = ResizeArray<CodeAction>()
+                let diagnostic = diagnostics |> List.find (fun d -> d.Id = code)
+
+                let context =
+                    CodeFixContext(document, diagnostic, (fun action _ -> actions.Add action), CancellationToken.None)
+
+                do! CSharpRefactorCodeFixProvider().RegisterCodeFixesAsync context
+                return actions |> Seq.map (fun a -> a.Title) |> List.ofSeq
+            }
+
+        let! init = titlesFor "CR0083"
+        Assert.Empty init
+        let! guid = titlesFor "CR0090"
+        Assert.Contains("Use Guid.Empty", guid)
+    }
+    :> System.Threading.Tasks.Task

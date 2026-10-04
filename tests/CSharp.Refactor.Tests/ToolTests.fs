@@ -1550,3 +1550,107 @@ let ``the MCP server answers the handshake, lists its tools and rules, and analy
         ()
     }
     :> System.Threading.Tasks.Task
+
+[<Collection("Tool")>]
+type Frameworks() =
+
+    [<Fact>]
+    member _.``a fix only the wider framework compiles is not offered for code the narrower one builds too``() =
+        let dir = tempDir ()
+        let project = Path.Combine(dir, "Sample.csproj")
+
+        File.WriteAllText(
+            project,
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFrameworks>net48;net8.0</TargetFrameworks><LangVersion>latest</LangVersion></PropertyGroup></Project>"""
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "Model.cs"),
+            csharp
+                """
+                using System;
+                namespace Sample;
+                internal class Entity
+                {
+                    public int Id { get; set; }
+                }
+                public static class Use
+                {
+                    internal static Entity Make() => new Entity { Id = 1 };
+                    public static Guid Shared() => new Guid();
+                }
+                """
+        )
+
+        File.WriteAllText(
+            Path.Combine(dir, "Modern.cs"),
+            csharp
+                """
+                using System;
+                namespace Sample;
+                public static class Modern
+                {
+                #if NET8_0_OR_GREATER
+                    public static Guid Wider() => new Guid();
+                #endif
+                }
+                """
+        )
+
+        use captured = new StringWriter()
+        let oldOut = Console.Out
+        Console.SetOut captured
+
+        let code =
+            try
+                Sweep.resetRun ()
+
+                match parseArgs [| project; "--codes"; "CR0083,CR0090" |] with
+                | Ok opts -> Sweep.executeRun opts
+                | Error e -> failwith e
+            finally
+                Console.SetOut oldOut
+
+        let output = captured.ToString()
+        Assert.Equal(0, code)
+        // `init` needs a type net48 lacks: never applied, so nothing to put back
+        Assert.DoesNotContain("bisecting", output)
+        Assert.DoesNotContain("were not applied", output)
+        let model = File.ReadAllText(Path.Combine(dir, "Model.cs"))
+        Assert.Contains("{ get; set; }", model)
+        // the shared code is the narrowest sweep's, the #if region the wider one's
+        Assert.Contains("Shared() => Guid.Empty;", model)
+        Assert.Contains("Wider() => Guid.Empty;", File.ReadAllText(Path.Combine(dir, "Modern.cs")))
+        Assert.Equal(2, Sweep.runTotalApplied ())
+
+    [<Fact>]
+    member _.``frameworks compiling the same sources are swept once, on the narrowest``() =
+        let dir = tempDir ()
+        let project = Path.Combine(dir, "Sample.csproj")
+
+        File.WriteAllText(
+            project,
+            """<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFrameworks>net8.0;net48</TargetFrameworks><LangVersion>latest</LangVersion></PropertyGroup></Project>"""
+        )
+
+        File.WriteAllText(Path.Combine(dir, "Program.cs"), sampleSource)
+
+        use captured = new StringWriter()
+        let oldOut = Console.Out
+        Console.SetOut captured
+
+        let code =
+            try
+                Sweep.resetRun ()
+
+                match parseArgs [| project; "--codes"; "CR0090" |] with
+                | Ok opts -> Sweep.executeRun opts
+                | Error e -> failwith e
+            finally
+                Console.SetOut oldOut
+
+        let output = captured.ToString()
+        Assert.Equal(0, code)
+        Assert.Contains("(net8.0: the same sources as net48, swept there)", output)
+        Assert.Contains("=> Guid.Empty;", File.ReadAllText(Path.Combine(dir, "Program.cs")))
+        Assert.Equal(1, Sweep.runTotalApplied ())

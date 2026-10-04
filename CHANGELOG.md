@@ -2,6 +2,12 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.17
+
+- A multi-targeted project is swept narrowest framework first, and a wider framework adds only the fixes in code the narrower ones do not compile (behind an `#if`, or in a file of its own): `init` (CR0083) is no longer offered under net8.0 for a file net48 builds too, in a dry run and in the editor alike. Frameworks compiling the same sources are swept once.
+- A fix put back because another framework or a referencing project stopped compiling names that project and its errors, where the message said "0 error(s)".
+- A cross-project reference search that failed once is tried again on the next ask instead of holding every later fix of that symbol for the rest of the run.
+
 ## 0.1.16
 
 - New CR0190: a date format with the wrong specifier is corrected: `mm` among date parts to `MM`, `MM` among time parts to `mm`, `hh` without AM/PM to `HH` (swept only in a timestamp whose file renders no designator and parses no `h` format, otherwise an editor offer); editor offer only at `ParseExact` (F# twin FR0175).
@@ -18,7 +24,6 @@ The analyzers package, the `csharp-refactor` tool and both editor extensions sha
 - CR0164 also reads the older `_cache ?? (_cache = new X())` on a static field.
 - CR0195 and CR0196 are quiet where the compiler's CS0665, CS0472 or CS8073 is switched off by `#pragma` or `NoWarn`.
 - Reports mask the source text of a CR0123 or CR0124 finding.
-- A cross-project reference search that failed once is tried again on the next ask instead of holding every later fix of that symbol for the rest of the run.
 
 ## 0.1.15
 

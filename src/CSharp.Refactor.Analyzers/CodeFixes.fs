@@ -71,6 +71,25 @@ type CSharpRefactorCodeFixProvider() =
                     with _ -> // no .editorconfig options readable: the rules run on their defaults; fsharpanalyzer: ignore-line FR0055
                         None
 
+                // the file as the narrower frameworks of the project compile it
+                let narrower =
+                    if isNull model then
+                        []
+                    else
+                        Flavors.narrowerOf document.Project
+
+                let twins = ResizeArray<ProjectId * SyntaxTree * SemanticModel>()
+
+                for flavor in narrower do
+                    for id in document.GetLinkedDocumentIds() do
+                        if id.ProjectId = flavor.Id then
+                            let twin = flavor.GetDocument id
+                            let! theirTree = twin.GetSyntaxTreeAsync context.CancellationToken
+                            let! theirModel = twin.GetSemanticModelAsync context.CancellationToken
+
+                            if not (isNull theirTree || isNull theirModel) then
+                                twins.Add((flavor.Id, theirTree, theirModel))
+
                 let suggestions =
                     if isNull model then
                         Rules.parseOnly
@@ -84,7 +103,21 @@ type CSharpRefactorCodeFixProvider() =
                                 References = Some(References.oracle document.Project.Solution tree)
                             }
 
-                        Rules.all tree model ctx
+                        // a file a narrower framework of the project compiles too: only
+                        // the fixes that framework offers as well
+                        let offered (flavor: Project) : Suggestion list =
+                            twins
+                            |> Seq.tryFind (fun (id, _, _) -> id = flavor.Id)
+                            |> Option.map (fun (_, theirTree, theirModel) ->
+                                let theirs =
+                                    { Context.forTree options theirModel.Compilation theirTree false with
+                                        References = Some(References.oracle flavor.Solution theirTree)
+                                    }
+
+                                Rules.all theirTree theirModel theirs)
+                            |> Option.defaultValue []
+
+                        Rules.all tree model ctx |> Flavors.narrowestOnly narrower offered tree
 
                 for diagnostic in context.Diagnostics do
                     let matching =

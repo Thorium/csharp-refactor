@@ -112,6 +112,7 @@
     <Compile Include="EnumerationMutation.fs" />
     <Compile Include="Analyzers.fs" />
     <Compile Include="References.fs" />
+    <Compile Include="Flavors.fs" />
     <Compile Include="CodeFixes.fs" />
   </ItemGroup>
 
