@@ -111,13 +111,18 @@ let private binderFor (receiver: ExpressionSyntax) (scope: SyntaxNode) (taken: H
         else
             s
 
+    // a field's `_x` / `m_x` prefix is the field's, not a local's (StyleCop SA1312)
+    let plain (s: string) =
+        let s = if s.StartsWith "m_" then s.Substring 2 else s
+        lowerFirst (s.TrimStart '_')
+
     let candidates =
         match receiver with
         | :? MemberAccessExpressionSyntax as m ->
-            let name = lowerFirst m.Name.Identifier.ValueText
+            let name = plain m.Name.Identifier.ValueText
             [ name; name + "Value"; "v"; "value" ]
         | :? IdentifierNameSyntax as i ->
-            let name = i.Identifier.ValueText
+            let name = plain i.Identifier.ValueText
             [ "v"; name + "Value"; "value" ]
         | _ -> [ "v"; "value" ]
 

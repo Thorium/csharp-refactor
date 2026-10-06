@@ -80,6 +80,13 @@ let private armText (e: ExpressionSyntax) =
     | :? ThrowExpressionSyntax -> "(" + e.ToString() + ")"
     | _ -> e.ToString()
 
+/// The last arm: a conditional there needs no parentheses - `a ? x : b ? y : z`
+/// is the chain form, and StyleCop SA1119 strikes redundant ones.
+let private lastArmText (e: ExpressionSyntax) =
+    match e with
+    | :? ConditionalExpressionSyntax -> e.ToString()
+    | _ -> armText e
+
 /// The condition as the head of a conditional: an assignment or a lower
 /// conditional inside it takes parentheses.
 let private conditionText (c: ExpressionSyntax) =
@@ -328,7 +335,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                     let arms =
                         List.map2 (fun c v -> $"{conditionText c} ? {armText v}") conditions values
 
-                    let oneLine = head + String.concat " : " arms + " : " + armText last + ";"
+                    let oneLine = head + String.concat " : " arms + " : " + lastArmText last + ";"
 
                     if fits oneLine then
                         Some oneLine
@@ -352,7 +359,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         let armPerLine =
                             (head + List.head arms)
                             :: (List.tail arms |> List.map (fun a -> under + ": " + a))
-                            @ [ under + ": " + armText last + ";" ]
+                            @ [ under + ": " + lastArmText last + ";" ]
 
                         // too wide for that: the condition and the value on lines of their own
                         let partPerLine =
@@ -365,7 +372,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                                         under + "? " + armText v
                                     ])
                                 |> List.concat)
-                            @ [ under + ": " + armText last + ";" ]
+                            @ [ under + ": " + lastArmText last + ";" ]
 
                         match within armPerLine with
                         | Some s -> Some s
@@ -508,7 +515,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         offer
                             (TextSpan.FromBounds(ifs.SpanStart, endAt))
                             [ thenValue; elseValue ]
-                            $"return {cond} ? {armText thenValue} : {armText elseValue};"
+                            $"return {cond} ? {armText thenValue} : {lastArmText elseValue};"
                             "Both branches return: return the conditional"
                             "Return the conditional"
                     | _ -> None
@@ -530,7 +537,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         && Guards.assignableInPlace model target
                         ->
                         let arms = [ thenValue; elseValue ]
-                        let conditional = $"{cond} ? {armText thenValue} : {armText elseValue};"
+                        let conditional = $"{cond} ? {armText thenValue} : {lastArmText elseValue};"
                         let endAt = strayEnd ifs
 
                         // `T v;` right above: one declaration, as F#'s `let v = if a then … else …`

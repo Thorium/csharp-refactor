@@ -243,16 +243,25 @@ let renderStatement
 
             let tail =
                 if endReachable model s.Body then
-                    [ bodyIndent + "break;" ]
+                    // a `break;` stands off a block that closes just above it
+                    // (StyleCop SA1513: a closing brace is followed by a blank line)
+                    match List.tryLast body with
+                    | Some last when last.TrimEnd().EndsWith "}" -> [ ""; bodyIndent + "break;" ]
+                    | _ -> [ bodyIndent + "break;" ]
                 else
                     []
 
             if braced then
+                // the next section's label stands off the closing brace by a
+                // blank line (StyleCop SA1513)
+                let after = if i < sections.Length - 1 then [ "" ] else []
+
                 labels
                 @ [ indent + unit + unit + "{" ]
                 @ body
                 @ tail
                 @ [ indent + unit + unit + "}" ]
+                @ after
             else
                 labels @ body @ tail)
         |> List.concat

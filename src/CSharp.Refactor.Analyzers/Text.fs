@@ -210,6 +210,39 @@ let statementLineSpan (text: SourceText) (s: SyntaxNode) : TextSpan =
     else
         s.Span
 
+/// The span that removes a declaration standing on lines of its own without
+/// leaving the blank lines around it to pile up: a blank line below it goes
+/// too when another blank line, or the opening brace of the block, is above
+/// (StyleCop SA1507 / SA1505), and a blank line above goes when the closing
+/// brace of the block is below (SA1508).
+let declarationRemovalSpan (text: SourceText) (s: SyntaxNode) : TextSpan =
+    let span = statementLineSpan text s
+    let line = text.Lines.GetLineFromPosition s.SpanStart
+
+    if span <> line.SpanIncludingLineBreak then
+        span
+    else
+        let blank (l: TextLine) = l.ToString().Trim() = ""
+
+        let above =
+            if line.LineNumber > 0 then
+                Some text.Lines.[line.LineNumber - 1]
+            else
+                None
+
+        let below =
+            if line.LineNumber + 1 < text.Lines.Count then
+                Some text.Lines.[line.LineNumber + 1]
+            else
+                None
+
+        match above, below with
+        | Some a, Some b when blank b && (blank a || a.ToString().TrimEnd().EndsWith "{") ->
+            TextSpan.FromBounds(span.Start, b.EndIncludingLineBreak)
+        | Some a, Some b when blank a && b.ToString().TrimStart().StartsWith "}" ->
+            TextSpan.FromBounds(a.Start, span.End)
+        | _ -> span
+
 /// The line ending the file uses at a position.
 let newlineAt (text: SourceText) (position: int) : string =
     let line = text.Lines.GetLineFromPosition position

@@ -1654,3 +1654,26 @@ type Frameworks() =
         Assert.Contains("(net8.0: the same sources as net48, swept there)", output)
         Assert.Contains("=> Guid.Empty;", File.ReadAllText(Path.Combine(dir, "Program.cs")))
         Assert.Equal(1, Sweep.runTotalApplied ())
+
+[<Fact>]
+let ``edits of one file conflict when they share a character, a position, or an insertion falls inside a replacement``
+    ()
+    =
+    let span (s: int) (e: int) =
+        Microsoft.CodeAnalysis.Text.TextSpan.FromBounds(s, e)
+
+    let here = None
+    let there = Some "Other.cs"
+
+    // `const ` inserted at column 8 of a declaration line a hoist removes whole
+    Assert.True(Sweep.conflicting (here, span 8 8) (here, span 0 40))
+    Assert.True(Sweep.conflicting (here, span 0 40) (here, span 8 8))
+    // a shared character, and two edits at one position
+    Assert.True(Sweep.conflicting (here, span 0 10) (here, span 5 15))
+    Assert.True(Sweep.conflicting (here, span 5 5) (here, span 5 15))
+    // touching edits, two insertions at one position, and an insertion at a
+    // replacement's end are fine; another file never conflicts
+    Assert.False(Sweep.conflicting (here, span 0 10) (here, span 10 20))
+    Assert.False(Sweep.conflicting (here, span 5 5) (here, span 5 5))
+    Assert.False(Sweep.conflicting (here, span 40 40) (here, span 0 40))
+    Assert.False(Sweep.conflicting (here, span 8 8) (there, span 0 40))

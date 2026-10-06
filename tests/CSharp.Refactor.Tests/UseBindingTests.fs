@@ -240,3 +240,63 @@ let ``an awaited BCL call is done with its argument, a settled value read throug
     // a request message owns nothing unmanaged, and a test's handler mock reads
     // it back after the send: neither a fix nor a note
     Assert.Empty(suggestCode "CR0060" source)
+
+[<Fact>]
+let ``CR0060 a window shown non-modally or run as the main window leaves the scope`` () =
+    let source =
+        csharp
+            """
+            namespace System.Windows.Forms
+            {
+                public class Form : System.IDisposable
+                {
+                    public void Show() { }
+                    public void Show(object owner) { }
+                    public int ShowDialog() => 0;
+                    public int ShowDialog(object owner) => 0;
+                    public void Dispose() { }
+                }
+                public static class Application
+                {
+                    public static bool MessageLoop => true;
+                    public static void Run(Form main) { }
+                }
+            }
+            namespace App
+            {
+                using System.Windows.Forms;
+                class MyForm : Form { }
+                class C
+                {
+                    void A()
+                    {
+                        var f = new MyForm();
+                        f.Show();
+                    }
+                    void B(object owner)
+                    {
+                        var f = new MyForm();
+                        f.ShowDialog(owner);
+                    }
+                    void D()
+                    {
+                        var f = new MyForm();
+                        if (Application.MessageLoop)
+                        {
+                            f.Show(this);
+                        }
+                        else
+                        {
+                            Application.Run(f);
+                        }
+                    }
+                }
+            }
+            """
+
+    // only the modal form (B) is the scope's to dispose: a shown window closes and
+    // disposes itself, and the message loop owns the main window
+    let fired = fires 1 "CR0060" source
+    Assert.Contains("f.ShowDialog(owner)", fixAll "CR0060" source)
+    Assert.Contains("using var f = new MyForm();\n            f.ShowDialog(owner);", normalize (fixAll "CR0060" source))
+    Assert.Single(fired) |> ignore

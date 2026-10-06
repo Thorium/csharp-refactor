@@ -377,3 +377,23 @@ let ``a string lowered to compare with an agreeing ASCII literal compares ignori
     Assert.Contains("""x.ToLower() == "äbc";""", fixedSource)
     Assert.Contains("x.ToLower() == y.ToLower();", fixedSource)
     Assert.Contains("""J = x => x.ToLower() == "abc";""", fixedSource)
+
+[<Fact>]
+let ``CR0100 the concatenation's parentheses do not follow a value into its hole`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                int _n;
+                string A(string name) => "&" + (_n % 10) + ": " + name;
+                string B(bool ok) => "state: " + (ok ? "on" : "off") + ".";
+                string D(int x) => "x" + (x) + "y";
+            }
+            """
+
+    let fixedSource = fixAll "CR0100" source
+    // `%` needs none (StyleCop SA1119); a conditional keeps its own
+    Assert.Contains("""$"&{_n % 10}: {name}";""", fixedSource)
+    Assert.Contains("""$"state: {(ok ? "on" : "off")}.";""", fixedSource)
+    Assert.Contains("""$"x{x}y";""", fixedSource)

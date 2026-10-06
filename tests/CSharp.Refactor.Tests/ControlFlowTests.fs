@@ -981,3 +981,50 @@ let ``review 2026-09-28: CR0173 keeps an assignment whose target's owner or ref 
             """
 
     Assert.Empty(suggestCode "CR0173" source)
+
+[<Fact>]
+let ``CR0173 a chain is an arm a line, never a conditional nested on one line`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                static string Combine(string left, string sep, string right)
+                {
+                    if (string.IsNullOrEmpty(left))
+                    {
+                        return right;
+                    }
+                    else if (string.IsNullOrEmpty(right))
+                    {
+                        return left;
+                    }
+                    else
+                    {
+                        return left + sep + right;
+                    }
+                }
+                static string Text(string? box, bool watermark)
+                {
+                    if (box is null)
+                    {
+                        return "";
+                    }
+
+                    return watermark ? "" : box;
+                }
+            }
+            """
+
+    // a conditional in the last arm is the chain form: no parentheses around it
+    // (StyleCop SA1119), as the else-if chain's own one-liner has none
+    Assert.Equal(2, (suggestCode "CR0173" source).Length)
+    let fixedSource = fixAll "CR0173" source
+
+    Assert.Contains(
+        "return string.IsNullOrEmpty(left) ? right : string.IsNullOrEmpty(right) ? left : left + sep + right;",
+        fixedSource
+    )
+
+    Assert.Contains("return box is null ? \"\" : watermark ? \"\" : box;", fixedSource)
+    Assert.DoesNotContain("(watermark", fixedSource)

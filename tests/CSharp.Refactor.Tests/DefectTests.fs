@@ -413,6 +413,7 @@ let ``CR0164 fills a settings cache whose loader may answer null by CompareExcha
     Assert.All(fired, (fun s -> Assert.NotEmpty s.Fixes))
     let fixedSource = fixAll "CR0164" source
 
+    // the author's own `if` keeps its shape: only the assignment inside it changes
     Assert.Contains(
         csharp
             """
@@ -422,8 +423,9 @@ let ``CR0164 fills a settings cache whose loader may answer null by CompareExcha
         fixedSource
     )
 
+    // a `??=` statement becomes a braced `if` (StyleCop SA1503): inline inside a one-line block
     Assert.Contains(
-        "public static void Warm() { if (_warm is null) Interlocked.CompareExchange(ref _warm, Store.Load(), null); }",
+        "public static void Warm() { if (_warm is null) { Interlocked.CompareExchange(ref _warm, Store.Load(), null); } }",
         fixedSource
     )
 
@@ -2695,3 +2697,35 @@ let ``review 2026-10-03b CR0164 takes the coalescing form on fields only, and it
     Assert.Contains("Prop ?? (Prop = new Foo());", fixedSource)
     Assert.Contains("_perThread ?? (_perThread = new Foo());", fixedSource)
     Assert.Contains("_vol ?? (_vol = new Foo());", fixedSource)
+
+[<Fact>]
+let ``CR0164 a check-then-assign statement on its own line becomes a braced if`` () =
+    let source =
+        csharp
+            """
+            using System.Threading;
+            class Store { public static Store? Load() => null; }
+            static class Cache
+            {
+                static Store? _store;
+                public static void Warm()
+                {
+                    _store ??= Store.Load();
+                }
+            }
+            """
+
+    // a factory that may answer null takes the exchange, as a braced `if`
+    Assert.Contains(
+        csharp
+            """
+            public static void Warm()
+                {
+                    if (_store is null)
+                    {
+                        Interlocked.CompareExchange(ref _store, Store.Load(), null);
+                    }
+                }
+            """,
+        normalize (fixAll "CR0164" source)
+    )

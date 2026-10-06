@@ -1116,3 +1116,33 @@ let ``parity 2026-09-28 CR0189 keeps a Register callback's own token`` () =
             """
 
     Assert.Empty(suggestCode "CR0189" source)
+
+[<Fact>]
+let ``CR0189 never picks the enclosing method as the token-taking overload`` () =
+    let source =
+        csharp
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+            static class Ext
+            {
+                public static Task<int> WithCancellation(this Task<int> t, CancellationToken ct) => t;
+            }
+            class C
+            {
+                readonly TaskCompletionSource<int> _tcs = new();
+                public Task<int> WaitForExitAsync() => _tcs.Task;
+                // the overload with the token IS this method: the call inside stays as it is
+                public Task<int> WaitForExitAsync(CancellationToken token) => WaitForExitAsync().WithCancellation(token);
+                public Task<int> LoadAsync() => _tcs.Task;
+                public Task<int> LoadAsync(CancellationToken token) => _tcs.Task;
+                // a sibling overload of another method still gets the token
+                public Task<int> Run(CancellationToken token) => LoadAsync();
+            }
+            """
+
+    let fired = fires 1 "CR0189" source
+    Assert.Contains("LoadAsync", fired.Head.Message)
+    let fixedSource = fixAll "CR0189" source
+    Assert.Contains("WaitForExitAsync().WithCancellation(token)", fixedSource)
+    Assert.Contains("public Task<int> Run(CancellationToken token) => LoadAsync(token);", fixedSource)

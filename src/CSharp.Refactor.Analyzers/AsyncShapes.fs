@@ -1325,13 +1325,21 @@ let private omittedTokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion
                         |> Seq.skip args.Count
                         |> Seq.tryFind (fun ps -> isTokenType ps.Type && ps.IsOptional)
 
-                    // the same method with a trailing token: one overload, exactly that
+                    // the same method with a trailing token: one overload, exactly that -
+                    // never the function the call sits in (`WaitAsync(ct) =>
+                    // WaitAsync().WithCancellation(ct)`: the token-taking overload IS the
+                    // enclosing method, and the rewrite would call itself forever)
                     let overload () =
                         let sameType (a: ITypeSymbol) (b: ITypeSymbol) =
                             a.OriginalDefinition.ToDisplayString() = b.OriginalDefinition.ToDisplayString()
 
                         let reduced = if isNull m.ReducedFrom then m else m.ReducedFrom
                         let owner = reduced.ContainingType
+
+                        let self =
+                            match model.GetDeclaredSymbol f.Node with
+                            | :? IMethodSymbol as s -> s.OriginalDefinition
+                            | _ -> null
 
                         owner.GetMembers reduced.Name
                         |> Seq.tryPick (fun o ->
@@ -1340,6 +1348,10 @@ let private omittedTokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion
                                 om.Parameters.Length = reduced.Parameters.Length + 1
                                 && om.IsStatic = reduced.IsStatic
                                 && om.Arity = reduced.Arity
+                                && not (
+                                    not (isNull self)
+                                    && SymbolEqualityComparer.Default.Equals(om.OriginalDefinition, self)
+                                )
                                 ->
                                 let last = om.Parameters.[om.Parameters.Length - 1]
 

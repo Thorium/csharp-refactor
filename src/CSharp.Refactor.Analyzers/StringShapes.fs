@@ -130,6 +130,16 @@ let private holeText (e: ExpressionSyntax) =
             | _ -> false)
 
     match e with
+    // `"a" + (x % 10)`: the parentheses were the concatenation's, a hole needs
+    // them only around a conditional, an assignment or a lambda (StyleCop SA1119)
+    | :? ParenthesizedExpressionSyntax as p when not (Text.holdsCommentOrDirective p) ->
+        match p.Expression with
+        | :? ConditionalExpressionSyntax
+        | :? AssignmentExpressionSyntax
+        | :? LambdaExpressionSyntax
+        | :? ParenthesizedExpressionSyntax -> text
+        | inner when inner.DescendantTokens() |> Seq.exists (fun t -> t.IsKind SyntaxKind.ColonToken) -> text
+        | inner -> inner.ToString()
     | :? ParenthesizedExpressionSyntax -> text
     | _ when colonOutsideLiterals -> $"({text})"
     | _ -> text

@@ -191,3 +191,23 @@ let ``a lambda parameter named like the receiver is another thing`` () =
             """
 
     Assert.Contains("x is { } v ? items.Sum(x => x.Value) + v : 0", fixAll code source)
+
+[<Fact>]
+let ``CR0004 a binder named after a field drops the field's prefix`` () =
+    let source =
+        csharp
+            """
+            using System;
+            class C
+            {
+                DateTime? _lastFileRead;
+                DateTime? m_stamp;
+                bool A(DateTime v) => _lastFileRead.HasValue && v < _lastFileRead.Value;
+                bool B(DateTime v) => m_stamp.HasValue && v < m_stamp.Value;
+            }
+            """
+
+    // `v` is the parameter, so the field's name serves: without `_` / `m_` (StyleCop SA1312)
+    let fixedSource = fixAll code source
+    Assert.Contains("_lastFileRead is { } lastFileReadValue && v < lastFileReadValue", fixedSource)
+    Assert.Contains("m_stamp is { } stampValue && v < stampValue", fixedSource)

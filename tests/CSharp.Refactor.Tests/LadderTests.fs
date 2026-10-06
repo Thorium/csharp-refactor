@@ -434,3 +434,49 @@ let ``CR0155 holds a class with an attributed method or a ref receiver`` () =
             """
 
     Assert.Equal<string list>([ "Plain" ], firedText source (suggestCode "CR0155" source))
+
+[<Fact>]
+let ``CR0153 the field's blank line goes with it, and a multi-line accessor list cannot take its initialiser`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                private int _count;
+
+                private string _name = "";
+
+                public int Count
+                {
+                    get => _count;
+                    set => _count = value < 0 ? 0 : value;
+                }
+
+                public string Name
+                {
+                    get => _name;
+                    set
+                    {
+                        _name = value ?? "";
+                    }
+                }
+            }
+            """
+
+    // `Name`'s initialiser would have to follow the multi-line accessor list
+    // (`} = "";`, StyleCop SA1500): not offered
+    Assert.Equal<string list>([ "Count" ], firedText source (suggestCode "CR0153" source))
+    let fixedSource = fixAll "CR0153" source
+
+    // the field line and its blank line below are gone: `{` is followed by the next field
+    Assert.Contains(
+        csharp
+            """
+            class C
+            {
+                private string _name = "";
+            """,
+        normalize fixedSource
+    )
+
+    Assert.DoesNotContain("_count", fixedSource)

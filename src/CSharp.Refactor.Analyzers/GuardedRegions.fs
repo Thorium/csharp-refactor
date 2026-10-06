@@ -497,17 +497,24 @@ let private lazyStatics (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                         // a statement: the test first, so the factory runs only on a miss;
                         // only in a block, where the new `if` cannot capture an `else`
                         | :? ExpressionStatementSyntax as es when (es.Parent :? BlockSyntax) ->
+                            // braced (StyleCop SA1503): on lines of its own when the
+                            // statement had its line, else inline in a one-line block
+                            let indent = Text.leadingWhitespace text es.SpanStart
+                            let unit = Text.indentStep text es
+                            let nl = Text.newlineAt text es.SpanStart
+                            let body = $"{exchange fieldText a.Right};"
+
+                            let alone =
+                                text.Lines.GetLineFromPosition(es.SpanStart).ToString().Trim() = es.ToString().Trim()
+
+                            let replacement =
+                                if alone then
+                                    $"if ({fieldText} is null){nl}{indent}{{{nl}{indent}{unit}{body}{nl}{indent}}}"
+                                else
+                                    $"if ({fieldText} is null) {{ {body} }}"
+
                             Some(
-                                suggestion
-                                    fieldText
-                                    a.Span
-                                    true
-                                    a.SpanStart
-                                    [
-                                        Suggestion.replace
-                                            es.Span
-                                            $"if ({fieldText} is null) {exchange fieldText a.Right};"
-                                    ]
+                                suggestion fieldText a.Span true a.SpanStart [ Suggestion.replace es.Span replacement ]
                             )
                         | :? ExpressionStatementSyntax -> None
                         // a value: the field when set, else the exchange's answer — null

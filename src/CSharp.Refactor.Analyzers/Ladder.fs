@@ -941,7 +941,7 @@ let private fieldKeyword (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCon
                                 | _ -> None)
                             |> List.ofSeq
 
-                        let removeField = Suggestion.replace (Text.statementLineSpan text fieldDecl) ""
+                        let removeField = Suggestion.replace (Text.declarationRemovalSpan text fieldDecl) ""
 
                         let initializer =
                             if isNull declarator.Initializer || not (isNull p.Initializer) then
@@ -953,9 +953,17 @@ let private fieldKeyword (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCon
                                         (" = " + declarator.Initializer.Value.ToString() + ";")
                                 ]
 
+                        // the field's initialiser can only follow the accessor list; after
+                        // a multi-line one, `} = value;` shares the closing brace's line
+                        // (StyleCop SA1500), and there is no other place for it
+                        let initializerFits =
+                            initializer.IsEmpty
+                            || text.Lines.GetLineFromPosition(p.AccessorList.SpanStart).LineNumber =
+                                text.Lines.GetLineFromPosition(p.AccessorList.Span.End).LineNumber
+
                         let edits = mentions @ [ removeField ] @ initializer
 
-                        if not mentions.IsEmpty && Guards.speculativeCheck model edits then
+                        if not mentions.IsEmpty && initializerFits && Guards.speculativeCheck model edits then
                             Some
                                 {
                                     Code = FieldKeywordCode

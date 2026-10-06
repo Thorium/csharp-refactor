@@ -2,6 +2,17 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.18
+
+- CR0189 never takes the enclosing method as the token-taking overload: `WaitAsync(ct) => WaitAsync().WithCancellation(ct)` was rewritten to call itself.
+- CR0060 counts a window shown non-modally (`form.Show(owner)`, `Application.Run(form)`) as handed on: a `using` there disposed the window on the spot.
+- Two fixes of one file whose edits fall inside each other (CR0172's `const` into a declaration CR0177 hoists) no longer crash the run: the chooser keeps one, and a collision that still reaches the write leaves the file as it is for that pass.
+- Notes printed inline carry their `note:` marker again; they read as applied fixes.
+- An analyzer a project of the solution builds (an in-tree analyzer or generator) is loaded from a shadow copy: loaded in place, the tool held its dll open and the verification build of every project copying it failed with MSB3027 - no verdict on their fixes. The copy is this run's only: the workspace keeps its own references, so no `<Analyzer>` item is written into a project file.
+- A project's baseline and after-fix errors are read as its build reports them: a compiler error one of the project's diagnostic suppressors withdraws (NUnit's for CS8618 on a field a `[SetUp]` assigns) no longer stops the project with "errors before any fix".
+- A sweep's removals no longer leave two blank lines in a row, or one right after an opening or before a closing brace (StyleCop SA1507, SA1505, SA1508); a braced switch section is followed by a blank line (SA1513).
+- Fixes are laid out as StyleCop expects, so a warnings-as-errors build no longer puts them back: CR0146 opens a blank line before the doc header and leaves a question alone; CR0153 and CR0177 take the removed declaration's blank line with it, and CR0153 stands down where the initialiser would follow a multi-line accessor list; CR0004 names its binder without the field's `_`/`m_` prefix; CR0164's check-then-assign is a braced `if`; CR0002/CR0003/CR0147 stand a `break;` off a closing brace; CR0100 drops the concatenation's parentheses inside a hole; CR0173 writes a conditional in the last arm without parentheses.
+
 ## 0.1.17
 
 - A multi-targeted project is swept narrowest framework first, and a wider framework adds only the fixes in code the narrower ones do not compile (behind an `#if`, or in a file of its own): `init` (CR0083) is no longer offered under net8.0 for a file net48 builds too, in a dry run and in the editor alike. Frameworks compiling the same sources are swept once.

@@ -379,10 +379,155 @@ let private frameworkOf (project: Project) =
 let private analyzers: ImmutableArray<DiagnosticAnalyzer> =
     ImmutableArray.Create<DiagnosticAnalyzer>(CSharpRefactorAnalyzer())
 
-let private errorsOf (compilation: Compilation) =
-    compilation.GetDiagnostics()
-    |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error)
+/// Shadow copies of in-tree analyzer dlls, one per run: original path to copy.
+let private shadowCopies =
+    System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+
+/// An analyzer a project of this solution builds (an in-tree analyzer) is
+/// loaded from a copy of its output directory: loaded in place, its dll is
+/// held open by this process, and the verification build of the project
+/// that produces it, and of every project that copies it, fails with
+/// MSB3027 - no verdict on their fixes. A NuGet or SDK analyzer is loaded
+/// as it is.
+let private shadowed (solution: Solution) (reference: AnalyzerReference) : AnalyzerReference =
+    match reference with
+    | :? AnalyzerFileReference as afr when not (isNull afr.FullPath) && File.Exists afr.FullPath ->
+        let name = Path.GetFileNameWithoutExtension afr.FullPath
+
+        let inTree =
+            solution.Projects
+            |> Seq.exists (fun p -> String.Equals(p.AssemblyName, name, StringComparison.OrdinalIgnoreCase))
+
+        if not inTree then
+            reference
+        else
+            let copy =
+                shadowCopies.GetOrAdd(
+                    afr.FullPath,
+                    fun path ->
+                        let root = Path.Combine(Path.GetTempPath(), "csharp-refactor", "analyzers")
+
+                        // earlier runs' copies: a loaded one cannot be deleted while
+                        // its process lives, so the sweep is best effort
+                        if Directory.Exists root then
+                            for old in Directory.GetDirectories root do
+                                if Directory.GetLastWriteTimeUtc old < DateTime.UtcNow.AddDays -1.0 then
+                                    try
+                                        Directory.Delete(old, true)
+                                    with _ -> // still loaded by another run; fsharpanalyzer: ignore-line FR0055
+                                        ()
+
+                        let dir = Path.Combine(root, Guid.NewGuid().ToString "N")
+
+                        Directory.CreateDirectory dir |> ignore
+
+                        for file in Directory.GetFiles(Path.GetDirectoryName path) do
+                            File.Copy(file, Path.Combine(dir, Path.GetFileName file), true)
+
+                        Path.Combine(dir, Path.GetFileName path)
+                )
+
+            AnalyzerFileReference(copy, afr.AssemblyLoader) :> AnalyzerReference
+    | _ -> reference
+
+/// The project behind each assembly name the run compiles, for the
+/// suppressors its errors answer to (`errorsOf`).
+let private projectsByAssembly =
+    System.Collections.Concurrent.ConcurrentDictionary<string, Project>(StringComparer.Ordinal)
+
+let private suppressorCache =
+    System.Collections.Concurrent.ConcurrentDictionary<string, ImmutableArray<DiagnosticAnalyzer>>(
+        StringComparer.OrdinalIgnoreCase
+    )
+
+/// The project's diagnostic suppressors (NUnit's for CS8618 on a field a
+/// `[SetUp]` assigns, and the like): a compiler error one of them suppresses
+/// is no error in the project's build.
+let private suppressorsOf (project: Project) =
+    let key =
+        project.AnalyzerReferences
+        |> Seq.map (fun r -> if isNull r.FullPath then r.Display else r.FullPath)
+        |> String.concat "|"
+
+    if key = "" then
+        ImmutableArray.Empty
+    else
+        suppressorCache.GetOrAdd(
+            key,
+            fun _ ->
+                project.AnalyzerReferences
+                |> Seq.map (shadowed project.Solution)
+                |> Seq.collect (fun r ->
+                    try
+                        r.GetAnalyzers project.Language :> DiagnosticAnalyzer seq
+                    with _ -> // a reference that does not load is the build's to report; fsharpanalyzer: ignore-line FR0055
+                        Seq.empty)
+                |> Seq.filter (fun a -> a :? DiagnosticSuppressor)
+                |> ImmutableArray.CreateRange
+        )
+
+/// The compile's errors as its build would report them: the compiler's,
+/// less those the project's diagnostic suppressors withdraw. Awaited, never
+/// blocked on: the suppressors run on the thread pool the caller sits in.
+let private errorsOfAsync (compilation: Compilation) : Task<Diagnostic list> =
+    task {
+        let suppressors =
+            match projectsByAssembly.TryGetValue(defaultArg (Option.ofObj compilation.AssemblyName) "") with
+            | true, project -> suppressorsOf project
+            | _ -> ImmutableArray.Empty
+
+        if suppressors.IsEmpty then
+            return
+                compilation.GetDiagnostics()
+                |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error)
+                |> List.ofSeq
+        else
+            let options =
+                CompilationWithAnalyzersOptions(
+                    null,
+                    (fun _ _ _ -> ()),
+                    concurrentAnalysis = true,
+                    logAnalyzerExecutionTime = false,
+                    reportSuppressedDiagnostics = false
+                )
+
+            let! diagnostics =
+                compilation.WithAnalyzers(suppressors, options).GetAllDiagnosticsAsync()
+
+            return
+                diagnostics
+                |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error && not d.IsSuppressed)
+                |> List.ofSeq
+    }
+
+/// The solution with every in-tree analyzer loaded from a shadow copy:
+/// applied to every solution a loader hands on, before any compilation
+/// (which loads each analyzer reference looking for source generators).
+let private shadowAnalyzers (solution: Solution) : Solution =
+    solution.Projects
     |> List.ofSeq
+    |> List.fold
+        (fun (s: Solution) p ->
+            let before = p.AnalyzerReferences |> List.ofSeq
+            let after = before |> List.map (shadowed solution)
+
+            if List.forall2 (fun a b -> obj.ReferenceEquals(a, b)) before after then
+                s
+            else
+                s.WithProjectAnalyzerReferences(p.Id, after))
+        solution
+
+/// A loaded solution as the sweep works on it: the run's defines added,
+/// in-tree analyzers shadow-copied.
+let private prepareSolution (solution: Solution) : Solution =
+    let prepared = shadowAnalyzers (RunDefines.addToSolution solution)
+
+    // the projects behind the assembly names the run compiles (errorsOf)
+    for p in prepared.Projects do
+        if not (String.IsNullOrEmpty p.AssemblyName) then
+            projectsByAssembly.[p.AssemblyName] <- p
+
+    prepared
 
 /// The project's own analyzers (CA, IDE, third-party) whose diagnostics its
 /// build turns into errors — `TreatWarningsAsErrors`, a `WarningsAsErrors`
@@ -427,6 +572,7 @@ let private escalatedAnalyzers (project: Project) (compilation: Compilation) : I
         ImmutableArray.Empty
     else
         project.AnalyzerReferences
+        |> Seq.map (shadowed project.Solution)
         |> Seq.collect (fun r ->
             // a reference that does not load is the build's to report
             try
@@ -860,6 +1006,21 @@ let private analyzeProject
         return finish diagnostics
     }
 
+/// Two edits of one file that cannot both be applied: a shared character,
+/// two at the same position, or an insertion strictly inside a span another
+/// edit replaces (`const ` into a declaration line a hoist removes). Edits
+/// that merely touch are fine, and so are two pure insertions at one
+/// position (several `using`s land in order).
+let conflicting (fa: string option, a: TextSpan) (fb: string option, b: TextSpan) =
+    let inside (p: int) (s: TextSpan) =
+        s.Length > 0 && p > s.Start && p < s.End
+
+    fa = fb
+    && (a.OverlapsWith b
+        || (a.Start = b.Start && not (a.Length = 0 && b.Length = 0))
+        || (a.Length = 0 && inside a.Start b)
+        || (b.Length = 0 && inside b.Start a))
+
 /// Which of a file's fixes to apply this pass: bottom-up, non-overlapping
 /// (an overlap waits for the next pass), none that swallows a comment.
 let private chooseEdits (tree: SyntaxTree) (treeOf: string -> SyntaxTree option) (fixes: Fix list) =
@@ -870,15 +1031,9 @@ let private chooseEdits (tree: SyntaxTree) (treeOf: string -> SyntaxTree option)
         |> List.sortBy (fun f -> f.Edits |> List.map (fun e -> e.Span.Start) |> List.min) do
         let spans = fix.Edits |> List.map (fun e -> e.File, e.Span)
 
-        // a shared character, or two edits at the same position of the same
-        // file, is a conflict; edits that merely touch are fine, and so are
-        // two pure insertions at one position (several `using`s land in order)
-        let conflict (fa: string option, a: TextSpan) (fb: string option, b: TextSpan) =
-            fa = fb
-            && (a.OverlapsWith b || (a.Start = b.Start && not (a.Length = 0 && b.Length = 0)))
-
         let overlaps =
-            taken |> List.exists (fun (f, s, _) -> spans |> List.exists (conflict (f, s)))
+            taken
+            |> List.exists (fun (f, s, _) -> spans |> List.exists (conflicting (f, s)))
 
         if not (overlaps || losesTrivia tree treeOf fix) then
             for f, s in spans do
@@ -913,6 +1068,60 @@ let private firstSentence (text: string) =
     match cutAt with
     | [] -> text
     | cuts -> text.Substring(0, List.min cuts + 1)
+
+/// The blank lines a pass's removals leave behind: two in a row, one right
+/// after an opening brace or right before a closing one (StyleCop SA1507,
+/// SA1505, SA1508). Only at the removals' own positions - the rest of the
+/// file is the author's. `edits` are in the original text's coordinates.
+let collapseBlankRuns (patched: SourceText) (edits: TextEdit list) : SourceText =
+    let removals =
+        edits
+        |> List.sortBy (fun e -> e.Span.Start)
+        |> List.fold
+            (fun (delta, acc) e ->
+                let acc =
+                    if e.Replacement = "" && e.Span.Length > 0 then
+                        e.Span.Start + delta :: acc
+                    else
+                        acc
+
+                delta + e.Replacement.Length - e.Span.Length, acc)
+            (0, [])
+        |> snd
+
+    let blank (l: TextLine) = l.ToString().Trim() = ""
+
+    let lineAt (n: int) =
+        if n >= 0 && n < patched.Lines.Count then
+            Some patched.Lines.[n]
+        else
+            None
+
+    // a blank line that piles up: under another blank line or an opening
+    // brace, or over a closing brace
+    let piles (n: int) =
+        lineAt n |> Option.exists blank
+        && ((lineAt (n - 1) |> Option.exists blank)
+            || (lineAt (n - 1) |> Option.exists (fun a -> a.ToString().TrimEnd().EndsWith "{"))
+            || (lineAt (n + 1)
+                |> Option.exists (fun b -> b.ToString().TrimStart().StartsWith "}")))
+
+    let toDrop =
+        removals
+        |> List.filter (fun pos -> pos <= patched.Length)
+        |> List.collect (fun pos ->
+            // the line now at the removal, and the one above it
+            let n = patched.Lines.GetLineFromPosition(pos).LineNumber
+
+            [ n; n - 1 ]
+            |> List.filter piles
+            |> List.map (fun k -> patched.Lines.[k].SpanIncludingLineBreak))
+        |> List.distinct
+
+    if toDrop.IsEmpty then
+        patched
+    else
+        patched.WithChanges(toDrop |> List.map (fun s -> TextChange(s, "")))
 
 /// One pass: analyse, report, apply what can be applied, check in memory.
 let private runPassWith
@@ -985,9 +1194,13 @@ let private runPassWith
                     || RuleCatalog.isPriority reported.Code
                     || f.Diagnostic.Severity = DiagnosticSeverity.Warning
                 then
+                    // the printed line carries the plain message (the category tag
+                    // stripped), so that is the text to swap for the note marker
+                    let message = plainMessage reported
+
                     Out.note (
                         printFinding "  " f
-                        |> fun s -> s.Replace($"): {reported.Message}", $") note: {firstSentence reported.Message}")
+                        |> fun s -> s.Replace($"): {message}", $") note: {firstSentence message}")
                     )
                 else
                     let kind = RuleCatalog.name (RuleCatalog.categoryOf reported.Code)
@@ -1116,21 +1329,35 @@ let private runPassWith
                     if not ids.IsEmpty then
                         let! text = current.GetDocument(ids.Head).GetTextAsync ct
 
+                        // two fixes asking for the same insertion (a `partial` on the type) need it once
+                        let edits = edits |> List.distinctBy (fun e -> e.Span, e.Replacement)
+
                         let changes =
                             edits
-                            // two fixes asking for the same insertion (a `partial` on the type) need it once
-                            |> List.distinctBy (fun e -> e.Span, e.Replacement)
                             // insertions sharing a position land in text order
                             |> List.sortBy (fun e -> e.Span.Start, e.Replacement)
                             |> List.map (fun e -> TextChange(e.Span, e.Replacement))
 
-                        let patched = text.WithChanges changes
+                        // the chooser keeps the edits of one file apart; should a pair
+                        // still collide, the file sits this pass out rather than the
+                        // run dying
+                        let patched =
+                            try
+                                Some(collapseBlankRuns (text.WithChanges changes) edits)
+                            with :? ArgumentException as ex ->
+                                Out.bad
+                                    $"  ({Path.GetFileName path}: its edits overlap ({ex.Message.TrimEnd '.'}); the file is left as it is this pass)"
 
-                        for id in ids do
-                            current <- current.WithDocumentText(id, patched)
+                                None
 
-                        if not (changed.Contains path) then
-                            changed.Add path
+                        match patched with
+                        | Some patched ->
+                            for id in ids do
+                                current <- current.WithDocumentText(id, patched)
+
+                            if not (changed.Contains path) then
+                                changed.Add path
+                        | None -> ()
 
                 units.Add(byTarget |> List.map fst)
 
@@ -1178,7 +1405,11 @@ let private runPassWith
             let errorsIn (s: Solution) (id: ProjectId) =
                 task {
                     let! c = s.GetProject(id).GetCompilationAsync ct
-                    return (if opts.ParseOnly then parseErrorsOf c else errorsOf c)
+
+                    if opts.ParseOnly then
+                        return parseErrorsOf c
+                    else
+                        return! errorsOfAsync c
                 }
 
             let errorsAfter (s: Solution) = errorsIn s projectId
@@ -1579,7 +1810,7 @@ let private legacyBaseline =
 /// its parse options: a script or legacy project loaded by an earlier run
 /// of a resident host (--mcp) was read with that run's.
 let private withRunDefines (project: Project) =
-    (RunDefines.addToSolution project.Solution).GetProject project.Id
+    (prepareSolution project.Solution).GetProject project.Id
 
 /// Hand a solution's new texts to the workspace and take its current
 /// solution back with the run's symbols in every C# project's parse options.
@@ -1589,22 +1820,38 @@ let private withRunDefines (project: Project) =
 let private applyToWorkspace (ws: Workspace) (solution: Solution) : Solution =
     let current = ws.CurrentSolution
 
+    // the workspace's own parse options and analyzer references go back in:
+    // MSBuildWorkspace cannot apply a parse-option change, and it applies an
+    // analyzer reference change by writing an <Analyzer> item into the
+    // project file - the shadow copies (prepareSolution) are this run's only
     let applicable =
-        if ws.CanApplyChange ApplyChangesKind.ChangeParseOptions then
+        solution.Projects
+        |> Seq.fold
+            (fun (s: Solution) p ->
+                match current.GetProject p.Id with
+                | null -> s
+                | q ->
+                    let s =
+                        if
+                            not (ws.CanApplyChange ApplyChangesKind.ChangeParseOptions)
+                            && not (obj.ReferenceEquals(q.ParseOptions, p.ParseOptions))
+                        then
+                            s.WithProjectParseOptions(p.Id, q.ParseOptions)
+                        else
+                            s
+
+                    let same =
+                        p.AnalyzerReferences.Count = q.AnalyzerReferences.Count
+                        && Seq.forall2 (fun a b -> obj.ReferenceEquals(a, b)) p.AnalyzerReferences q.AnalyzerReferences
+
+                    if same then
+                        s
+                    else
+                        s.WithProjectAnalyzerReferences(p.Id, q.AnalyzerReferences))
             solution
-        else
-            solution.Projects
-            |> Seq.fold
-                (fun (s: Solution) p ->
-                    match current.GetProject p.Id with
-                    | null -> s
-                    | q when not (obj.ReferenceEquals(q.ParseOptions, p.ParseOptions)) ->
-                        s.WithProjectParseOptions(p.Id, q.ParseOptions)
-                    | _ -> s)
-                solution
 
     ws.TryApplyChanges applicable |> ignore
-    RunDefines.addToSolution ws.CurrentSolution
+    prepareSolution ws.CurrentSolution
 
 /// Load a project: an SDK-style one through MSBuildWorkspace (every
 /// framework flavor), a legacy one through the project-file reader.
@@ -1652,7 +1899,7 @@ let private loadProject
 
             return
                 workspace :> Workspace,
-                (RunDefines.addToSolution workspace.CurrentSolution).Projects
+                (prepareSolution workspace.CurrentSolution).Projects
                 |> Seq.filter (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)
                 |> Seq.sortBy (frameworkOf >> tfmRank)
                 |> List.ofSeq
@@ -1900,8 +2147,14 @@ let private executeRunCore (opts: Options) : Task<int> =
                             // one that does not compile is not swept, and covers nothing
                             let! compiled = narrowest.GetCompilationAsync ct
 
+                            let! narrowestErrors =
+                                if opts.ParseOnly then
+                                    Task.FromResult []
+                                else
+                                    errorsOfAsync compiled
+
                             let wider =
-                                if opts.ParseOnly || (errorsOf compiled).IsEmpty then
+                                if narrowestErrors.IsEmpty then
                                     wider
                                 else
                                     kept.AddRange wider
@@ -1968,11 +2221,11 @@ let private executeRunCore (opts: Options) : Task<int> =
                                 Out.skip
                                     $"  (the script also #r's references under #if {named}, which this run does not define, so they are not read; {flags} reads the script the way a build defining them does)"
 
-                    let baselineErrors =
+                    let! baselineErrors =
                         if opts.ParseOnly then
-                            parseErrorsOf compilation
+                            Task.FromResult(parseErrorsOf compilation)
                         else
-                            errorsOf compilation
+                            errorsOfAsync compilation
 
                     if baselineErrors.IsEmpty then
                         sweptFlavors.Add project.Id |> ignore
@@ -2006,7 +2259,7 @@ let private executeRunCore (opts: Options) : Task<int> =
 
                         let mutable pass = 1
                         let mutable go = true
-                        let mutable solution = RunDefines.addToSolution projectWorkspace.CurrentSolution
+                        let mutable solution = prepareSolution projectWorkspace.CurrentSolution
                         let mutable projectApplied = 0
 
                         // the first pass analyses every file; a later one only what the pass

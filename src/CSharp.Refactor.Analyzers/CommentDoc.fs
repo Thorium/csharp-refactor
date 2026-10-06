@@ -52,6 +52,7 @@ let readsAsSummary (comment: string) =
 
     s.Length >= 12
     && not (s.Contains "<" || s.Contains "&")
+    && not (s.EndsWith "?") // a question is a doubt, not a summary
     && not (instruction.IsMatch s)
     && not (looksLikeCode s)
     && (s |> Seq.exists Char.IsWhiteSpace) // more than one word
@@ -149,6 +150,26 @@ let analyze (tree: SyntaxTree) (_ctx: RuleContext) : Suggestion list =
                             let indent = Text.leadingWhitespace text m.SpanStart
                             let newline = SwitchRewrite.newlineAt text m.SpanStart
 
+                            // a doc header stands off the member above it by a blank
+                            // line (StyleCop SA1514); the first member of a block, or
+                            // one under an attribute or a comment, needs none
+                            let blankBefore =
+                                if declLine.LineNumber = 0 then
+                                    ""
+                                else
+                                    let above = text.Lines.[declLine.LineNumber - 1].ToString().Trim()
+
+                                    if
+                                        above = ""
+                                        || above.EndsWith "{"
+                                        || above.StartsWith "["
+                                        || above.StartsWith "//"
+                                        || above.StartsWith "#"
+                                    then
+                                        ""
+                                    else
+                                        newline
+
                             Some
                                 {
                                     Code = Code
@@ -163,7 +184,12 @@ let analyze (tree: SyntaxTree) (_ctx: RuleContext) : Suggestion list =
                                                 [
                                                     Suggestion.insert
                                                         declLine.Start
-                                                        (indent + "/// <summary>" + comment + "</summary>" + newline)
+                                                        (blankBefore
+                                                         + indent
+                                                         + "/// <summary>"
+                                                         + comment
+                                                         + "</summary>"
+                                                         + newline)
                                                     Suggestion.replace
                                                         (TextSpan.FromBounds(removeStart, t.Span.End))
                                                         ""

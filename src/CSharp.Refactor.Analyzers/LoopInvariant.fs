@@ -296,7 +296,7 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
 
                     let edits =
                         [
-                            Suggestion.replace (Text.statementLineSpan text decl) ""
+                            Suggestion.replace (Text.declarationRemovalSpan text decl) ""
                             Suggestion.insert (loop.SpanStart - indent.Length) (indent + declText + newline)
                         ]
 

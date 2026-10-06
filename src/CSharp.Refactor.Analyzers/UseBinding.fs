@@ -145,6 +145,38 @@ let private settled (t: ITypeSymbol) =
         && not (isTaskLike t)
         && not (Linq.isGenericEnumerable t && not (Linq.isCollection t)))
 
+/// A top-level window type: a WinForms `Form`, a WPF or Avalonia `Window`.
+/// Shown with `Show`, one lives until the user closes it, and closing
+/// disposes it; the scope that showed it is not its owner.
+let private isWindowType (t: ITypeSymbol) =
+    let rec bases (t: ITypeSymbol) =
+        seq {
+            if not (isNull t) then
+                yield t
+                yield! bases t.BaseType
+        }
+
+    bases t
+    |> Seq.exists (fun b ->
+        match b.OriginalDefinition.ToDisplayString() with
+        | "System.Windows.Forms.Form"
+        | "System.Windows.Window"
+        | "Avalonia.Controls.Window" -> true
+        | _ -> false)
+
+/// `form.Show()` / `form.Show(owner)` / `window.ShowAsync(…)` on a window type.
+let private shownWindow (model: SemanticModel) (receiver: ExpressionSyntax) (name: string) =
+    (name = "Show" || name = "ShowAsync")
+    && (match model.GetTypeInfo(receiver).Type with
+        | null -> false
+        | t -> isWindowType t)
+
+/// `Application.Run(form)`: the message loop owns the main window and
+/// disposes it when it closes.
+let private runsWindow (callee: IMethodSymbol) =
+    callee.Name = "Run"
+    && callee.ContainingType.ToDisplayString() = "System.Windows.Forms.Application"
+
 /// A call whose result is awaited or drained on this statement: done with
 /// its arguments once it completes.
 [<TailCall>]
@@ -347,6 +379,20 @@ and private fateOf
 
                 if name = "Dispose" || name = "Close" || name = "DisposeAsync" then
                     Transfer
+                elif shownWindow model id name then
+                    // a window shown non-modally outlives the scope: it closes, and
+                    // disposes itself, when the user is done with it; `ShowDialog`
+                    // returns once it is closed, so that scope stays the owner
+                    Transfer
+                elif
+                    name <> "ShowDialog"
+                    && (match model.GetTypeInfo(id).Type with
+                        | null -> false
+                        | t -> isWindowType t)
+                then
+                    // a window's own method may show it (`SearchAndShow(owner)`):
+                    // whether it is still open when the scope ends is its business
+                    Escape $"a window may show itself from '{name}'"
                 else
                     let result = model.GetTypeInfo(inv).Type
 
@@ -436,8 +482,9 @@ and private fateOf
                         let index = inv.ArgumentList.Arguments.IndexOf arg
 
                         if
-                            callee.DeclaringSyntaxReferences.Length > 0
-                            && disposesArgument model callee index
+                            runsWindow callee
+                            || (callee.DeclaringSyntaxReferences.Length > 0
+                                && disposesArgument model callee index)
                         then
                             Transfer
                         elif readsOnly callee then

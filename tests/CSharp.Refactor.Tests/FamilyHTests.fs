@@ -191,3 +191,34 @@ let ``an imported namespace, a clashing name and a global alias stand down`` () 
     let fired = fires 1 "CR0145" source
     Assert.Empty(fired.Head.Fixes)
     Assert.Contains("held", fired.Head.Message)
+
+[<Fact>]
+let ``CR0146 the summary stands off the member above it and a question is no summary`` () =
+    let source =
+        csharp
+            """
+            public class Settings
+            {
+                public int First { get; set; }
+                public int Second { get; set; } // the second of the pair, in minutes
+                public int Third { get; set; } // is any of this better than nothing?
+            }
+            """
+
+    // the question stays a trailing comment
+    let fired = fires 1 "CR0146" source
+    Assert.Contains("second of the pair", List.head (firedText source fired))
+    let fixedSource = fixAll "CR0146" source
+
+    // a blank line before the doc header (StyleCop SA1514), none added after `{`
+    Assert.Contains(
+        csharp
+            """
+            public int First { get; set; }
+
+                /// <summary>the second of the pair, in minutes</summary>
+                public int Second { get; set; }
+                public int Third { get; set; } // is any of this better than nothing?
+            """,
+        normalize fixedSource
+    )

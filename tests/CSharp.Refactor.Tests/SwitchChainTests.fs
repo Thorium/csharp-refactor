@@ -140,6 +140,7 @@ let ``locals shared between branches keep their braces`` () =
                                 var v = a.V;
                                 return v + 1;
                             }
+
                         case B b:
                             {
                                 var v = b.V;
@@ -638,3 +639,51 @@ let ``review 2026-09-28: CR0181 keeps a guard beside default, a user conversion 
             """
 
     Assert.Empty(suggestCode "CR0181" source)
+
+[<Fact>]
+let ``CR0002 a break after a block stands off it by a blank line`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                int Count;
+                void A(int kind, bool ok)
+                {
+                    if (kind == 1)
+                    {
+                        if (ok)
+                        {
+                            Count++;
+                        }
+                    }
+                    else if (kind == 2)
+                    {
+                        Count += 2;
+                    }
+                    else if (kind == 3)
+                    {
+                        Count += 3;
+                    }
+                }
+            }
+            """
+
+    // StyleCop SA1513: a closing brace is followed by a blank line, so `break;`
+    // does not sit right under the inner `if`'s brace
+    Assert.Contains(
+        csharp
+            """
+            case 1:
+                            if (ok)
+                            {
+                                Count++;
+                            }
+
+                            break;
+                        case 2:
+                            Count += 2;
+                            break;
+            """,
+        normalize (fixAll "CR0002" source)
+    )
