@@ -12,8 +12,11 @@
 /// dictionary's version — so the mutations counted are those on `d`);
 /// the mutating call is on the same reference (by symbol), outside nested
 /// closures, and not followed by `break`/`return`/`throw` (mutate-and-leave
-/// never reaches the next `MoveNext`); `Dictionary`/`HashSet.Remove` on
-/// CoreLib tolerates enumeration since .NET Core 3.0 and is not reported;
+/// never reaches the next `MoveNext`); `Dictionary.Remove`/`Clear` tolerate
+/// enumeration since .NET Core 3.0, an overwriting `Dictionary` indexer set
+/// and `HashSet.Remove`/`Clear` since .NET 5, and none is reported in a compilation
+/// targeting that runtime or later (read off its core library;
+/// `netstandard` may run on .NET Framework);
 /// `System.Linq` importable for the snapshot, and no `ToList` of the
 /// repository's own in scope for the source (it would take the call).
 module CSharp.Refactor.EnumerationMutation
@@ -108,6 +111,25 @@ let rec private leavesAfter (s: StatementSyntax) =
         | _ -> false
     | _ -> false
 
+/// Does the compilation run on .NET Core at least as new as `version`, read
+/// off its core library: the reference pack's `System.Runtime` (4.2.2 is
+/// .NET Core 3.x, 5.0.0 .NET 5) or the runtime's own `System.Private.CoreLib`
+/// (4.0.0 through 3.x, then the runtime's version). `mscorlib` is .NET
+/// Framework and `netstandard` any runtime: neither vouches for anything.
+let coreRuntimeAtLeast (version: System.Version) (compilation: Compilation) =
+    match compilation.GetSpecialType(SpecialType.System_Object).ContainingAssembly with
+    | null -> false
+    | core ->
+        (core.Name = "System.Runtime" || core.Name = "System.Private.CoreLib")
+        && core.Identity.Version >= version
+
+/// .NET Core 3.0 stopped `Dictionary.Remove`/`Clear` invalidating
+/// enumerators; .NET 5 did the same for an overwriting indexer set and for
+/// `HashSet.Remove`/`Clear` (measured: those still throw on 3.1, and every
+/// one of them on .NET Framework 4.8).
+let private dictionaryRemoveTolerated = System.Version(4, 2, 2)
+let private overwriteAndSetRemoveTolerated = System.Version(5, 0, 0)
+
 let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Suggestion list =
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
@@ -145,14 +167,19 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                 if not (collections.Contains typeName) then
                     None
                 else
-                    let coreLib =
-                        not (isNull sourceType.ContainingAssembly)
-                        && sourceType.ContainingAssembly.Name = "System.Private.CoreLib"
+                    let isDictionary = typeName = "System.Collections.Generic.Dictionary<TKey, TValue>"
+                    let isHashSet = typeName = "System.Collections.Generic.HashSet<T>"
 
-                    let tolerant =
-                        coreLib
-                        && (typeName = "System.Collections.Generic.Dictionary<TKey, TValue>"
-                            || typeName = "System.Collections.Generic.HashSet<T>")
+                    let removeTolerated =
+                        isDictionary && coreRuntimeAtLeast dictionaryRemoveTolerated model.Compilation
+                        || isHashSet && coreRuntimeAtLeast overwriteAndSetRemoveTolerated model.Compilation
+
+                    // an overwrite of an existing key no longer invalidates the
+                    // enumerator; an insert still does, and the rule cannot tell
+                    // the two apart, so it stays quiet on both
+                    let indexerSetTolerated =
+                        isDictionary
+                        && coreRuntimeAtLeast overwriteAndSetRemoveTolerated model.Compilation
 
                     // the mutating statements on the same reference
                     let mutations =
@@ -164,17 +191,18 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                 | :? MemberAccessExpressionSyntax as ma when
                                     mutators.Contains ma.Name.Identifier.ValueText
                                     && Guards.sameReference model ma.Expression root
-                                    && not (tolerant && ma.Name.Identifier.ValueText = "Remove")
+                                    && not (
+                                        removeTolerated
+                                        && (ma.Name.Identifier.ValueText = "Remove"
+                                            || ma.Name.Identifier.ValueText = "Clear")
+                                    )
                                     ->
                                     Some(inv :> SyntaxNode, ma.Name.Identifier.ValueText)
                                 | _ -> None
                             | :? AssignmentExpressionSyntax as a ->
                                 match a.Left with
                                 | :? ElementAccessExpressionSyntax as ea when
-                                    Guards.sameReference model ea.Expression root
-                                    // CoreLib's Dictionary overwrites an existing key without
-                                    // invalidating enumerators; the rule cannot tell an overwrite from an insert
-                                    && not (tolerant && typeName.StartsWith "System.Collections.Generic.Dictionary")
+                                    Guards.sameReference model ea.Expression root && not indexerSetTolerated
                                     ->
                                     Some(a :> SyntaxNode, "indexer set")
                                 | _ -> None

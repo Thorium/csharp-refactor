@@ -153,6 +153,225 @@ let ``CR0171 is a note where a repository ToList would take the snapshot call`` 
     Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     Assert.Contains("foreach (var x in set.ToList())", fixAll "CR0171" source)
 
+/// A compilation against an SDK reference pack (`packs/<pack>/<version>/ref/<tfm>`),
+/// as MSBuild builds a project: the core library is the pack's, not the
+/// running runtime's System.Private.CoreLib the harness uses.
+let private compileAgainstPack (pack: string) (version: string -> bool) (source: string) =
+    let dotnetRoot =
+        System.IO.Path.GetFullPath(
+            System.IO.Path.Combine(System.IO.Path.GetDirectoryName typeof<obj>.Assembly.Location, "..", "..", "..")
+        )
+
+    let versionDir =
+        System.IO.Directory.GetDirectories(System.IO.Path.Combine(dotnetRoot, "packs", pack))
+        |> Array.filter (System.IO.Path.GetFileName >> version)
+        |> Array.max
+
+    let refDir =
+        System.IO.Directory.GetDirectories(System.IO.Path.Combine(versionDir, "ref"))
+        |> Array.exactlyOne
+
+    let references =
+        System.IO.Directory.GetFiles(refDir, "*.dll")
+        |> Array.map (fun f ->
+            Microsoft.CodeAnalysis.MetadataReference.CreateFromFile f :> Microsoft.CodeAnalysis.MetadataReference)
+
+    let tree =
+        CSharpSyntaxTree.ParseText(normalize source, parseOptions, path = "Sample.cs")
+
+    let compilation =
+        CSharpCompilation.Create(
+            "Test",
+            [ tree ],
+            references,
+            CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary)
+        )
+
+    Assert.Empty(errorsOf compilation)
+    let model = compilation.GetSemanticModel(tree, false)
+    Rules.all tree model (Context.forTree None compilation tree false)
+
+[<Fact>]
+let ``CR0171 leaves a dictionary's indexer set and Remove on a .NET reference pack, and reports them on netstandard``
+    ()
+    =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            class C
+            {
+                void A(Dictionary<string, int> map, HashSet<int> set)
+                {
+                    foreach (var k in map.Keys)
+                    {
+                        map[k] = map[k] + 1;
+                    }
+                    foreach (var x in set)
+                    {
+                        if (x < 0) set.Remove(x);
+                    }
+                    foreach (var kv in map)
+                    {
+                        if (kv.Value > 9) map.Clear();
+                    }
+                    foreach (var k in map.Keys)
+                    {
+                        map.Add(k + "y", 2);
+                    }
+                }
+            }
+            """
+
+    let fired suggestions =
+        suggestions
+        |> List.filter (fun (s: CSharp.Refactor.Suggestion) -> s.Code = "CR0171")
+        |> firedText source
+
+    let runtimeMajor = string System.Environment.Version.Major + "."
+
+    Assert.Equal<string list>(
+        [ """map.Add(k + "y", 2)""" ],
+        fired (compileAgainstPack "Microsoft.NETCore.App.Ref" (fun v -> v.StartsWith runtimeMajor) source)
+    )
+
+    // netstandard may run on .NET Framework, whose dictionary throws on both
+    Assert.Equal<string list>(
+        [
+            "map[k] = map[k] + 1"
+            "set.Remove(x)"
+            "map.Clear()"
+            """map.Add(k + "y", 2)"""
+        ],
+        fired (compileAgainstPack "NETStandard.Library.Ref" (fun v -> v.StartsWith "2.1") source)
+    )
+
+[<Fact>]
+let ``CR0171 reads the runtime generation off the core library: 3.x for Dictionary.Remove, .NET 5 for the rest`` () =
+    // a core library of a chosen name and version, as a reference pack's
+    // `System.Runtime` (or a runtime's CoreLib) presents itself
+    let compilationOver (name: string) (version: string) =
+        let core =
+            CSharpCompilation.Create(
+                name,
+                [
+                    CSharpSyntaxTree.ParseText(
+                        $"""
+                        [assembly: System.Reflection.AssemblyVersion("{version}")]
+                        namespace System {{ public class Object {{ }} public abstract class ValueType {{ }} public struct Void {{ }} public sealed class String {{ }} public abstract class Attribute {{ }} }}
+                        namespace System.Reflection {{ public sealed class AssemblyVersionAttribute : System.Attribute {{ public AssemblyVersionAttribute(string version) {{ }} }} }}
+                        """
+                    )
+                ],
+                [],
+                CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary)
+            )
+
+        CSharpCompilation.Create("App", [], [ core.ToMetadataReference() ])
+
+    let atLeast (major, minor, build) compilation =
+        CSharp.Refactor.EnumerationMutation.coreRuntimeAtLeast (System.Version(major, minor, build)) compilation
+
+    let core31 = compilationOver "System.Runtime" "4.2.2.0"
+    Assert.True(atLeast (4, 2, 2) core31)
+    Assert.False(atLeast (5, 0, 0) core31)
+
+    let core21 = compilationOver "System.Runtime" "4.2.1.0"
+    Assert.False(atLeast (4, 2, 2) core21)
+
+    let net5 = compilationOver "System.Runtime" "5.0.0.0"
+    Assert.True(atLeast (5, 0, 0) net5)
+
+    // CoreLib says 4.0.0 through 3.x: it vouches for neither
+    Assert.False(atLeast (4, 2, 2) (compilationOver "System.Private.CoreLib" "4.0.0.0"))
+    Assert.True(atLeast (5, 0, 0) (compilationOver "System.Private.CoreLib" "6.0.0.0"))
+    Assert.False(atLeast (4, 2, 2) (compilationOver "netstandard" "2.1.0.0"))
+    Assert.False(atLeast (4, 2, 2) (compilationOver "mscorlib" "4.0.0.0"))
+
+[<Fact>]
+let ``CR0015 gives nested loops over the same collection different element names`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                int A(int[] values, int[] offsets)
+                {
+                    var sum = 0;
+                    for (var i = 0; i < offsets.Length; i++)
+                    {
+                        for (var j = 0; j < offsets.Length; j++)
+                        {
+                            sum += values[offsets[i] + offsets[j] + 1];
+                        }
+                    }
+                    return sum;
+                }
+            }
+            """
+
+    let fixedSource = fixAll "CR0015" source
+    Assert.Contains("foreach (var offset in offsets)", fixedSource)
+    Assert.Contains("foreach (var item in offsets)", fixedSource)
+    Assert.Contains("sum += values[offset + item + 1];", fixedSource)
+
+[<Fact>]
+let ``Symbols declared in a referenced project's source are followed no further, and no rule throws`` () =
+    let library =
+        CSharpCompilation.Create(
+            "Library",
+            [
+                CSharpSyntaxTree.ParseText(
+                    "using System.Collections.Generic; public static class Lib { public static readonly List<int> Items = new List<int> { 1, 2 }; } public struct Counter { int n; public void Bump() { n++; } }",
+                    parseOptions
+                )
+            ],
+            metadataReferences,
+            CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary)
+        )
+
+    let tree =
+        CSharpSyntaxTree.ParseText(
+            normalize (
+                csharp
+                    """
+                    class C
+                    {
+                        bool A()
+                        {
+                            bool found = false;
+                            foreach (var x in Lib.Items)
+                                if (x > 1) found = true;
+                            return found;
+                        }
+                        // CR0161 reads a struct method's body to see whether it mutates
+                        readonly Counter counter;
+                        void B() { counter.Bump(); }
+                    }
+                    """
+            ),
+            parseOptions,
+            path = "Sample.cs"
+        )
+
+    // a project reference: the library's symbols carry its syntax, from a tree
+    // this compilation does not hold
+    let compilation =
+        CSharpCompilation.Create(
+            "App",
+            [ tree ],
+            library.ToMetadataReference() :: metadataReferences,
+            CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary)
+        )
+
+    Assert.Empty(errorsOf compilation)
+    let model = compilation.GetSemanticModel(tree, false)
+
+    let _, failures =
+        Rules.allWithFailures tree model (Context.forTree None compilation tree false)
+
+    Assert.Equal<string list>([], failures |> List.map (fun (name, ex) -> $"{name}: {ex.Message}"))
+
 [<Fact>]
 let ``CR0015 spells the element type where the collection enumerates something else than its indexer returns`` () =
     let source =

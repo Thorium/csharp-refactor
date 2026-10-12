@@ -1051,8 +1051,11 @@ let originsOf (model: SemanticModel) (e: ExpressionSyntax) : (SemanticModel * Ex
     | ValueSome((:? ILocalSymbol | :? IFieldSymbol | :? IPropertySymbol | :? IParameterSymbol) as v) ->
         let v = v.OriginalDefinition
 
+        // a member of a referenced project is declared in that project's
+        // compilation: seen as its metadata would be, with no visible origin
         let initializers =
             v.DeclaringSyntaxReferences
+            |> Seq.filter (fun r -> model.Compilation.ContainsSyntaxTree r.SyntaxTree)
             |> Seq.choose (fun r ->
                 match r.GetSyntax() with
                 | :? VariableDeclaratorSyntax as d when not (isNull d.Initializer) ->

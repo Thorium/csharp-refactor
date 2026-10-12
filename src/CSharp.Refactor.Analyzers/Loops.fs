@@ -24,7 +24,8 @@
 /// that calls core members only (a method the body calls may append to the
 /// field — a worklist); the element name is the alias line's
 /// (`var x = xs[i];` first, `x` never reassigned) or `item`, `item2`…,
-/// unused in the enclosing member. A `break`/`continue` stays as it is.
+/// unused in the enclosing member and not the name an enclosing loop's own
+/// fix introduces. A `break`/`continue` stays as it is.
 ///
 /// CR0017 (correctness, note): a closure that captures the `for` variable
 /// and outlives the iteration sees the final value — the loop variable is
@@ -309,9 +310,9 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                 | _ -> None
                             | _ -> None
 
-                        let elementName =
+                        let elementNames =
                             match alias with
-                            | Some(n, _) -> Some n
+                            | Some(n, _) -> [ n ]
                             | None ->
                                 // `pages` → `page`, `entries` → `entry`; else `item`
                                 let collectionName =
@@ -342,7 +343,7 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                 |> List.filter (fun n ->
                                     SyntaxFacts.GetKeywordKind n = SyntaxKind.None
                                     && SyntaxFacts.GetContextualKeywordKind n = SyntaxKind.None)
-                                |> List.tryFind (fun n -> not (Text.mentionsName n scope))
+                                |> List.filter (fun n -> not (Text.mentionsName n scope))
 
                         // `var` only where the enumeration yields what the indexer does:
                         // a collection enumerating `object` (MatchCollection before
@@ -403,8 +404,7 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                             | _ when isNull indexedType -> "var"
                             | _ -> indexedType.ToMinimalDisplayString(model, f.SpanStart)
 
-                        elementName
-                        |> Option.map (fun elementName ->
+                        let build elementName =
                             let header = TextSpan.FromBounds(f.ForKeyword.SpanStart, f.CloseParenToken.Span.End)
 
                             let headerEdit =
@@ -435,10 +435,31 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                             (headerEdit :: aliasEdit @ readEdits)
                                     ]
                             }
-                            |> Guards.verified model)
+                            |> Guards.verified model
+
+                        Some(f, elementNames, build)
             | _ -> None
         | _ -> None)
     |> List.ofSeq
+    // each candidate is checked against the original member only, so two
+    // nested loops could both introduce `offset` (CS0136): outer loops come
+    // first in document order, and an inner one skips the names they took
+    |> List.fold
+        (fun (taken, suggestions) (f: ForStatementSyntax, names, build) ->
+            let enclosing =
+                taken
+                |> List.choose (fun (outer: ForStatementSyntax, n) ->
+                    if outer.Statement.Span.Contains f.Span then
+                        Some n
+                    else
+                        None)
+
+            match names |> List.tryFind (fun n -> not (List.contains n enclosing)) with
+            | Some n -> (f, n) :: taken, build n :: suggestions
+            | None -> taken, suggestions)
+        ([], [])
+    |> snd
+    |> List.rev
 
 // ---- CR0017 ----
 

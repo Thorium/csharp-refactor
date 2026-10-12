@@ -88,6 +88,7 @@ module Context =
             // (an oracle a host lends the analyzer is asked by the rules that read
             // only syntax of its sites: RuleContext.oracleFor)
             References = None
+            Mentions = None
         }
 
 /// The pure rules, run by both the analyzer and the apply tool. Every rule

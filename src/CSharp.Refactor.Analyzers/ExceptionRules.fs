@@ -69,7 +69,10 @@
 /// "invalid case"); no secret-smelling name on the method, its type, its
 /// namespace or a parameter (auth, session, crypt, token, password,
 /// secret, credential); the literal appears nowhere else in the
-/// compilation (a test asserting on it); not a test file. Exception text
+/// compilation (a test asserting on it), nor, where the host has a
+/// solution (the tool, the fix provider), in another project, and no test
+/// file of the solution holds the message inside a string of its own (an
+/// interpolated assertion); not a test file. Exception text
 /// is observable behaviour: private methods always, the rest under the
 /// api gate. The message says the rewrite puts argument values into the
 /// text (a PII decision on personal data).
@@ -971,6 +974,13 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                                     let count = occurrences (rootTextOf t) lit.Token.Text
 
                                     if t = tree then count > 1 else count > 0)
+                                // and in the host's other projects: a test project is
+                                // another compilation, its assertion often an
+                                // interpolation holding the message (`$"…: {message}"`)
+                                || (match RuleContext.mentionsFor ctx tree with
+                                    | Some m ->
+                                        m.Spelled lit.Token.Text || m.InTests(message.TrimEnd('.', '!', ':', ';', ' '))
+                                    | None -> false)
 
                             if elsewhere then
                                 None

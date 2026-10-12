@@ -787,6 +787,11 @@ let private analyzeProject
     // references are searched once, not once per half
     let solutionOracle = References.solutionOracle project.Solution
 
+    // the literals of the other projects (a test asserting on a message), for
+    // the analyzer run and the tool's own pass alike
+    let mentions = References.mentions project.Solution project
+    RuleContext.registerMentions withCodes.SyntaxTrees mentions
+
     RuleContext.registerOracle withCodes.SyntaxTrees (fun tree ->
         let find = solutionOracle tree
 
@@ -917,6 +922,7 @@ let private analyzeProject
                         ApiChanges = c.ApiChanges && not held
                         // callers in other files and projects, for the cross-file edit sets
                         References = Some(solutionOracle tree)
+                        Mentions = Some mentions
                     }
 
                 let suggestions, failures =

@@ -2,6 +2,14 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.19
+
+- CR0015 gives nested loops over the same collection different element names: both took `offset` (CS0136) and the file's fixes were put back.
+- CR0171 reads the target runtime off a project's reference pack, where it recognised only the runtime's own CoreLib and so reported every real project: `Dictionary.Remove`/`Clear` pass from .NET Core 3.0, an overwriting `Dictionary` indexer set and `HashSet.Remove`/`Clear` from .NET 5 (those still throw on 3.1).
+- CR0161 no longer throws "SyntaxTree is not part of the compilation" on a struct declared in a referenced project's source: its methods are judged by name, as a metadata struct's are.
+- A field or property declared in a referenced project's source no longer throws "SyntaxTree is not part of the compilation" in CR0021/CR0022 (and every rule following a value's origins): its initializer counts as unseen, as a metadata one does.
+- CR0069 leaves a message another project of the solution spells as a literal, or a test file holds inside one of its strings (an interpolated `Assert.Equal`): the tool and the fix provider read the solution, the compiler alone still sees its own compilation.
+
 ## 0.1.18
 
 - CR0189 never takes the enclosing method as the token-taking overload: `WaitAsync(ct) => WaitAsync().WithCancellation(ct)` was rewritten to call itself.

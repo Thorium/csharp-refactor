@@ -375,3 +375,84 @@ let ``the fix provider offers under a wider framework only what the narrower one
         Assert.Contains("Use Guid.Empty", guid)
     }
     :> System.Threading.Tasks.Task
+
+[<Fact>]
+let ``CR0069 leaves a message a test project asserts on, exactly or inside an interpolation`` () =
+    use workspace = new AdhocWorkspace()
+
+    let lib =
+        workspace
+            .AddProject("Lib", LanguageNames.CSharp)
+            .WithCompilationOptions(
+                Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            )
+            .AddMetadataReferences
+            metadataReferences
+
+    let parser =
+        lib.AddDocument(
+            "Parser.cs",
+            csharp
+                """
+                namespace Lib;
+                public static class Parser
+                {
+                    public static int Parse(string text) => Check(text, 3);
+                    static int Check(string text, int limit)
+                    {
+                        if (text.Length > limit) throw new System.InvalidOperationException("Too long.");
+                        if (text.Length == 0) throw new System.InvalidOperationException("Empty expression");
+                        if (text == "x") throw new System.InvalidOperationException("Bad letter.");
+                        return text.Length;
+                    }
+                }
+
+                """,
+            filePath = "C:/fake/Lib/Parser.cs"
+        )
+
+    let tests =
+        parser.Project.Solution
+            .AddProject("Lib.Tests", "Lib.Tests", LanguageNames.CSharp)
+            .AddProjectReference(ProjectReference parser.Project.Id)
+            .AddDocument(
+                "ParserTests.cs",
+                csharp
+                    """
+                    using System;
+                    using Xunit;
+                    public class ParserTests
+                    {
+                        [Fact]
+                        public void TooLong() =>
+                            Assert.Equal("Too long.", Assert.Throws<InvalidOperationException>(() => Lib.Parser.Parse("abcd")).Message);
+                        [Fact]
+                        public void Empty() =>
+                            Assert.Equal($"{nameof(Lib.Parser)}: Empty expression", "Parser: " + Assert.Throws<InvalidOperationException>(() => Lib.Parser.Parse("")).Message);
+                    }
+
+                    """,
+                filePath = "C:/fake/Lib.Tests/ParserTests.cs"
+            )
+
+    let solution = tests.Project.Solution
+    let document = solution.GetDocument parser.Id
+    let tree = document.GetSyntaxTreeAsync().Result
+    let model = document.GetSemanticModelAsync().Result
+    let ctx = Context.forTree None model.Compilation tree false
+
+    let fixedMessages (ctx: CSharp.Refactor.RuleContext) =
+        Rules.all tree model ctx
+        |> List.filter (fun s -> s.Code = "CR0069" && not s.Fixes.IsEmpty)
+        |> List.map (fun s -> tree.GetText().ToString(s.Span))
+
+    // the compiler alone sees no test project
+    Assert.Equal(3, fixedMessages ctx |> List.length)
+
+    Assert.Equal<string list>(
+        [ "\"Bad letter.\"" ],
+        fixedMessages
+            { ctx with
+                Mentions = Some(References.mentions solution document.Project)
+            }
+    )

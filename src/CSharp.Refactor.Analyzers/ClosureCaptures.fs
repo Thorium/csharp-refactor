@@ -583,7 +583,12 @@ let private knownMutators =
 
 /// Does a source method of a struct write its own state?
 let rec private mutatesSelf (model: SemanticModel) (visited: Set<string>) (m: IMethodSymbol) : bool =
-    match m.DeclaringSyntaxReferences |> Seq.tryHead with
+    // a method of a referenced project's source is declared in that project's
+    // compilation: judged as its metadata would be, by name
+    match
+        m.DeclaringSyntaxReferences
+        |> Seq.tryFind (fun r -> model.Compilation.ContainsSyntaxTree r.SyntaxTree)
+    with
     | None -> knownMutators.Contains m.Name
     | Some r ->
         match r.GetSyntax() with

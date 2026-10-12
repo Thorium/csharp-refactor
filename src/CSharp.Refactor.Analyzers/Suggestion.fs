@@ -7,6 +7,7 @@ namespace CSharp.Refactor
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.Diagnostics
 open Microsoft.CodeAnalysis.Text
+open System.Runtime.CompilerServices
 
 /// One text change: the span to replace and what replaces it. A fix is a list
 /// of these, applied together; nothing outside the spans changes. `File`
@@ -28,6 +29,18 @@ type ReferenceSite =
         Model: SemanticModel
         Node: SyntaxNode
         Editable: bool
+    }
+
+/// What a host with a `Solution` knows of the string literals outside the
+/// compilation a rule sees: a test project asserting on a message is one.
+type TextMentions =
+    {
+        /// A literal spelled exactly so (quotes and escapes included) in a
+        /// C# document of another project.
+        Spelled: string -> bool
+        /// The text inside a string of a test file anywhere in the solution
+        /// (an interpolated assertion's pieces included).
+        InTests: string -> bool
     }
 
 /// A rewrite the rule offers. `EditorOnly` marks the alternatives an editor
@@ -75,6 +88,9 @@ type RuleContext =
         /// an editor without a solution have `None`, and a rule then
         /// rewrites callers in its own file only, or stands down.
         References: (ISymbol -> ReferenceSite list) option
+        /// The literals of the host's solution beyond this compilation —
+        /// the tool and the fix provider answer, the compiler has `None`.
+        Mentions: TextMentions option
     }
 
 module Suggestion =
@@ -133,6 +149,7 @@ module RuleContext =
                 Microsoft.CodeAnalysis.CSharp.LanguageVersionFacts.MapSpecifiedToEffectiveVersion
                     Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest
             References = None
+            Mentions = None
         }
 
     /// The reference oracles hosts lend the analyzer, by the syntax trees it
@@ -144,7 +161,7 @@ module RuleContext =
     /// runs the analyzers over its own copy of the compilation, which shares
     /// the trees. Weak: a tree gone takes its oracle along.
     let private hostOracles =
-        System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, ISymbol -> ReferenceSite list>()
+        ConditionalWeakTable<SyntaxTree, ISymbol -> ReferenceSite list>()
 
     let registerOracle (trees: SyntaxTree seq) (oracle: SyntaxTree -> ISymbol -> ReferenceSite list) =
         lock hostOracles (fun () ->
@@ -158,6 +175,25 @@ module RuleContext =
         | true, oracle -> Some oracle
         | _ -> None
 
+    /// The solution's literals a host lends the analyzer, by tree, as the
+    /// reference oracle above.
+    let private hostMentions = ConditionalWeakTable<SyntaxTree, TextMentions>()
+
+    let registerMentions (trees: SyntaxTree seq) (mentions: TextMentions) =
+        lock hostMentions (fun () ->
+            for tree in trees do
+                hostMentions.Remove tree |> ignore
+                hostMentions.Add(tree, mentions))
+
+    /// What the rule's own context carries, else what a host lent for the tree.
+    let mentionsFor (ctx: RuleContext) (tree: SyntaxTree) : TextMentions option =
+        match ctx.Mentions with
+        | Some m -> Some m
+        | None ->
+            match hostMentions.TryGetValue tree with
+            | true, m -> Some m
+            | _ -> None
+
     /// The trees a host run leaves out. A host analysing some of a
     /// compilation's trees asks for all of them once, with the rest set aside
     /// here: the per-tree entry points each analyse a fresh copy of the
@@ -165,8 +201,7 @@ module RuleContext =
     /// Counted: two runs sharing a tree (a linked file, projects analysed
     /// side by side) each set it aside, and the first to finish does not
     /// bring it back while the other still runs.
-    let private hostSkipped =
-        System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, System.Runtime.CompilerServices.StrongBox<int>>()
+    let private hostSkipped = ConditionalWeakTable<SyntaxTree, StrongBox<int>>()
 
     let private setAside (trees: SyntaxTree[]) =
         lock hostSkipped (fun () ->

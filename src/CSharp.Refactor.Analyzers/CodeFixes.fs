@@ -101,6 +101,7 @@ type CSharpRefactorCodeFixProvider() =
                         let ctx =
                             { Context.forTree options model.Compilation tree false with
                                 References = Some(References.oracle document.Project.Solution tree)
+                                Mentions = Some(References.mentions document.Project.Solution document.Project)
                             }
 
                         // a file a narrower framework of the project compiles too: only
@@ -112,6 +113,7 @@ type CSharpRefactorCodeFixProvider() =
                                 let theirs =
                                     { Context.forTree options theirModel.Compilation theirTree false with
                                         References = Some(References.oracle flavor.Solution theirTree)
+                                        Mentions = Some(References.mentions flavor.Solution flavor)
                                     }
 
                                 Rules.all theirTree theirModel theirs)

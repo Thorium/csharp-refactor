@@ -1001,7 +1001,9 @@ name, is not an invariant ("unreachable", "not possible", "NYI",
 "unexpected") nor thrown as an `UnreachableException`; no secret-smelling
 name on the method, its type, its namespace or a parameter (auth, session,
 crypt, token, password, secret, credential, key, connection); the literal appears nowhere else in the compilation (a test
-asserting on it); not a test file. Exception text is observable
+asserting on it) nor, where the host has a solution (the tool, the fix
+provider), in another project, and no test file of the solution holds the
+message inside a string of its own (an interpolated assertion); not a test file. Exception text is observable
 behaviour: private methods always, internal under the friend check, public
 under the api gate. The message says the rewrite puts argument values
 into the text — a PII decision where the data is personal. F# twin:
@@ -2413,9 +2415,11 @@ version, so `foreach (var k in d.Keys) d.Add(…)` throws just the same and
 the reference watched is `d`, the snapshot `d.Keys.ToList()`); the mutating call is on the same
 reference by symbol, outside nested closures; a mutation followed by
 `break`, `return` or `throw` never reaches the next `MoveNext` and is the
-accepted mutate-and-leave idiom; `Dictionary.Remove`/`HashSet.Remove` and
-a `Dictionary` indexer set on CoreLib (.NET Core 3.0+) tolerate
-enumeration and are not reported;
+accepted mutate-and-leave idiom; `Dictionary.Remove`/`Clear` tolerate enumeration
+since .NET Core 3.0, an overwriting `Dictionary` indexer set and
+`HashSet.Remove`/`Clear` since .NET 5 (those still throw on 3.1), and none is
+reported in a compilation targeting that runtime or later, read off its
+core library (`netstandard` may run on .NET Framework);
 `System.Linq` importable for the snapshot.
 
 ### CR0172 — idiom
