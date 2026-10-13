@@ -351,3 +351,5 @@ the example suite.
 
 See [DESIGN.md](DESIGN.md) for the full safety model, the yields-to gate,
 the planned catalog and the relationship to Microsoft's analyzers.
+
+<!-- mcp-name: io.github.Thorium/csharp-refactor -->

@@ -16,12 +16,12 @@
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <PackageId>CSharp.Refactor.Analyzers</PackageId>
     <Description>Functional refactoring suggestions (light bulb quick fixes) for C#, built on Roslyn. Correctness, performance and idiom rules; every one is Info severity, so they never gate a build.</Description>
-    <PackageTags>csharp;analyzers;refactoring;codefix;roslyn</PackageTags>
+    <PackageTags>csharp;roslyn;analyzers;roslyn-analyzers;refactoring;codefix;static-analysis;code-quality;linter;functional;linq;performance</PackageTags>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/csharp-refactor</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Thorium/csharp-refactor</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageTags>csharp;analyzers;refactoring;codefix;roslyn</PackageTags>
+    <PackageTags>csharp;roslyn;analyzers;roslyn-analyzers;refactoring;codefix;static-analysis;code-quality;linter;functional;linq;performance</PackageTags>
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <DevelopmentDependency>true</DevelopmentDependency>
