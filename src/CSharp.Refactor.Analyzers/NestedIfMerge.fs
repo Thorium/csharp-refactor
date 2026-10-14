@@ -18,7 +18,9 @@
 /// (the inside of the two conditions, the inner if's tail after its `)`) —
 /// one beside the outer `)`, above an unbraced inner if, on a brace or on
 /// the outer `else` would be dropped; the moved lines hold no
-/// multi-line literal.
+/// multi-line literal; no `out var` or pattern variable of the inner
+/// condition is named anywhere else in the member (merged, its scope
+/// widens to the outer's block).
 module CSharp.Refactor.NestedIfMerge
 
 open System
@@ -121,6 +123,15 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         && not (outer.Condition.Span.Contains t.Span)
                         && not (inner.Condition.Span.Contains t.Span)
                         && not (TextSpan.FromBounds(inner.CloseParenToken.Span.End, inner.Span.End).Contains t.Span))
+                )
+                // an `out var` or pattern variable of the inner condition lives in
+                // the outer's `then`; merged, it lives in the outer's block, where a
+                // namesake elsewhere in the member would clash with it or bind to it
+                && not (
+                    let scope = Text.enclosingMember outer
+
+                    Text.declaredLocals inner.Condition
+                    |> List.exists (fun name -> Text.mentionsNameOutside name scope inner.Span)
                 )
                 ->
                 let sameElse =

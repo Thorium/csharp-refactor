@@ -407,6 +407,29 @@ let ``a deconstructed input, a ref alias, a checked context and an unbraced loop
     Assert.Equal<string list>([ """var label = tag + ":";""" ], suggestCode "CR0177" concat |> firedText concat)
 
 [<Fact>]
+let ``CR0177 keeps a local whose name a sibling branch of the loop reads as the field`` () =
+    let source =
+        csharp
+            """
+            using System;
+            class C
+            {
+                string label = "field";
+                void A(int[] xs, string prefix)
+                {
+                    foreach (var x in xs)
+                    {
+                        if (x > 0) { var label = prefix + ":"; Console.WriteLine(label); }
+                        else Console.WriteLine(label);
+                    }
+                }
+            }
+            """
+
+    // above the loop, the local would answer the else branch's read of the field
+    Assert.Empty(suggestCode "CR0177" source)
+
+[<Fact>]
 let ``CR0177 keeps a division by -1 in the loop: the lowest balance would throw once for an empty ledger`` () =
     let source =
         csharp

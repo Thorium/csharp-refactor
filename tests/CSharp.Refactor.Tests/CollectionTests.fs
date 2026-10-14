@@ -251,6 +251,25 @@ let ``a Keys loop with a lookup per key enumerates the pairs, a writing loop sta
     Assert.Contains("foreach (var (key, v) in d) Console.WriteLine(v + value);", fixedSource)
 
 [<Fact>]
+let ``CR0032 names the pair's value past a setter's or an event accessor's implicit value`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            class C
+            {
+                readonly Dictionary<string, int> d = new();
+                public int Total { set { foreach (var k in d.Keys) Console.WriteLine(k + d[k]); } }
+                public event EventHandler Changed { add { foreach (var k in d.Keys) Console.WriteLine(d[k]); } remove { } }
+            }
+            """
+
+    let fixedSource = fixAll "CR0032" source
+    Assert.Contains("set { foreach (var (k, v) in d) Console.WriteLine(k + v); }", fixedSource)
+    Assert.Contains("add { foreach (var (k, v) in d) Console.WriteLine(v); }", fixedSource)
+
+[<Fact>]
 let ``CR0032 still enumerates the pairs when nothing before a lookup can write the dictionary`` () =
     let source =
         csharp

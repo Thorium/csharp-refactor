@@ -13,7 +13,9 @@
 /// nothing (the parameter is used once and outside any nested lambda, or
 /// the first body is a pure atom); neither call spells type arguments
 /// and captures nothing (the second body never spells the first
-/// parameter's name, the first body never spells the second's); the
+/// parameter's name, the first body never spells the second's, and no
+/// nested lambda or local of the second body declares its parameter's
+/// name, whose reads are not the parameter's); the
 /// substituted body is bracketed where the parameter stood under a
 /// tighter operator; the identity form goes only where the receiver is
 /// already typed `IEnumerable<T>` (a `List<T>` would change the static
@@ -159,6 +161,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                             || (duplicates && not pureA)
                             || Text.mentionsName x b
                             || Text.mentionsName y a
+                            // a nested lambda's own `y` is not the parameter
+                            || Text.declaresName y b
                             || Text.holdsCommentOrDirective outer
                         then
                             None

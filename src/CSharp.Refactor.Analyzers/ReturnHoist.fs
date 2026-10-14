@@ -38,7 +38,9 @@
 /// line that fits the wrap column (a conditional over two multi-line arms
 /// is no clearer than the `if`); a branch value that is itself a
 /// conditional, an assignment or a lambda is parenthesised, and a `throw`
-/// branch is left alone; the speculative
+/// branch is left alone; no `out var` or pattern variable of a branch (or
+/// of a later link's condition) is named elsewhere in the member, since the
+/// conditional widens its scope to the enclosing block; the speculative
 /// re-bind settles the conditional's typing (a natural common type, or
 /// the target type from C# 9), and every arm must still convert to the
 /// type it converted to before — arms of one type, a natural type equal to
@@ -192,6 +194,14 @@ let private strayEnd (ifs: IfStatementSyntax) =
         e.Span.End
     | _ -> ifs.Span.End
 
+/// Does a variable the node designates (`out var`, a pattern) have its name
+/// spelled in the member outside `own`? The node's branch scoped it; in the
+/// conditional it lives in the enclosing block, where that mention would
+/// clash with it or bind to it.
+let private widens (member': SyntaxNode) (node: SyntaxNode) (own: TextSpan) =
+    Text.declaredLocals node
+    |> List.exists (fun name -> Text.mentionsNameOutside name member' own)
+
 let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     let text = tree.GetText()
     let wrapAt = RuleContext.wrapColumn ctx Code
@@ -224,9 +234,11 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                 (title: string)
                 =
                 let edit = Suggestion.replace span replacement
+                let member' = Text.enclosingMember ifs
 
                 if
                     fits replacement
+                    && not (arms |> List.exists (fun a -> widens member' a a.Span))
                     && Guards.speculativeCheck model [ edit ]
                     && Guards.armsConvertAlike model edit arms
                 then
@@ -378,13 +390,26 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         | Some s -> Some s
                         | None -> within partPerLine
 
+                // a later link's condition scoped its variables to that link (its
+                // value and the rest of the chain); every arm to its branch
+                let widened (arms: ExpressionSyntax list) =
+                    let member' = Text.enclosingMember ifs
+
+                    (List.tail chain
+                     |> List.exists (fun (c, st) ->
+                         match st.Parent with
+                         | :? IfStatementSyntax as link -> widens member' c link.Span
+                         | _ -> true))
+                    || arms |> List.exists (fun a -> widens member' a a.Span)
+
                 let offerLadder span arms replacement message title =
                     match replacement with
                     | Some replacement ->
                         let edit = Suggestion.replace span replacement
 
                         if
-                            Guards.speculativeCheck model [ edit ]
+                            not (widened arms)
+                            && Guards.speculativeCheck model [ edit ]
                             && Guards.armsConvertAlike model edit arms
                         then
                             Some

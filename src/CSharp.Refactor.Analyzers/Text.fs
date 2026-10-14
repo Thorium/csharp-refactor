@@ -122,6 +122,30 @@ let mentionsName (name: string) (node: SyntaxNode) : bool =
     && node.DescendantTokens()
        |> Seq.exists (fun t -> t.IsKind SyntaxKind.IdentifierToken && t.ValueText = name)
 
+/// Does an identifier token in the scope, outside the span, spell the name?
+/// A variable whose scope a fix widens to the scope clashes with, or
+/// captures, any such mention.
+let mentionsNameOutside (name: string) (scope: SyntaxNode) (inside: TextSpan) : bool =
+    not (isNull scope)
+    && scope.DescendantTokens()
+       |> Seq.exists (fun t ->
+           t.IsKind SyntaxKind.IdentifierToken
+           && t.ValueText = name
+           && not (inside.Contains t.Span))
+
+/// Does a token of the node DECLARE the name — a parameter, a local, a
+/// pattern or `out` variable, a `foreach` or `catch` variable, a range
+/// variable — rather than read it? An identifier token outside a simple
+/// name is a declaration (a member name in a declaration counts too: the
+/// answer errs toward "declares").
+let declaresName (name: string) (node: SyntaxNode) : bool =
+    not (isNull node)
+    && node.DescendantTokens()
+       |> Seq.exists (fun t ->
+           t.IsKind SyntaxKind.IdentifierToken
+           && t.ValueText = name
+           && not (t.Parent :? Syntax.SimpleNameSyntax))
+
 /// The enclosing member declaration — the scope a fresh name must be
 /// unused in, and where a local may be written — or the root when the node
 /// is not in one. A top-level statement is one member of the compilation
@@ -199,6 +223,34 @@ let declaredLocals (node: SyntaxNode) : string list =
         | :? Syntax.SingleVariableDesignationSyntax as d -> Some d.Identifier.ValueText
         | _ -> None)
     |> List.ofSeq
+
+/// The name a catch clause's new exception variable takes: the first of
+/// `ex`, `e`, `exception` that nothing in the clause spells (a field read
+/// there would be shadowed), no local or parameter of the member declares,
+/// and no enclosing `foreach` or `catch` binds (CS0136) — none when all
+/// three are taken.
+let catchBinderName (clause: Syntax.CatchClauseSyntax) : string option =
+    let scope = enclosingMember clause
+
+    let taken =
+        declaredLocals scope
+        @ (scope.DescendantNodes()
+           |> Seq.choose (fun d ->
+               match d with
+               | :? Syntax.ParameterSyntax as p -> Some p.Identifier.ValueText
+               | _ -> None)
+           |> List.ofSeq)
+        @ (clause.Ancestors()
+           |> Seq.choose (fun a ->
+               match a with
+               | :? Syntax.ForEachStatementSyntax as f -> Some f.Identifier.ValueText
+               | :? Syntax.CatchClauseSyntax as c when not (isNull c.Declaration) ->
+                   Some c.Declaration.Identifier.ValueText
+               | _ -> None)
+           |> List.ofSeq)
+
+    [ "ex"; "e"; "exception" ]
+    |> List.tryFind (fun candidate -> not (mentionsName candidate clause || List.contains candidate taken))
 
 /// The full line a statement alone occupies, line break included — so a
 /// removal takes the line with it — else just the statement.

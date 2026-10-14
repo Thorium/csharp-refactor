@@ -572,6 +572,49 @@ let ``CR0005 holds a comment beside the outer paren, above an unbraced inner if,
     Assert.Contains("""if (a && b) System.Console.WriteLine("x"); // kept""", fixAll "CR0005" source)
 
 [<Fact>]
+let ``CR0005 keeps the nesting when a variable of the inner condition would reach a namesake in the member`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            class P { public int X; }
+            class C
+            {
+                string result = "";
+                void A(object o, bool a)
+                {
+                    if (a)
+                    {
+                        if (o is string result) Log(result);
+                    }
+                    result = "done";
+                    Log(result);
+                }
+                void B(List<P> ps, Dictionary<string, int> d, string k)
+                {
+                    foreach (var p in ps) { var value = p.X; Log(value.ToString()); }
+                    if (d != null)
+                    {
+                        if (d.TryGetValue(k, out var value)) Log(value.ToString());
+                    }
+                }
+                void D(object o, bool a)
+                {
+                    if (a)
+                    {
+                        if (o is string s) Log(s);
+                    }
+                }
+                void Log(string s) { }
+            }
+            """
+
+    // A would write the pattern variable where it wrote the field; B would
+    // declare `value` over the loop's (CS0136); D's `s` is its own
+    Assert.Equal<string list>([ "if (a)" ], firedText source (suggestCode "CR0005" source))
+    Assert.Contains("if (a && o is string s) Log(s);", fixAll "CR0005" source)
+
+[<Fact>]
 let ``a table of constants with a throwing default is not a stub`` () =
     let source =
         csharp
@@ -722,6 +765,47 @@ let ``returns and assignments every branch performs become one conditional; the 
     Assert.Contains("""if (a) P = "1"; else P = "2";""", fixedSource)
     Assert.Contains("int? R(bool a) { return a ? 1 : null; }", fixedSource)
     Assert.Contains("""string J(bool a, bool b) { return a ? "1" : b ? "2" : "3"; }""", fixedSource)
+
+[<Fact>]
+let ``CR0173 keeps the if when a branch's out or pattern variable would reach a namesake in the member`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                int n;
+                int A(bool a, string s)
+                {
+                    int x;
+                    if (a) x = int.TryParse(s, out var n) ? n : 0; else x = -1;
+                    n = x;
+                    return n;
+                }
+                string B(object o, bool a)
+                {
+                    string r;
+                    if (a) r = "a";
+                    else if (o is int n) r = n.ToString();
+                    else r = "c";
+                    n = 2;
+                    return r;
+                }
+                int D(bool a, string s)
+                {
+                    int x;
+                    if (a) x = int.TryParse(s, out var m) ? m : 0; else x = -1;
+                    return x;
+                }
+            }
+            """
+
+    // A and B would write the out or pattern variable where they wrote the field
+    Assert.Equal<string list>(
+        [
+            "int x;\n        if (a) x = int.TryParse(s, out var m) ? m : 0; else x = -1;"
+        ],
+        firedText source (suggestCode "CR0173" source)
+    )
 
 [<Fact>]
 let ``an else-if chain every link of which returns or assigns one target is a conditional ladder, one arm a line when long``

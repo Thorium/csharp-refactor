@@ -10,8 +10,10 @@
 /// another, is never mistaken for the prefix); the namespace is not
 /// already imported — that case is IDE0001's; at least `uses` (6)
 /// spellings, or `deep_uses` (4) when the namespace has three segments or
-/// more; a type name the file already declares or uses unqualified would
-/// clash and holds the fix; `global::`-qualified and `using`-directive
+/// more; a type name the file already declares or uses unqualified, or one
+/// that already binds bare at its first use (a type of the containing
+/// namespace declared in another file, an inherited member), would clash
+/// and holds the fix; `global::`-qualified and `using`-directive
 /// spellings are left alone; the speculative re-bind (with the new
 /// `using` in place) settles every other resolution change, an
 /// extension-method ambiguity included. The `using` goes among the file's
@@ -197,12 +199,24 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         | :? INamedTypeSymbol as nt -> nt.ContainingNamespace.ToDisplayString() = nsName
                         | _ -> false
 
+                // ... or the bare name already binds at a use to something the
+                // file does not spell: a type of the containing namespace in
+                // another file, a member inherited from a base type — both win
+                // over the new `using`. One lookup per name, at its first use.
+                let bindsElsewhere (name: string) =
+                    let first = group |> List.find (fun s -> s.TypeName = name)
+
+                    model.LookupSymbols(first.Prefix.SpanStart, name = name)
+                    |> Seq.exists (fun sym ->
+                        not (sym :? INamedTypeSymbol && sym.ContainingNamespace.ToDisplayString() = nsName))
+
                 let clash =
                     typeNames
                     |> List.exists (fun name ->
                         root.DescendantTokens()
                         |> Seq.exists (fun t ->
-                            t.IsKind SyntaxKind.IdentifierToken && t.ValueText = name && not (isTheType t)))
+                            t.IsKind SyntaxKind.IdentifierToken && t.ValueText = name && not (isTheType t))
+                        || bindsElsewhere name)
 
                 let placed =
                     Usings.insertionIn (Usings.usingsInsideNamespace model.Compilation) tree text nsName

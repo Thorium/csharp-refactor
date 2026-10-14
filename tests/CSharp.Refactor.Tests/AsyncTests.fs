@@ -452,6 +452,29 @@ let ``weak locks are noted with a gate offer, Monitor.Enter with try/finally bec
     Assert.Contains("void G() { Monitor.Enter(gate); count++; Monitor.Exit(gate); }", fixedSource)
     Assert.Contains("ref taken", fixedSource)
 
+[<Fact>]
+let ``CR0047 offers no gate field a base type or another part of the type already names`` () =
+    let inherited =
+        csharp
+            """
+            class Base { protected readonly object _gate = new(); }
+            class C : Base { int count; void A() { lock (this) { count++; } } }
+            """
+
+    let weak = suggestCode "CR0047" inherited |> List.exactlyOne
+    Assert.Empty weak.Fixes
+
+    let part = "partial class C { int count; void A() { lock (this) { count++; } } }"
+
+    let other =
+        "partial class C { readonly object _gate = new(); void B() { lock (_gate) { } } }"
+
+    let weak =
+        suggestInProject false false "CR0047" [ "A.cs", part; "B.cs", other ]
+        |> List.exactlyOne
+
+    Assert.Empty weak.Fixes
+
 // ---- CR0049 / CR0050 ----
 
 [<Fact>]
@@ -553,6 +576,31 @@ let ``CR0049 closes the race on a token-task cache: the store kept a failed fetc
         [ "tokens.GetOrAdd(tenant, _ => client.FetchTokenAsync(tenant))" ],
         firedText fixedSource (suggestCode "CR0050" fixedSource)
     )
+
+[<Fact>]
+let ``CR0049 keeps the store when the factory reads a name the discard parameter would take`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Concurrent;
+            class C
+            {
+                readonly ConcurrentDictionary<int, int> cache = new();
+                readonly int _ = 7;
+                int A(int k)
+                {
+                    if (!cache.TryGetValue(k, out var v))
+                    {
+                        v = k * _;
+                        cache[k] = v;
+                    }
+                    return v;
+                }
+            }
+            """
+
+    // `_ => k * _` reads the key where the field was
+    Assert.Empty(suggestCode "CR0049" source |> List.filter (fun s -> not s.Fixes.IsEmpty))
 
 [<Fact>]
 let ``CR0050 leaves a GetOrAdd whose factory only throws: an unknown country caches no failed gateway`` () =
@@ -696,6 +744,25 @@ let ``a private method draining a task whose callers are all async becomes async
     Assert.Contains("async Task<int> A() { var r = await FetchAsync(1); return r; }", fixedSource)
     Assert.Contains("async Task<int> B() { return await FetchAsync(2); }", fixedSource)
     Assert.Contains("int D() => Sync(1);", fixedSource)
+
+[<Fact>]
+let ``CR0041 keeps the name when a base type already has the Async one`` () =
+    let source =
+        csharp
+            """
+            using System.Threading.Tasks;
+            class BaseRepo { protected Task<int> FetchAsync(int n) => Task.FromResult(n); }
+            class Repo : BaseRepo
+            {
+                Task<int> Load() => Task.FromResult(1);
+                private int Fetch(int n) { var x = Load().Result; return x + n; }
+                async Task<int> A() { var r = Fetch(1); return r; }
+                async Task<int> B() { return await FetchAsync(2); }
+            }
+            """
+
+    // the renamed method would hide the base's, and B would call it instead
+    Assert.Empty(suggestCode "CR0041" source |> List.filter (fun s -> not s.Fixes.IsEmpty))
 
 // ---- CR0043 ----
 

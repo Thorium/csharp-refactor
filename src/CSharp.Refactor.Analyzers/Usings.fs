@@ -10,11 +10,15 @@ open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.CSharp.Syntax
 open Microsoft.CodeAnalysis.Text
 
-/// Is the namespace already imported at the position (a `using`, a global
-/// using, an implicit using), or the type resolvable bare?
+/// The type's bare name at the position binds to that namespace's type, and
+/// to nothing else — the namespace is imported (a `using`, a global using,
+/// an implicit using) and no namesake wins or makes the name ambiguous.
 let imported (model: SemanticModel) (position: int) (ns: string) (typeName: string) =
-    model.LookupNamespacesAndTypes(position, name = typeName)
-    |> Seq.exists (fun s -> s :? INamedTypeSymbol && s.ContainingNamespace.ToDisplayString() = ns)
+    let found = model.LookupNamespacesAndTypes(position, name = typeName)
+
+    not found.IsEmpty
+    && found
+       |> Seq.forall (fun s -> s :? INamedTypeSymbol && s.ContainingNamespace.ToDisplayString() = ns)
 
 /// Does the compilation keep its usings inside the namespace declaration
 /// (StyleCop's SA1200 convention)? Read off the files that have usings at
@@ -150,7 +154,11 @@ let insertion (tree: SyntaxTree) (text: SourceText) (nsName: string) : (int * st
 
 
 /// The edit that imports a namespace, or none when it is imported already
-/// (an empty list) or cannot be placed (None).
+/// (an empty list), cannot be placed, or would not make the bare name bind
+/// to the type (None: the caller offers no fix). The bare name binding to
+/// anything else — a type of the containing namespace, a namespace, a type
+/// another `using` brings — no new `using` can change: the containing
+/// namespace wins, and a second import is ambiguous.
 let importEdit
     (model: SemanticModel)
     (tree: SyntaxTree)
@@ -158,8 +166,15 @@ let importEdit
     (ns: string)
     (typeName: string)
     : TextEdit list option =
-    if imported model position ns typeName then
+    let found = model.LookupNamespacesAndTypes(position, name = typeName)
+
+    let wanted (s: ISymbol) =
+        s :? INamedTypeSymbol && s.ContainingNamespace.ToDisplayString() = ns
+
+    if not found.IsEmpty && found |> Seq.forall wanted then
         Some []
+    elif not found.IsEmpty then
+        None
     else
         insertionIn (usingsInsideNamespace model.Compilation) tree (tree.GetText()) ns
         |> Option.map (fun (at, text) -> [ Suggestion.insert at text ])

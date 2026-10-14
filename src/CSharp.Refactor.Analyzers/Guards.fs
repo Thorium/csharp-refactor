@@ -7,9 +7,12 @@
 ///   - `callsOnlyCore`: every call in it is to a member known effect-free,
 ///     so reordering or short-circuiting its evaluation is invisible — the
 ///     question behind map fusion, `Any` over a flag loop, and the like
-///   - `speculativeCheck`: the patched file still binds, and no symbol at
-///     an untouched site resolves differently — the resolution class of
-///     defect, caught per fix
+///   - `speculativeCheck`: the patched file (or the edited member) carries
+///     no error of a kind it did not carry before, by count per error id —
+///     a fix that breaks the build is caught per fix. It does not compare
+///     what each name binds to: a rewrite that compiles and rebinds a name
+///     (a widened scope capturing a field's mention, a new member hiding an
+///     inherited one) passes it, and is each rule's own guard to refuse
 ///
 /// Every proof errs toward silence: what it cannot read is impure.
 module CSharp.Refactor.Guards
@@ -860,14 +863,27 @@ let verified (model: SemanticModel) (s: Suggestion) : Suggestion =
 
     { s with Fixes = survive }
 
-/// A type's spelling at a position: its bare name where a `using` brings
-/// it in scope, else the qualified name.
+/// A type's spelling at a position: its bare name where it binds to that
+/// type alone, else the qualified name.
 let typeText (model: SemanticModel) (position: int) (ns: string) (name: string) =
+    let found = model.LookupNamespacesAndTypes(position, name = name)
+
+    // every arity of the name from that namespace, and nothing else: a
+    // namesake from the containing namespace or a second using would win
+    // or be ambiguous
     let resolves =
-        model.LookupNamespacesAndTypes(position, name = name)
-        |> Seq.exists (fun s -> s.ToDisplayString() = $"{ns}.{name}")
+        not found.IsEmpty
+        && found
+           |> Seq.forall (fun s -> s :? INamedTypeSymbol && s.ContainingNamespace.ToDisplayString() = ns)
 
     if resolves then name else $"{ns}.{name}"
+
+/// Does the type, or any type it derives from, have a member of the name?
+/// A member added under it would hide that one (or overload it), and a
+/// call spelled with it would reach the newcomer.
+let rec declaredUp (t: ITypeSymbol) (name: string) : bool =
+    not (isNull t)
+    && (not (Seq.isEmpty (t.GetMembers name)) || declaredUp t.BaseType name)
 
 /// May `!(a < b)` become `a >= b` with this operand? Not for `float`/
 /// `double`/`Half` (NaN compares false both ways), not for a `Nullable<T>`

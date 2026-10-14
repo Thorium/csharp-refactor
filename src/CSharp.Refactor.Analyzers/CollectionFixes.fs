@@ -1312,10 +1312,20 @@ let private dictionaryPairs (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                                     not (deferred || hazardBeforeRead || writtenByClosure)
                                 | _ -> false
 
+                            // a setter, `init` or event accessor declares `value` unseen
+                            let implicitValue =
+                                f.Ancestors()
+                                |> Seq.exists (fun a ->
+                                    a.IsKind SyntaxKind.SetAccessorDeclaration
+                                    || a.IsKind SyntaxKind.InitAccessorDeclaration
+                                    || a.IsKind SyntaxKind.AddAccessorDeclaration
+                                    || a.IsKind SyntaxKind.RemoveAccessorDeclaration)
+
                             let valueName =
                                 [ "value"; "v"; k + "Value" ]
                                 |> List.tryFind (fun n ->
                                     SyntaxFacts.GetKeywordKind n = SyntaxKind.None
+                                    && not (n = "value" && implicitValue)
                                     && not (Text.mentionsName n scope))
 
                             valueName

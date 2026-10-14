@@ -127,3 +127,41 @@ let ``a log line inside a catch that drops the exception gains it first; a menti
     let fired = fires 2 "CR0115" source
     Assert.Equal(1, fired |> List.filter (fun s -> not s.Fixes.IsEmpty) |> List.length)
     Assert.Contains("""log.LogError(ex, "sync failed {Id}", id);""", fixAll "CR0115" source)
+
+[<Fact>]
+let ``CR0115 leaves a log line where a lambda parameter or local of the catch takes the exception's name`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using Microsoft.Extensions.Logging;
+            class C
+            {
+                readonly ILogger log;
+                void A(List<Exception> errors) { try { } catch (Exception ex) { errors.ForEach(ex => log.LogError("item failed")); } }
+                void B(List<Exception> errors) { try { } catch (Exception ex) { Action report = () => { var ex = errors[0]; log.LogError("first failed"); }; report(); } }
+            }
+            """
+        + loggerShim
+
+    // `ex` at the call is the list's element, not the caught exception
+    Assert.Empty(suggestCode "CR0115" source)
+
+[<Fact>]
+let ``CR0115 still fixes a log line after a lambda whose own ex has closed`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using Microsoft.Extensions.Logging;
+            class C
+            {
+                readonly ILogger log;
+                void A(List<Exception> errors) { try { } catch (Exception ex) { errors.ForEach(ex => Console.WriteLine(ex)); log.LogError("sync failed"); } }
+            }
+            """
+        + loggerShim
+
+    Assert.Contains("""log.LogError(ex, "sync failed");""", fixAll "CR0115" source)

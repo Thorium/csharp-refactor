@@ -478,9 +478,11 @@ let private taskify (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext)
                             else
                                 m.Identifier.ValueText
 
+                        // an inherited namesake counts: the renamed method would
+                        // hide it, and a call meant for it would reach this one
                         let clash =
                             newName <> m.Identifier.ValueText
-                            && not (self.ContainingType.GetMembers(newName) |> Seq.isEmpty)
+                            && Guards.declaredUp self.ContainingType newName
 
                         if clash then
                             None

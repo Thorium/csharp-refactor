@@ -217,8 +217,18 @@ let private catchLogs (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                 | Some c ->
                     let binder = c.Declaration.Identifier.ValueText
 
-                    // any mention of the exception counts as handled
-                    if Text.mentionsName binder inv.ArgumentList then
+                    // any mention of the exception counts as handled. Only a
+                    // lambda or local function enclosing the call can rebind
+                    // the name (anywhere else in the catch it is CS0136): one
+                    // declaring it takes the inserted one
+                    let rebound =
+                        inv.Ancestors()
+                        |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, c)))
+                        |> Seq.exists (fun a ->
+                            (a :? AnonymousFunctionExpressionSyntax || a :? LocalFunctionStatementSyntax)
+                            && Text.declaresName binder a)
+
+                    if Text.mentionsName binder inv.ArgumentList || rebound then
                         None
                     else
                         let args = inv.ArgumentList.Arguments |> List.ofSeq

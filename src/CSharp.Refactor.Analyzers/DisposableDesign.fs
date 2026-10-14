@@ -402,9 +402,10 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
 
                             // the editor offers the interface and the Dispose; a
                             // disposable base wants its Dispose(bool) overridden
-                            // instead, which is the author's
+                            // instead, which is the author's; a base's own
+                            // `Dispose` would be hidden by the new one
                             let fixes =
-                                if baseDisposable then
+                                if baseDisposable || Guards.declaredUp self.BaseType "Dispose" then
                                     []
                                 else
                                     implementDisposable tree model t managed |> Option.toList

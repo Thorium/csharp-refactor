@@ -223,15 +223,22 @@ let renderStatement
                 "    "
         | _ -> "    "
 
-    // locals declared under the same name in two bodies keep their braces
+    // locals declared under the same name in two bodies keep their braces;
+    // so does a local whose name the chain spells outside its own body: the
+    // switch block is one scope, so another section's mention (a field, an
+    // outer name) would reach the local
     let declared =
         sections
         |> List.map (fun s -> Set.ofList (Text.declaredLocals s.Body @ s.Binders))
 
     let clashing (i: int) =
+        let own = sections.[i].Body
+
         declared
         |> List.mapi (fun j d -> j, d)
         |> List.exists (fun (j, d) -> j <> i && not (Set.intersect d declared.[i]).IsEmpty)
+        || Text.declaredLocals own
+           |> List.exists (fun name -> Text.mentionsNameOutside name whole own.Span)
 
     let sectionLines =
         sections

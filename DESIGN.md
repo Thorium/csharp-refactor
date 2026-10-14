@@ -237,13 +237,18 @@ speculative check).
    fresh `SemanticModel`. Every fix that can change name or overload
    resolution — adding a `using`, changing a type, a signature, a receiver, a
    `+` operand, a lambda substitution — is applied to a copy of the tree
-   before it is offered, and stands down if the patched file has any new
-   error, or if any symbol resolved at a site the fix did not touch now
-   resolves differently. This turns "a fix must be right without a build"
-   from a discipline into a per-fix proof, at the cost of one file re-bind
-   per candidate finding. It never replaces a semantic guard (a rewrite can
-   compile and mean something else); it catches the resolution class of bug
-   that the F# side's 0.8.23 audit found by hand.
+   before it is offered, and stands down if the patched file (or the edited
+   member, where the edit stays inside one) carries more errors of any id
+   than before. This turns "a fix must compile without a build" from a
+   discipline into a per-fix proof, at the cost of one file re-bind per
+   candidate finding. It does not compare what each name binds to: a fix
+   that compiles yet rebinds a name — a widened `out var` or pattern scope
+   that now captures a field's mention, a new member hiding an inherited
+   one, a `using` whose type a containing-namespace namesake shadows —
+   passes it. Refusing those is each rule's own guard (`Text.mentionsName`,
+   `Text.mentionsNameOutside`, `Text.declaresName`, `Guards.declaredUp`, a
+   lookup at the use site); the check never replaces a semantic guard (a
+   rewrite can compile and mean something else).
 4. **Minimal edits.** Trivia outside the edited span is untouched. Roslyn
    trivia makes the "comment guard" exact: a fix whose removed span contains
    a comment, a `#region`, a `#pragma` or a `#if` line stands down

@@ -193,6 +193,49 @@ let ``an imported namespace, a clashing name and a global alias stand down`` () 
     Assert.Contains("held", fired.Head.Message)
 
 [<Fact>]
+let ``CR0145 holds the using when the short name binds to another file's type or an inherited member`` () =
+    let library =
+        csharp
+            """
+            namespace Deep.Down.Here { public class Helper { public static int Go() => 1; } }
+            namespace Deep.Down.There { public class Tracer { public static int Go() => 1; } }
+            """
+
+    let uses =
+        csharp
+            """
+            namespace App
+            {
+                class C
+                {
+                    int A() => Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go() + Deep.Down.Here.Helper.Go();
+                }
+                class D : Traced
+                {
+                    int A() => Deep.Down.There.Tracer.Go() + Deep.Down.There.Tracer.Go() + Deep.Down.There.Tracer.Go() + Deep.Down.There.Tracer.Go();
+                }
+            }
+            """
+
+    // App's own Helper, and the Tracer property D inherits, would take the short names
+    let own =
+        csharp
+            """
+            namespace App
+            {
+                class Helper { public static int Go() => 2; }
+                class Tracers { public int Go() => 3; }
+                class Traced { protected Tracers Tracer { get; } = new Tracers(); }
+            }
+            """
+
+    let fired =
+        suggestInProject false false "CR0145" [ "Uses.cs", uses; "Lib.cs", library; "Own.cs", own ]
+
+    assertFired 2 uses fired
+    Assert.All(fired, fun s -> Assert.Empty s.Fixes)
+
+[<Fact>]
 let ``CR0146 the summary stands off the member above it and a question is no summary`` () =
     let source =
         csharp

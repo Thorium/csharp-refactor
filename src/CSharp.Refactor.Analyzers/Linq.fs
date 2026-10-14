@@ -171,11 +171,15 @@ let isQueryable (t: ITypeSymbol) =
 let hasLinq (model: SemanticModel) =
     not (isNull (model.Compilation.GetTypeByMetadataName "System.Linq.Enumerable"))
 
-/// Does the type resolve by its bare name at the position? Else a `using`
-/// is needed (or the name is spelled qualified).
+/// Does the type resolve by its bare name at the position, to it alone? Else
+/// a `using` is needed (or the name is spelled qualified); a namesake found
+/// beside it makes the bare name ambiguous.
 let resolvesBare (model: SemanticModel) (position: int) (ns: string) (name: string) =
-    model.LookupNamespacesAndTypes(position, name = name)
-    |> Seq.exists (fun s -> s.ToDisplayString() = $"{ns}.{name}")
+    let found = model.LookupNamespacesAndTypes(position, name = name)
+
+    not found.IsEmpty
+    && found
+       |> Seq.forall (fun s -> s :? INamedTypeSymbol && s.ContainingNamespace.ToDisplayString() = ns)
 
 /// Is the node inside a loop body (`for`, `foreach`, `while`, `do`), or a
 /// lambda handed to a collection operator — somewhere that runs per element?

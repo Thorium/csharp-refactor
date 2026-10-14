@@ -625,38 +625,39 @@ let private innerExceptions (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                         match sibling with
                         | None -> None
                         | Some _ ->
-                            let scope = Text.enclosingMember t
-
-                            let name, nameEdits =
+                            // the catch's own name, else one free in the catch and
+                            // the member (no name free: no fix)
+                            let named =
                                 match binder with
-                                | Some b -> b, []
+                                | Some b -> Some(b, [])
                                 | None ->
-                                    // free in the catch, and no local or parameter of the member
-                                    let taken =
-                                        Text.declaredLocals scope
-                                        @ (scope.DescendantNodes()
-                                           |> Seq.choose (fun d ->
-                                               match d with
-                                               | :? ParameterSyntax as p -> Some p.Identifier.ValueText
-                                               | _ -> None)
-                                           |> List.ofSeq)
+                                    Text.catchBinderName cc
+                                    |> Option.map (fun fresh ->
+                                        if isNull cc.Declaration then
+                                            let exceptionType =
+                                                Guards.typeText model cc.SpanStart "System" "Exception"
 
-                                    let fresh =
-                                        [ "ex"; "e"; "exception" ]
-                                        |> List.tryFind (fun candidate ->
-                                            not (Text.mentionsName candidate cc)
-                                            && not (List.contains candidate taken))
-                                        |> Option.defaultValue "ex"
+                                            fresh,
+                                            [
+                                                Suggestion.insert
+                                                    cc.CatchKeyword.Span.End
+                                                    $" ({exceptionType} {fresh})"
+                                            ]
+                                        else
+                                            fresh, [ Suggestion.insert cc.Declaration.Type.Span.End $" {fresh}" ])
 
-                                    if isNull cc.Declaration then
-                                        let exceptionType = Guards.typeText model cc.SpanStart "System" "Exception"
+                            let fixes =
+                                match named with
+                                | Some(name, nameEdits) ->
+                                    let edits = nameEdits @ [ Suggestion.insert (List.last args).Span.End $", {name}" ]
 
-                                        fresh,
-                                        [ Suggestion.insert cc.CatchKeyword.Span.End $" ({exceptionType} {fresh})" ]
-                                    else
-                                        fresh, [ Suggestion.insert cc.Declaration.Type.Span.End $" {fresh}" ]
-
-                            let edits = nameEdits @ [ Suggestion.insert (List.last args).Span.End $", {name}" ]
+                                    [
+                                        Suggestion.fix
+                                            "Pass the caught exception as the inner exception"
+                                            InnerExceptionCode
+                                            edits
+                                    ]
+                                | None -> []
 
                             Some(
                                 {
@@ -664,13 +665,7 @@ let private innerExceptions (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                                     Message =
                                         $"The new {c.Type} drops the caught exception: its type, message and stack are gone — pass it as the inner exception"
                                     Span = t.Span
-                                    Fixes =
-                                        [
-                                            Suggestion.fix
-                                                "Pass the caught exception as the inner exception"
-                                                InnerExceptionCode
-                                                edits
-                                        ]
+                                    Fixes = fixes
                                 }
                                 |> Guards.verified model
                             )

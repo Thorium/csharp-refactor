@@ -253,6 +253,30 @@ let ``an exhaustive switch whose discard throws becomes UnreachableException; a 
     Assert.Contains("Square q => q.S, _ => throw new UnreachableException() }", fixedSource)
     Assert.Contains("using System.Diagnostics;", fixedSource)
 
+[<Fact>]
+let ``CR0157 and CR0152 add no using whose type the namespace's own namesake would shadow`` () =
+    let source =
+        csharp
+            """
+            using System;
+            namespace MyApp
+            {
+                class UnreachableException : Exception { }
+                class Lock { }
+                enum Kind { A, B }
+                class C
+                {
+                    private readonly object _gate = new();
+                    int A(Kind k) => k switch { Kind.A => 1, Kind.B => 2, _ => throw new InvalidOperationException() };
+                    void E() { lock (_gate) { } }
+                }
+            }
+            """
+
+    // the bare names would bind to MyApp's own types, not System's
+    Assert.Empty(suggestCode "CR0157" source |> List.filter (fun s -> not s.Fixes.IsEmpty))
+    Assert.Empty(suggestCode "CR0152" source |> List.filter (fun s -> not s.Fixes.IsEmpty))
+
 // ---- CR0147 / CR0151 ----
 
 [<Fact>]

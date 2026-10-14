@@ -27,8 +27,9 @@
 /// string whose holes are such reads of primitives or strings; every
 /// local or parameter it reads is assigned nowhere in the member but its
 /// own declaration, and declared outside the loop; the hoisted name is
-/// spelled nowhere in the member outside the loop (a sibling scope's
-/// namesake would clash, a field's would be shadowed) and is written
+/// spelled nowhere in the member outside the block that declares it (a
+/// sibling scope's namesake would clash, a field's would be shadowed —
+/// another branch inside the loop included) and is written
 /// nowhere in the loop; the loop statement heads its line; no comment or
 /// directive rides on the declaration; the speculative check re-binds.
 module CSharp.Refactor.LoopInvariant
@@ -267,12 +268,16 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                 let name = variable.Identifier.ValueText
                 let init = variable.Initializer.Value
 
-                // the name lives only in this loop, and the loop never writes it
-                let nameOnlyHere =
-                    member'.DescendantTokens()
-                    |> Seq.forall (fun t ->
-                        not (t.IsKind SyntaxKind.IdentifierToken && t.ValueText = name)
-                        || loop.Span.Contains t.SpanStart)
+                // the name lives only in the local's own scope — the block that
+                // declares it, a switch section's whole switch — and the loop
+                // never writes it: above the loop, a mention in a sibling branch
+                // (a field, another scope's namesake) would reach the local
+                let ownScope: SyntaxNode =
+                    match decl.Parent with
+                    | :? SwitchSectionSyntax as s -> s.Parent
+                    | p -> p
+
+                let nameOnlyHere = not (Text.mentionsNameOutside name member' ownScope.Span)
 
                 let loopHeadsLine =
                     text.Lines

@@ -461,6 +461,29 @@ let ``CR0061 and CR0062 offer the interface and the release in the editor, never
         )
 
 [<Fact>]
+let ``CR0061 offers no Dispose over a base type's own Dispose`` () =
+    let source =
+        csharp
+            """
+            using System.IO;
+            class Conn
+            {
+                public void Dispose() { Close(); }
+                void Close() { }
+            }
+            class Session : Conn
+            {
+                readonly FileStream stream = new FileStream("x", FileMode.Open);
+                int Read() => stream.ReadByte();
+            }
+            """
+
+    // a new `Dispose()` would hide the base's (a warning only), and a caller
+    // holding a Conn would still run the old one
+    let ownerless = suggestCode "CR0061" source |> List.exactlyOne
+    Assert.Empty ownerless.Fixes
+
+[<Fact>]
 let ``CR0064 offers the guard, the narrower IO catch and a log line in the editor`` () =
     let source =
         csharp
@@ -579,6 +602,41 @@ let ``CR0064 keeps the IO narrowing off a body that reads and then parses`` () =
 
     for s in suggestCode "CR0064" source do
         Assert.DoesNotContain(s.Fixes, fun f -> f.Title.StartsWith "Catch the IO")
+
+[<Fact>]
+let ``CR0064 names the new catch variable past a field the handler reads`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.IO;
+            class C
+            {
+                string ex = "fallback";
+                string Read(string path)
+                {
+                    try
+                    {
+                        return File.ReadAllText(path);
+                    }
+                    catch (Exception)
+                    {
+                        Console.WriteLine(ex);
+                        return "";
+                    }
+                }
+            }
+            """
+
+    let swallowed = suggestCode "CR0064" source |> List.exactlyOne
+
+    let narrower =
+        swallowed.Fixes |> List.find (fun f -> f.Title.StartsWith "Catch the IO")
+
+    let narrowed = applyFix source narrower
+    // `ex` there is the field: the binder takes the next free name
+    Assert.Contains("catch (Exception e) when (e is IOException or UnauthorizedAccessException)", narrowed)
+    Assert.Contains("Console.WriteLine(ex);", narrowed)
 
 // ---- CR0187 ----
 

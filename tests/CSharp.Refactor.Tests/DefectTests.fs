@@ -498,6 +498,45 @@ let ``CR0165 leaves a domain exception without an inner-exception constructor al
     // no (string, Exception) constructor: there is nowhere to put the caught one
     Assert.Empty(suggestCode "CR0165" source)
 
+[<Fact>]
+let ``CR0165 names an unnamed catch past an enclosing foreach or catch variable`` () =
+    let source =
+        csharp
+            """
+            using System;
+            class SyncException : Exception
+            {
+                public SyncException(string message) : base(message) { }
+                public SyncException(string message, Exception inner) : base(message, inner) { }
+            }
+            class C
+            {
+                void A(string[] xs)
+                {
+                    foreach (var ex in xs) { try { Work(); } catch { throw new SyncException("m"); } }
+                }
+                void B()
+                {
+                    try { Work(); }
+                    catch (Exception ex)
+                    {
+                        try { Work(); } catch (InvalidOperationException) { throw new SyncException("again"); }
+                    }
+                }
+                void D(string[] ex, string[] e, string[] exception)
+                {
+                    try { Work(); } catch { throw new SyncException("taken"); }
+                }
+                void Work() { }
+            }
+            """
+
+    let fixedSource = fixAll "CR0165" source
+    Assert.Contains("""catch (Exception e) { throw new SyncException("m", e); }""", fixedSource)
+    Assert.Contains("""catch (InvalidOperationException e) { throw new SyncException("again", e); }""", fixedSource)
+    // every name taken: no name to give the caught exception
+    Assert.Contains("""catch { throw new SyncException("taken"); }""", fixedSource)
+
 // ---- CR0166 ----
 
 [<Fact>]

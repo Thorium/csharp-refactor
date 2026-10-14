@@ -263,6 +263,12 @@ let private swallowOffers
         else
             Some c.Declaration.Identifier.ValueText
 
+    // the name the caught exception goes by: its own, else a free one
+    let binderName () =
+        match binder with
+        | Some b -> Some b
+        | None -> Text.catchBinderName c
+
     // the value the handler answers with, for the guard
     let fallback =
         match lastStatement c.Block with
@@ -339,8 +345,8 @@ let private swallowOffers
                | _ -> true)
 
     let narrower =
-        if onlyIo then
-            let name = binder |> Option.defaultValue "ex"
+        match (if onlyIo then binderName () else None) with
+        | Some name ->
             let types = ioCatchTypes model c.SpanStart
             let exception' = Guards.typeText model c.SpanStart "System" "Exception"
 
@@ -360,15 +366,15 @@ let private swallowOffers
                 ]
             else
                 []
-        else
-            []
+        | None -> []
 
     // 3. a log line in the file's own idiom, as the handler's first statement
     let logging =
-        match loggingIdiom tree with
-        | Some spell ->
-            let name = binder |> Option.defaultValue "ex"
-
+        match
+            loggingIdiom tree
+            |> Option.bind (fun spell -> binderName () |> Option.map (fun n -> spell, n))
+        with
+        | Some(spell, name) ->
             let methodName =
                 match Text.enclosingMember c with
                 | :? MethodDeclarationSyntax as m -> m.Identifier.ValueText

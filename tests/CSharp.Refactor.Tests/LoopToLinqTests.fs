@@ -89,6 +89,23 @@ let ``two Selects fuse and an identity Select goes, a duplicated impure stage or
     Assert.Contains("xs.Select(x => (x + 1) * q);", fixedSource)
     Assert.Contains("xs.Select(y => (y + 1) + x);", fixedSource)
 
+[<Fact>]
+let ``CR0029 keeps two Selects when a nested lambda of the second declares its parameter's name`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.Linq;
+            class P { public readonly string Name; }
+            class C
+            {
+                IEnumerable<int> A(IEnumerable<P> ps, int[] lim) => ps.Select(p => p.Name.Length).Select(n => lim.Count(n => n > 3) + n);
+            }
+            """
+
+    // the inner `n` is the nested lambda's own: substituted, it would read the name's length
+    Assert.Empty(suggestCode "CR0029" source)
+
 // ---- CR0021 ----
 
 [<Fact>]

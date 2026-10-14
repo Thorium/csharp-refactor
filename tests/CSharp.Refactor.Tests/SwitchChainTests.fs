@@ -153,6 +153,39 @@ let ``locals shared between branches keep their braces`` () =
     Assert.Contains(normalize expected, fixedSource)
 
 [<Fact>]
+let ``a local another section's body names keeps its braces, so the other section still reaches the field`` () =
+    let source =
+        csharp
+            """
+            class C
+            {
+                int total;
+                void M(int k)
+                {
+                    if (k == 1)
+                    {
+                        var total = 10;
+                        Log(total);
+                    }
+                    else if (k == 2)
+                    {
+                        total = 5;
+                    }
+                    else if (k == 3)
+                    {
+                        Log(0);
+                    }
+                }
+                void Log(int x) { }
+            }
+            """
+
+    let fixedSource = fixAll "CR0002" source
+    // unbraced, `total = 5;` would write section 1's local
+    Assert.Matches(@"case 1:\s*\{\s*var total = 10;", fixedSource)
+    Assert.Matches(@"case 2:\s*total = 5;", fixedSource)
+
+[<Fact>]
 let ``a cross-cast, an assigned subject, a compound condition, a break in a loop, a comment on the else and a single test stand down``
     ()
     =

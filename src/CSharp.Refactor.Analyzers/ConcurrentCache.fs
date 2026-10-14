@@ -182,6 +182,8 @@ let private checkThenStore (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                             || kind = "delegate"
                             || capturesUnsafe
                             || Text.mentionsName binder factory
+                            // the factory's `_` would read the key the new lambda takes
+                            || Text.mentionsName "_" factory
                         then
                             None
                         else

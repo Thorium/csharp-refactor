@@ -712,28 +712,31 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                                 | ValueSome elsewhere -> elsewhere |> List.forall (fun (id, _) -> lockOperand id)
                                 | ValueNone -> false))
 
-                    if onlyLocked then
-                        let edits =
-                            (Usings.importEdit model tree fd.SpanStart "System.Threading" "Lock"
-                             |> Option.defaultValue [])
-                            @ [
-                                Suggestion.replace fd.Declaration.Type.Span "Lock"
-                                Suggestion.replace v.Initializer.Value.Span "new()"
-                            ]
-
-                        if Guards.speculativeCheck model edits then
-                            Some
-                                {
-                                    Code = LockCode
-                                    Message =
-                                        "A gate object used only by lock is a System.Threading.Lock: the dedicated type skips the object-header path"
-                                    Span = fd.Declaration.Type.Span
-                                    Fixes = [ Suggestion.fix "Use System.Threading.Lock" LockCode edits ]
-                                }
-                        else
-                            None
-                    else
+                    if not onlyLocked then
                         None
+                    else
+                        // no `using` that makes the bare `Lock` System.Threading's: no fix
+                        match Usings.importEdit model tree fd.SpanStart "System.Threading" "Lock" with
+                        | None -> None
+                        | Some usingEdits ->
+                            let edits =
+                                usingEdits
+                                @ [
+                                    Suggestion.replace fd.Declaration.Type.Span "Lock"
+                                    Suggestion.replace v.Initializer.Value.Span "new()"
+                                ]
+
+                            if Guards.speculativeCheck model edits then
+                                Some
+                                    {
+                                        Code = LockCode
+                                        Message =
+                                            "A gate object used only by lock is a System.Threading.Lock: the dedicated type skips the object-header path"
+                                        Span = fd.Declaration.Type.Span
+                                        Fixes = [ Suggestion.fix "Use System.Threading.Lock" LockCode edits ]
+                                    }
+                            else
+                                None
                 | _ -> None
             | _ -> None)
         |> List.ofSeq

@@ -2,6 +2,16 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.20
+
+- Fixes that add, rename or move a name no longer rebind another one; each case compiled with a changed meaning or broke the build.
+- CR0005 keeps the nesting when an inner condition's `out var` or pattern variable is named elsewhere in the member; CR0173 does the same for a branch's variables.
+- CR0002, CR0003 and CR0147 keep a switch section's braces when another section names one of its locals; CR0177 keeps a local a sibling branch of the loop names.
+- CR0041 keeps a name a base type already has with `Async`; CR0061 offers no `Dispose` over a base's own; CR0047's `_gate` checks every part and base.
+- CR0029 keeps two `Select`s when a nested lambda declares the parameter's name; CR0049 keeps a factory that reads `_`.
+- CR0064 and CR0165 name a new catch variable past fields, enclosing `foreach`/`catch` variables and locals, and offer nothing when `ex`, `e` and `exception` are all taken; CR0115 leaves a log line where an enclosing lambda rebinds the name; CR0032 skips a setter's implicit `value`.
+- A `using` the fix would add (CR0150, CR0152, CR0157 and others) is not added when the bare name binds to another type, where the `using` cannot win; CR0145 holds when the short name binds to another file's type or an inherited member.
+
 ## 0.1.19
 
 - CR0015 gives nested loops over the same collection different element names: both took `offset` (CS0136) and the file's fixes were put back.

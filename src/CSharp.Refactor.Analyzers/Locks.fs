@@ -81,11 +81,16 @@ let private weakLocks (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContex
                         | _ -> None)
 
                 // `_gate` unused in the type — or, for a top-level statement, in
-                // the whole unit (its enclosing member is the unit itself)
+                // the whole unit (its enclosing member is the unit itself) — and
+                // no member of that name in another part or a base type
                 let gateFree =
                     let scope = Text.enclosingMember l
                     let owner = if isNull scope.Parent then scope else scope.Parent
+
                     not (Text.mentionsName "_gate" owner)
+                    && (match model.GetEnclosingSymbol l.SpanStart with
+                        | null -> true
+                        | s -> not (Guards.declaredUp s.ContainingType "_gate"))
 
                 let fixes =
                     match member', ownsIt with
