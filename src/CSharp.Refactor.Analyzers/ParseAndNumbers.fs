@@ -508,7 +508,7 @@ let rec private computed (e: ExpressionSyntax) =
     | _ -> false
 
 let private floatEqualities (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
-    if Text.isTestFile tree then
+    if Text.isTestFileIn model.Compilation tree then
         []
     else
         tree.GetRoot().DescendantNodes()

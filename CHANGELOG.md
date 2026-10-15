@@ -2,6 +2,11 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.21
+
+- A test file is recognised by a test framework imported in a namespace block or by a global using (the SDK's GlobalUsings.g.cs for `<Using Include="Xunit" />` included, in its `global using global::Xunit;` form too), not only at the top of the file: CR0064, CR0069, CR0146 and the other test-aware rules stand down there. CR0062 reads a `System.Reactive` using the same way.
+- The fix provider's solution-wide literal scan reads a multi-targeted project's files once, not once per target framework.
+
 ## 0.1.20
 
 - Fixes that add, rename or move a name no longer rebind another one; each case compiled with a changed meaning or broke the build.

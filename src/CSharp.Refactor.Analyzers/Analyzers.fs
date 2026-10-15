@@ -137,7 +137,7 @@ module Rules =
             "FlagLoop", FlagLoop.analyze
             "HintEngine", HintEngine.analyze
             "AttributeMerge", (fun tree _ ctx -> AttributeMerge.analyze tree ctx)
-            "CommentDoc", (fun tree _ ctx -> CommentDoc.analyze tree ctx)
+            "CommentDoc", (fun tree model ctx -> CommentDoc.analyzeWith (Some model.Compilation) tree ctx)
             "QualifiedNames", QualifiedNames.analyze
             "LinqNotes", LinqNotes.analyze
             "CollectionFixes", CollectionFixes.analyze

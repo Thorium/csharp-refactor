@@ -416,7 +416,7 @@ let private swallowOffers
     guard @ narrower @ logging
 
 let private swallows (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
-    if Text.isTestFile tree then
+    if Text.isTestFileIn model.Compilation tree then
         []
     else
         tree.GetRoot().DescendantNodes()
@@ -887,7 +887,7 @@ let private occurrences (text: string) (literal: string) =
     if literal.Length = 0 then text.Length + 1 else count 0 0
 
 let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
-    if Text.isTestFile tree then
+    if Text.isTestFileIn model.Compilation tree then
         []
     else
         tree.GetRoot().DescendantNodes()

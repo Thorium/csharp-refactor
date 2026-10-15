@@ -108,12 +108,14 @@ module References =
     /// The oracle for one tree of one solution.
     let oracle (solution: Solution) (tree: SyntaxTree) : ISymbol -> ReferenceSite list = solutionOracle solution tree
 
-    /// One file's string literals: their spellings, and for a test file the
-    /// text each string holds (an interpolation's pieces each).
+    /// One file's string literals: their spellings, and the text each string
+    /// holds (an interpolation's pieces each), read when the file is a test.
+    /// Whether it is one is not this tree's to remember: its project's
+    /// global usings can make it one without the file changing.
     type private FileLiterals =
         {
             Spellings: HashSet<string>
-            TestTexts: string[]
+            Texts: Lazy<string[]>
         }
 
     // per tree: a file no fix touched is the same tree in the next snapshot
@@ -121,32 +123,29 @@ module References =
     let private fileLiterals =
         System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, FileLiterals>()
 
+    let private stringTokens (tree: SyntaxTree) =
+        tree.GetRoot().DescendantTokens()
+        |> Seq.filter (fun t ->
+            t.IsKind SyntaxKind.StringLiteralToken
+            || t.IsKind SyntaxKind.SingleLineRawStringLiteralToken
+            || t.IsKind SyntaxKind.MultiLineRawStringLiteralToken
+            || t.IsKind SyntaxKind.InterpolatedStringTextToken)
+
     let private literalsOf (tree: SyntaxTree) =
         fileLiterals.GetValue(
             tree,
             fun tree ->
-                let strings =
-                    tree.GetRoot().DescendantTokens()
-                    |> Seq.filter (fun t ->
-                        t.IsKind SyntaxKind.StringLiteralToken
-                        || t.IsKind SyntaxKind.SingleLineRawStringLiteralToken
-                        || t.IsKind SyntaxKind.MultiLineRawStringLiteralToken
-                        || t.IsKind SyntaxKind.InterpolatedStringTextToken)
-                    |> Array.ofSeq
-
                 {
                     Spellings =
                         HashSet<string>(
-                            strings
+                            stringTokens tree
                             |> Seq.filter (fun t -> t.IsKind SyntaxKind.StringLiteralToken)
                             |> Seq.map (fun t -> t.Text),
                             StringComparer.Ordinal
                         )
-                    TestTexts =
-                        if Text.isTestFile tree then
-                            strings |> Array.map (fun t -> t.ValueText)
-                        else
-                            [||]
+                    // the strings only, read again from the tree when asked:
+                    // a token holds its whole syntax tree
+                    Texts = lazy (stringTokens tree |> Seq.map (fun t -> t.ValueText) |> Array.ofSeq)
                 }
         )
 
@@ -164,16 +163,29 @@ module References =
         let files =
             lazy
                 (try
+                    // a multi-targeted project's flavors hold the same files:
+                    // the first one read answers, the rest are not parsed
+                    let seen = HashSet<string>(StringComparer.OrdinalIgnoreCase)
+
                     solution.Projects
                     |> Seq.filter (fun p -> p.Language = LanguageNames.CSharp)
-                    |> Seq.collect (fun p -> p.Documents)
-                    |> Seq.filter (fun d -> not (isNull d.FilePath))
-                    // a multi-targeted project's flavors hold the same files
-                    |> Seq.distinctBy (fun d -> d.FilePath.ToLowerInvariant())
-                    |> Seq.choose (fun d ->
-                        match d.GetSyntaxTreeAsync().Result with
-                        | null -> None
-                        | tree -> Some(own.Contains d.FilePath, literalsOf tree))
+                    |> Seq.collect (fun p ->
+                        let trees =
+                            p.Documents
+                            |> Seq.filter (fun d -> not (isNull d.FilePath) && seen.Add d.FilePath)
+                            |> Seq.choose (fun d ->
+                                match d.GetSyntaxTreeAsync().Result with
+                                | null -> None
+                                | tree -> Some(d.FilePath, tree))
+                            |> Array.ofSeq
+
+                        // the project's global usings (its GlobalUsings.g.cs
+                        // included) can make every file of it a test file
+                        let globalNames = Text.globalUsingNames (trees |> Seq.map snd)
+
+                        trees
+                        |> Seq.map (fun (path, tree) ->
+                            own.Contains path, Text.isTestFileWith globalNames tree, literalsOf tree))
                     |> Array.ofSeq
                     |> Some
                  with
@@ -187,15 +199,16 @@ module References =
                     match files.Value with
                     | Some files ->
                         files
-                        |> Array.exists (fun (isOwn, f) -> not isOwn && f.Spellings.Contains spelling)
+                        |> Array.exists (fun (isOwn, _, f) -> not isOwn && f.Spellings.Contains spelling)
                     | None -> true
             InTests =
                 fun text ->
                     match files.Value with
                     | Some files ->
                         files
-                        |> Array.exists (fun (_, f) ->
-                            f.TestTexts
-                            |> Array.exists (fun t -> t.IndexOf(text, StringComparison.Ordinal) >= 0))
+                        |> Array.exists (fun (_, isTest, f) ->
+                            isTest
+                            && f.Texts.Value
+                               |> Array.exists (fun t -> t.IndexOf(text, StringComparison.Ordinal) >= 0))
                     | None -> true
         }

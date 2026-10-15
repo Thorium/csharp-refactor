@@ -438,7 +438,7 @@ let private formatSpecifiers (tree: SyntaxTree) (model: SemanticModel) : Suggest
         )
 
     // a test pins the text it expects: its format is the fixture
-    (if Text.isTestFile tree then
+    (if Text.isTestFileIn model.Compilation tree then
          Seq.empty
      else
          root.DescendantNodes())

@@ -86,8 +86,15 @@ let private identifierOf (m: MemberDeclarationSyntax) =
     | :? EnumMemberDeclarationSyntax as d -> ValueSome d.Identifier
     | _ -> ValueNone
 
-let analyze (tree: SyntaxTree) (_ctx: RuleContext) : Suggestion list =
-    if Text.isTestFile tree then
+/// The rule, with the compilation when the host has one: its global usings
+/// can make the file a test file.
+let analyzeWith (compilation: Compilation option) (tree: SyntaxTree) (_ctx: RuleContext) : Suggestion list =
+    let isTest =
+        match compilation with
+        | Some c -> Text.isTestFileIn c tree
+        | None -> Text.isTestFile tree
+
+    if isTest then
         []
     else
         let text = tree.GetText()
@@ -198,3 +205,6 @@ let analyze (tree: SyntaxTree) (_ctx: RuleContext) : Suggestion list =
                                 }
             | _ -> None)
         |> List.ofSeq
+
+/// The rule for a host without a compilation.
+let analyze (tree: SyntaxTree) (ctx: RuleContext) : Suggestion list = analyzeWith None tree ctx

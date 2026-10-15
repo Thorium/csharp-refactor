@@ -550,7 +550,7 @@ let private credentialValue (sink: string) (value: string) =
 /// credential: a parameter, a named argument, a field, property or local
 /// it initialises or is assigned to, a member of an initializer.
 let private namedCredentials (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
-    if Text.isTestFile tree then
+    if Text.isTestFileIn model.Compilation tree then
         []
     else
         let rec outward (n: SyntaxNode) =

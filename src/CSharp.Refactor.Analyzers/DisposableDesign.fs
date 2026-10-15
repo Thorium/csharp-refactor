@@ -334,12 +334,13 @@ let private releaseInDispose
     | None -> None
 
 let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Suggestion list =
+    // a using of the file's own, at the top or in a namespace block, or a
+    // global one of the compilation
     let isRx =
-        match tree.GetRoot() with
-        | :? CompilationUnitSyntax as root ->
-            root.Usings
-            |> Seq.exists (fun u -> u.Name.ToString().StartsWith "System.Reactive")
-        | _ -> false
+        let rx (name: string) = name.StartsWith "System.Reactive"
+
+        Text.fileUsingNames tree |> Seq.exists rx
+        || Text.globalUsings model.Compilation |> Set.exists rx
 
     tree.GetRoot().DescendantNodes()
     |> Seq.collect (fun n ->

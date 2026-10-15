@@ -941,7 +941,7 @@ let private perCall (tree: SyntaxTree) (model: SemanticModel) : Suggestion list 
                     None
                 elif t.Name = "HttpClient" then
                     // a test building a client per case is not the lifetime question
-                    if Text.isTestFile tree then
+                    if Text.isTestFileIn model.Compilation tree then
                         None
                     else
                         Some(

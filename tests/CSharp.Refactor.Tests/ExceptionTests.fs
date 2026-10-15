@@ -51,6 +51,36 @@ let ``a catch-all that never reads the exception is noted, the idioms and acknow
 
     Assert.Equal<string list>([ "catch"; "catch"; "catch"; "catch"; "catch" ], texts)
 
+[<Fact>]
+let ``CR0064 reads a test framework imported by a global using or inside a namespace block`` () =
+    // a file named like production code: only its imports make it a test
+    let swallowing =
+        "class UserSpec { int Parse(string s) => int.Parse(s); int A(string s) { try { return Parse(s); } catch { return 0; } } }"
+
+    let inSpec (files: (string * string) list) =
+        suggestInProject false false "CR0064" files
+        |> List.filter (fun s -> s.Code = "CR0064")
+
+    // production code still gets the note
+    Assert.Single(inSpec [ "UserSpec.cs", swallowing ]) |> ignore
+    // the SDK's GlobalUsings.g.cs for <Using Include="Xunit" />, or a file of the project's own
+    Assert.Empty(inSpec [ "UserSpec.cs", swallowing; "GlobalUsings.g.cs", "global using Xunit;" ])
+    // the .NET 6-8 SDKs write the alias-qualified form
+    Assert.Empty(
+        inSpec
+            [
+                "UserSpec.cs", swallowing
+                "GlobalUsings.g.cs", "global using global::Xunit;"
+            ]
+    )
+    // a using inside a namespace block imports as surely as one at the top
+    Assert.Empty(
+        inSpec
+            [
+                "UserSpec.cs", "namespace Specs\n{\n    using Xunit;\n    " + swallowing + "\n}"
+            ]
+    )
+
 // ---- CR0065 ----
 
 [<Fact>]
