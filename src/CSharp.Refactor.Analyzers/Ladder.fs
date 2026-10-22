@@ -587,7 +587,7 @@ let private frozenCollections (tree: SyntaxTree) (model: SemanticModel) (ctx: Ru
                         let elsewhereReads () =
                             match usesElsewhere tree model ctx field with
                             | ValueNone -> false
-                            | ValueSome uses -> uses |> List.forall (fun (id, _) -> isRead id)
+                            | ValueSome uses -> uses |> List.forall (fun (pid, _) -> isRead pid)
 
                         let allReads =
                             reads |> List.forall isRead
@@ -709,7 +709,7 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                         && uses |> List.forall lockOperand
                         && (field.ContainingType.DeclaringSyntaxReferences.Length <= 1
                             || (match usesElsewhere tree model ctx field with
-                                | ValueSome elsewhere -> elsewhere |> List.forall (fun (id, _) -> lockOperand id)
+                                | ValueSome elsewhere -> elsewhere |> List.forall (fun (pid, _) -> lockOperand pid)
                                 | ValueNone -> false))
 
                     if not onlyLocked then
@@ -765,9 +765,9 @@ let private identifiersNamed (part: SyntaxNode) (name: string) =
                     part.DescendantNodes()
                     |> Seq.choose (fun n ->
                         match n with
-                        | :? IdentifierNameSyntax as id -> Some id
+                        | :? IdentifierNameSyntax as pid -> Some pid
                         | _ -> None),
-                    fun (id: IdentifierNameSyntax) -> id.Identifier.ValueText
+                    fun (pid: IdentifierNameSyntax) -> pid.Identifier.ValueText
                 )
         )
         .[name]
@@ -781,8 +781,8 @@ let private soleBackingField (tree: SyntaxTree) (model: SemanticModel) (p: Prope
             a.DescendantNodes()
             |> Seq.choose (fun x ->
                 match x with
-                | :? IdentifierNameSyntax as id ->
-                    match model.GetSymbolInfo(id).Symbol with
+                | :? IdentifierNameSyntax as pid ->
+                    match model.GetSymbolInfo(pid).Symbol with
                     | :? IFieldSymbol as f when
                         f.DeclaredAccessibility = Accessibility.Private
                         && not f.IsStatic
@@ -1042,7 +1042,7 @@ let private enumeratesPrivateFields =
                     t.GetRoot().DescendantNodes()
                     |> Seq.exists (fun n ->
                         match n with
-                        | :? IdentifierNameSyntax as id -> names.Contains id.Identifier.ValueText
+                        | :? IdentifierNameSyntax as pid -> names.Contains pid.Identifier.ValueText
                         | _ -> false))
                 |> box
         )

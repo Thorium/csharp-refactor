@@ -24,7 +24,9 @@
 /// mentions the outer loop variable, enumerated inside a loop — one
 /// statement per element, the N+1. An outer source that is chunked or
 /// paged (`Chunk`, `Skip`/`Take`, a batch `Contains`) is a batch loop and
-/// stays quiet; a query in a `Select`/`ForEach` callback is a loop too.
+/// stays quiet; a query in a `Select`/`ForEach` callback is a loop too. A
+/// member of an anonymous row built in a `Queryable` projection (`foreach
+/// (var p in row.Orders)`) is part of the outer statement and stays quiet.
 ///
 /// CR0035 (performance): an iterator that yields from a `foreach` over its
 /// own recursive call (`foreach (var c in Walk(child)) yield return c;`, or
@@ -181,8 +183,8 @@ let private doubleEnumerations (tree: SyntaxTree) (model: SemanticModel) : Sugge
                         ->
                         let refersTo (e: ExpressionSyntax) =
                             match e with
-                            | :? IdentifierNameSyntax as id ->
-                                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, ps)
+                            | :? IdentifierNameSyntax as pid ->
+                                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(pid).Symbol, ps)
                             | _ -> false
 
                         let sites =
@@ -266,9 +268,50 @@ let private queriesInLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                 n.DescendantNodesAndSelf()
                 |> Seq.exists (fun x ->
                     match x with
-                    | :? IdentifierNameSyntax as id ->
-                        SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, variable)
+                    | :? IdentifierNameSyntax as pid ->
+                        SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(pid).Symbol, variable)
                     | _ -> false)
+
+            // `row.Orders` where the row is an anonymous type built in a `Queryable` projection
+            // (`select new { c.Name, Orders = db.Orders.Where(…) }`): the sub-query is part of the
+            // outer statement — LINQ to SQL joins it, EF Core refuses an IQueryable there — never a
+            // statement per row. A row projected in memory or an entity's IQueryable property is.
+            let projectedByProvider (e: ExpressionSyntax) =
+                let rec rootIsVariable (x: ExpressionSyntax) =
+                    match x with
+                    | :? MemberAccessExpressionSyntax as m -> rootIsVariable m.Expression
+                    | :? IdentifierNameSyntax as pid ->
+                        SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(pid).Symbol, variable)
+                    | _ -> false
+
+                let builtInQueryable (creation: SyntaxNode) =
+                    creation.Ancestors()
+                    |> Seq.tryPick (fun a ->
+                        match a with
+                        | :? SelectClauseSyntax as s ->
+                            match model.GetSymbolInfo(s).Symbol with
+                            | :? IMethodSymbol as m when not (isNull m.ContainingType) ->
+                                Some(m.ContainingType.ToDisplayString() = "System.Linq.Queryable")
+                            | _ -> Some false
+                        | :? LambdaExpressionSyntax as l ->
+                            match l.Parent with
+                            | :? ArgumentSyntax as arg ->
+                                match arg.Parent.Parent with
+                                | :? InvocationExpressionSyntax as inv -> Some(Option.isSome (Linq.queryableCall model inv))
+                                | _ -> Some false
+                            | _ -> Some false
+                        | :? MemberDeclarationSyntax -> Some false
+                        | _ -> None)
+                    |> Option.defaultValue false
+
+                match e with
+                | :? MemberAccessExpressionSyntax as m when rootIsVariable m.Expression ->
+                    match model.GetTypeInfo(m.Expression).Type with
+                    | :? INamedTypeSymbol as row when row.IsAnonymousType ->
+                        row.DeclaringSyntaxReferences
+                        |> Seq.exists (fun r -> r.SyntaxTree = tree && builtInQueryable (r.GetSyntax()))
+                    | _ -> false
+                | _ -> false
 
             let isBatchFilter (n: SyntaxNode) =
                 // `chunk.Contains(o.Id)`, `ids.Skip(..)`: one statement per batch
@@ -289,20 +332,20 @@ let private queriesInLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                     let queryable (e: ExpressionSyntax) =
                         Linq.isQueryable (model.GetTypeInfo(e).Type)
 
+                    let perRow (e: ExpressionSyntax) =
+                        queryable e && mentions e && not (projectedByProvider e)
+
                     match n with
-                    | :? ForEachStatementSyntax as f when queryable f.Expression && mentions f.Expression ->
-                        Some(f.Expression :> SyntaxNode)
+                    | :? ForEachStatementSyntax as f when perRow f.Expression -> Some(f.Expression :> SyntaxNode)
                     | :? InvocationExpressionSyntax as inv when
-                        Linq.consumers.Contains(Linq.nameOf inv)
-                        && (Linq.receiverOf inv |> Option.exists (fun r -> queryable r && mentions r))
+                        Linq.consumers.Contains(Linq.nameOf inv) && (Linq.receiverOf inv |> Option.exists perRow)
                         ->
                         Some(inv :> SyntaxNode)
                     | :? AwaitExpressionSyntax as a ->
                         // `await q.ToListAsync()` and friends
                         match a.Expression with
                         | :? InvocationExpressionSyntax as inv when
-                            (Linq.nameOf inv).EndsWith "Async"
-                            && (Linq.receiverOf inv |> Option.exists (fun r -> queryable r && mentions r))
+                            (Linq.nameOf inv).EndsWith "Async" && (Linq.receiverOf inv |> Option.exists perRow)
                             ->
                             Some(inv :> SyntaxNode)
                         | _ -> None

@@ -74,8 +74,8 @@ let skipMicrosoftDuplicates (options: AnalyzerConfigOptions) : bool =
 let shadowedRuleOn (options: AnalyzerConfigOptions) (ids: string list) : bool =
     skipMicrosoftDuplicates options
     && ids
-       |> List.exists (fun id ->
-           match severityOf options id with
+       |> List.exists (fun pid ->
+           match severityOf options pid with
            | Some "none" -> false
            | Some _ -> true
            | None -> false)

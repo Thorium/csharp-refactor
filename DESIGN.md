@@ -695,7 +695,8 @@ Guards.
   without an intermediate); measured.
 - **CR0034** — typed `IQueryable<T>` enumerated in a loop nested in another;
   an outer loop over a chunked source (`Chunk`, a `Skip/Take` page) is a
-  batch and stays quiet.
+  batch and stays quiet; a member of an anonymous row built in a
+  `Queryable` projection is part of the outer statement and stays quiet.
 - **CR0035** — an iterator method that yields from a `foreach` over its own
   recursive call; a tail `return Walk(child)` (no `yield`) is a redirect
   and does not count; note only.

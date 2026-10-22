@@ -107,8 +107,8 @@ let analyzeWith (compilation: Compilation option) (tree: SyntaxTree) (_ctx: Rule
                 ->
                 match identifierOf m with
                 | ValueNone -> None
-                | ValueSome id ->
-                    let headerLine = text.Lines.GetLineFromPosition id.SpanStart
+                | ValueSome pid ->
+                    let headerLine = text.Lines.GetLineFromPosition pid.SpanStart
 
                     // an enum member's span stops before the `,` that separates
                     // it from the next one — the separator belongs to the enum's

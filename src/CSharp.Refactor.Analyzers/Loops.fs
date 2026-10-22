@@ -215,8 +215,8 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
 
                     let reads =
                         uses
-                        |> List.choose (fun id ->
-                            match id.Parent with
+                        |> List.choose (fun pid ->
+                            match pid.Parent with
                             | :? ArgumentSyntax as a when a.RefKindKeyword.IsKind SyntaxKind.None ->
                                 match a.Parent with
                                 | :? BracketedArgumentListSyntax as l when l.Arguments.Count = 1 ->

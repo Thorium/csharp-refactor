@@ -170,8 +170,8 @@ let private checkThenStore (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                             factory.DescendantNodesAndSelf()
                             |> Seq.exists (fun x ->
                                 match x with
-                                | :? IdentifierNameSyntax as id ->
-                                    match model.GetSymbolInfo(id).Symbol with
+                                | :? IdentifierNameSyntax as pid ->
+                                    match model.GetSymbolInfo(pid).Symbol with
                                     | :? IParameterSymbol as p -> p.RefKind <> RefKind.None
                                     | :? ILocalSymbol as l -> l.Type.IsRefLikeType || l.IsRef
                                     | _ -> false

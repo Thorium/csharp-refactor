@@ -173,8 +173,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                         n.DescendantNodesAndSelf()
                         |> Seq.exists (fun x ->
                             match x with
-                            | :? IdentifierNameSyntax as id ->
-                                match model.GetTypeInfo(id).Type with
+                            | :? IdentifierNameSyntax as pid ->
+                                match model.GetTypeInfo(pid).Type with
                                 | null -> false
                                 | t -> t.IsRefLikeType
                             | _ -> false)
@@ -202,7 +202,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
 
                         let selectText =
                             match projection with
-                            | :? IdentifierNameSyntax as id when id.Identifier.ValueText = loopVar -> ""
+                            | :? IdentifierNameSyntax as pid when pid.Identifier.ValueText = loopVar -> ""
                             | p -> ".Select(" + loopVar + " => " + p.ToString() + ")"
 
                         let expression = source + whereText + selectText + ".ToList()"

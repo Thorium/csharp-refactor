@@ -208,7 +208,7 @@ let private inChecked (model: SemanticModel) (node: SyntaxNode) =
 /// A lambda `x => body` or the bare method when the body is just `x`.
 let private selector (loopVar: string) (body: ExpressionSyntax) =
     match body with
-    | :? IdentifierNameSyntax as id when id.Identifier.ValueText = loopVar -> None
+    | :? IdentifierNameSyntax as pid when pid.Identifier.ValueText = loopVar -> None
     | _ -> Some(loopVar + " => " + body.ToString())
 
 let private isPlainForEach (f: ForEachStatementSyntax) =

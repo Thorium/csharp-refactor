@@ -2,6 +2,10 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.23
+
+- CR0034 no longer flags a member of an anonymous row built in a `Queryable` projection (`select new { c.Name, Orders = db.Orders.Where(…) }`, then `foreach (var o in row.Orders)`): the provider translates the sub-query with the outer statement, so it is never one query per row. A row projected in memory and an entity property typed `IQueryable<T>` still fire.
+
 ## 0.1.22
 
 - Loaded code crashing on a background thread (an analyzer, source generator, MSBuild task, or a database driver's finalizer on the GC thread) no longer ends the process: it is reported once per kind and origin, the run goes on, and the tool exits 1 with a summary line since the analysis may be incomplete. An exception with the tool's own code on its stack, one on the main thread, or out of memory still fails loudly. The handler is not installed when the test suite calls into the tool from its own host.

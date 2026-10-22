@@ -160,8 +160,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
 
                     let ok =
                         mentions
-                        |> List.forall (fun (_, m, id) ->
-                            let e = stand id
+                        |> List.forall (fun (_, m, pid) ->
+                            let e = stand pid
 
                             match e.Parent with
                             // a write: from the clock, or from another slot

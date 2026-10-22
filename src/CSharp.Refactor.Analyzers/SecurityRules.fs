@@ -144,8 +144,8 @@ let rec private builtFromValues (model: SemanticModel) (e: ExpressionSyntax) : b
         || name = "string.Concat"
         || name = "String.Concat"
     | :? ParenthesizedExpressionSyntax as p -> builtFromValues model p.Expression
-    | :? IdentifierNameSyntax as id ->
-        match model.GetSymbolInfo(id).Symbol with
+    | :? IdentifierNameSyntax as pid ->
+        match model.GetSymbolInfo(pid).Symbol with
         | :? ILocalSymbol as l ->
             l.DeclaringSyntaxReferences
             |> Seq.exists (fun r ->
@@ -560,7 +560,7 @@ let private namedCredentials (tree: SyntaxTree) (model: SemanticModel) : Suggest
 
         let simpleName (e: ExpressionSyntax) =
             match e with
-            | :? IdentifierNameSyntax as id -> Some id.Identifier.ValueText
+            | :? IdentifierNameSyntax as pid -> Some pid.Identifier.ValueText
             | :? MemberAccessExpressionSyntax as ma -> Some ma.Name.Identifier.ValueText
             | _ -> None
 
@@ -727,7 +727,7 @@ let private weakCrypto (dropLegacyProtocols: bool) (tree: SyntaxTree) (model: Se
              | :? MemberAccessExpressionSyntax as m ->
                  m.Name.Identifier.ValueText.EndsWith "CertificateValidationCallback"
                  || m.Name.Identifier.ValueText = "ServerCertificateCustomValidationCallback"
-             | :? IdentifierNameSyntax as id -> id.Identifier.ValueText = "ServerCertificateCustomValidationCallback"
+             | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = "ServerCertificateCustomValidationCallback"
              | _ -> false)
             && (match a.Right with
                 | :? LambdaExpressionSyntax as l ->

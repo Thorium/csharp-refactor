@@ -61,8 +61,8 @@ let private containsKey (e: ExpressionSyntax) =
 let private chainOf (model: SemanticModel) (e: ExpressionSyntax) : ISymbol list option =
     let rec go (e: ExpressionSyntax) (acc: ISymbol list) =
         match e with
-        | :? IdentifierNameSyntax as id ->
-            match model.GetSymbolInfo(id).Symbol with
+        | :? IdentifierNameSyntax as pid ->
+            match model.GetSymbolInfo(pid).Symbol with
             | null -> None
             | s -> Some(s :: acc)
         | :? ThisExpressionSyntax -> Some acc

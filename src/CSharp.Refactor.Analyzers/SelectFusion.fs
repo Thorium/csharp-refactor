@@ -85,7 +85,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                 // `xs.Select(x => x)`
                 | receiver, Some(p, body) when
                     (match body with
-                     | :? IdentifierNameSyntax as id -> id.Identifier.ValueText = p
+                     | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = p
                      | _ -> false)
                     ->
                     let t = model.GetTypeInfo(receiver).Type

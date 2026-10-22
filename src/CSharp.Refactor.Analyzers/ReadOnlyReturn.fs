@@ -97,7 +97,7 @@ let rec private readOnly (model: SemanticModel) (depth: int) (e: ExpressionSynta
                             | _ -> None)
                         |> List.ofSeq
 
-                    uses |> List.forall (fun id -> readOnly model (depth + 1) id)
+                    uses |> List.forall (fun pid -> readOnly model (depth + 1) pid)
                 | _ -> false
             | _ -> false
         | _ -> false

@@ -938,6 +938,52 @@ let ``CR0034 leaves one query per pre-split id batch alone`` () =
     // `group.Contains(...)` sends the whole batch in one statement: a batch loop, not an N+1
     Assert.Empty(suggestCode "CR0034" source)
 
+[<Fact>]
+let ``CR0034 leaves a sub-query of the outer query's own projection alone, a row projected in memory still fires`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            class Order { public int CustomerId; public decimal Total; }
+            class Customer { public int Id; public string Name; public IQueryable<Order> OrderQuery; }
+            class Db { public IQueryable<Order> Orders; public IQueryable<Customer> Customers; }
+            class C
+            {
+                void QuerySyntax(Db db)
+                {
+                    var query =
+                        from c in db.Customers
+                        select new { c.Name, Totals = from o in db.Orders where o.CustomerId == c.Id select o.Total };
+                    foreach (var row in query)
+                        foreach (var total in row.Totals) Console.WriteLine(total);
+                }
+                void MethodSyntax(Db db)
+                {
+                    var rows = db.Customers.Select(c => new { c.Id, Orders = db.Orders.Where(o => o.CustomerId == c.Id) }).ToList();
+                    foreach (var row in rows) Console.WriteLine(row.Orders.ToList().Count);
+                    rows.ForEach(r => { foreach (var o in r.Orders) Console.WriteLine(o.Total); });
+                }
+                void InMemory(Db db, List<Customer> customers)
+                {
+                    var rows = customers.Select(c => new { c.Name, Lines = db.Orders.Where(o => o.CustomerId == c.Id) });
+                    foreach (var row in rows)
+                        foreach (var o in row.Lines) Console.WriteLine(o.Total);
+                }
+                void EntityProperty(Db db)
+                {
+                    foreach (var c in db.Customers)
+                        foreach (var o in c.OrderQuery) Console.WriteLine(o.Total);
+                }
+            }
+            """
+
+    // the provider translates the projected sub-query with the row (LINQ to SQL joins it, EF Core refuses an
+    // IQueryable there); a row built in memory or an entity's IQueryable property is a statement per element
+    let fired = fires 2 "CR0034" source
+    Assert.Equal<string list>([ "row.Lines"; "c.OrderQuery" ], firedText source fired)
+
 // ---- CR0182 ----
 
 [<Fact>]

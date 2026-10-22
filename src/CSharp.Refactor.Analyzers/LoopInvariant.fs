@@ -196,7 +196,7 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
             && pureRead m
         | :? InvocationExpressionSyntax as inv ->
             match inv.Expression with
-            | :? IdentifierNameSyntax as id when id.Identifier.Text = "nameof" -> true
+            | :? IdentifierNameSyntax as pid when pid.Identifier.Text = "nameof" -> true
             | _ -> false
         | :? PrefixUnaryExpressionSyntax as u ->
             (u.IsKind SyntaxKind.UnaryMinusExpression

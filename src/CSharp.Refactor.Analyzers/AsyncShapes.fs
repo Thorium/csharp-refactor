@@ -322,8 +322,8 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
     // born complete: the receiver's own declaration, or a static readonly field
     let declaredComplete =
         match receiver with
-        | :? IdentifierNameSyntax as id ->
-            match model.GetSymbolInfo(id).Symbol with
+        | :? IdentifierNameSyntax as pid ->
+            match model.GetSymbolInfo(pid).Symbol with
             | :? ILocalSymbol as l ->
                 l.DeclaringSyntaxReferences
                 |> Seq.exists (fun r ->
@@ -345,8 +345,8 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
     // again: `winner == t` proves `t` complete
     let whenAnyArguments (winner: ExpressionSyntax) =
         match winner with
-        | :? IdentifierNameSyntax as id ->
-            match model.GetSymbolInfo(id).Symbol with
+        | :? IdentifierNameSyntax as pid ->
+            match model.GetSymbolInfo(pid).Symbol with
             | :? ILocalSymbol as l ->
                 let reassigned =
                     fn.Node.DescendantNodes()

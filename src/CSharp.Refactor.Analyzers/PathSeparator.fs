@@ -89,8 +89,8 @@ let private pathNamed (e: ExpressionSyntax) =
 /// A name bound one hop to something URL-shaped in the enclosing member.
 let private boundToUrl (model: SemanticModel) (e: ExpressionSyntax) =
     match e with
-    | :? IdentifierNameSyntax as id ->
-        match model.GetSymbolInfo(id).Symbol with
+    | :? IdentifierNameSyntax as pid ->
+        match model.GetSymbolInfo(pid).Symbol with
         | :? ILocalSymbol as l ->
             l.DeclaringSyntaxReferences
             |> Seq.exists (fun r ->

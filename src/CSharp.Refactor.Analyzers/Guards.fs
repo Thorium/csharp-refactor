@@ -253,7 +253,7 @@ let rec isPureExpression (model: SemanticModel) (e: ExpressionSyntax) : bool =
     | :? InvocationExpressionSyntax as inv ->
         // nameof(x) is not a call
         match inv.Expression with
-        | :? IdentifierNameSyntax as id when id.Identifier.Text = "nameof" -> true
+        | :? IdentifierNameSyntax as pid when pid.Identifier.Text = "nameof" -> true
         | _ -> false
     | :? PrefixUnaryExpressionSyntax as u ->
         not (
@@ -333,7 +333,7 @@ let rec callsOnlyCore (model: SemanticModel) (e: SyntaxNode) : bool =
             match n with
             | :? InvocationExpressionSyntax as inv ->
                 match inv.Expression with
-                | :? IdentifierNameSyntax as id when id.Identifier.Text = "nameof" -> true
+                | :? IdentifierNameSyntax as pid when pid.Identifier.Text = "nameof" -> true
                 | _ ->
                     match symbolOf model inv with
                     | ValueSome(:? IMethodSymbol as m) ->
@@ -791,8 +791,8 @@ let speculativeCheckAcross (model: SemanticModel) (sites: ReferenceSite list) (e
         let after = errorCounts patched patchedTrees
 
         after
-        |> Map.forall (fun id n ->
-            match Map.tryFind id before with
+        |> Map.forall (fun pid n ->
+            match Map.tryFind pid before with
             | Some m -> n <= m
             | None -> false)
     with _ -> // a cross-file check that cannot run offers no fix; fsharpanalyzer: ignore-line FR0055

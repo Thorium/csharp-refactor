@@ -710,8 +710,8 @@ let private mixedKinds (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                     tracked (depth + 1) p
                 | :? IFieldSymbol as f when f.Type.SpecialType = SpecialType.System_DateTime -> tracked (depth + 1) f
                 | _ -> None
-            | :? IdentifierNameSyntax as id ->
-                match symbolOf model id with
+            | :? IdentifierNameSyntax as pid ->
+                match symbolOf model pid with
                 | :? ILocalSymbol as l when l.Type.SpecialType = SpecialType.System_DateTime -> tracked (depth + 1) l
                 | :? IFieldSymbol as f when f.Type.SpecialType = SpecialType.System_DateTime -> tracked (depth + 1) f
                 | :? IPropertySymbol as p when p.Type.SpecialType = SpecialType.System_DateTime -> tracked (depth + 1) p

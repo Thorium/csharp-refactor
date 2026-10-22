@@ -1296,8 +1296,8 @@ let private runPassWith
                 |> List.collect (fun fix -> fix.Edits |> List.choose (fun e -> e.File)) do
                 if not (otherTrees.ContainsKey path) then
                     match current.GetDocumentIdsWithFilePath path |> Seq.tryHead with
-                    | Some id ->
-                        let! other = current.GetDocument(id).GetSyntaxTreeAsync ct
+                    | Some pid ->
+                        let! other = current.GetDocument(pid).GetSyntaxTreeAsync ct
                         otherTrees.[path] <- Some other
                     | None -> otherTrees.[path] <- None
 
@@ -1358,8 +1358,8 @@ let private runPassWith
 
                         match patched with
                         | Some patched ->
-                            for id in ids do
-                                current <- current.WithDocumentText(id, patched)
+                            for pid in ids do
+                                current <- current.WithDocumentText(pid, patched)
 
                             if not (changed.Contains path) then
                                 changed.Add path
@@ -1408,9 +1408,9 @@ let private runPassWith
         else
             // the in-memory arbiter: the error count must not rise. Where it
             // does, the files are tried one at a time and the offenders put back
-            let errorsIn (s: Solution) (id: ProjectId) =
+            let errorsIn (s: Solution) (pid: ProjectId) =
                 task {
-                    let! c = s.GetProject(id).GetCompilationAsync ct
+                    let! c = s.GetProject(pid).GetCompilationAsync ct
 
                     if opts.ParseOnly then
                         return parseErrorsOf c
@@ -1644,7 +1644,7 @@ let private runPassWith
 
                                     exitReasons.Add $"fixes in {names} put back ({what})"
                                     reject unit
-                                    adviseEscalated [ for id in raised.Split ", " -> id, codes ]
+                                    adviseEscalated [ for pid in raised.Split ", " -> pid, codes ]
 
                                 for kv in risen |> List.truncate 5 do
                                     for d in kv.Value |> List.truncate 2 do
@@ -2295,8 +2295,8 @@ let private executeRunCore (opts: Options) : Task<int> =
                             // a cross-file fix may have landed in another project: it is
                             // verified with the rest
                             for file in outcome.ChangedFiles do
-                                for id in solution.GetDocumentIdsWithFilePath file do
-                                    let owner = solution.GetProject id.ProjectId
+                                for pid in solution.GetDocumentIdsWithFilePath file do
+                                    let owner = solution.GetProject pid.ProjectId
 
                                     if
                                         not (isNull owner.FilePath)
@@ -2367,7 +2367,7 @@ let private executeRunCore (opts: Options) : Task<int> =
 
                                 adviseEscalated (
                                     named
-                                    |> List.collect (fun (f, ids) -> [ for id in ids.Split ", " -> id, codesIn f ])
+                                    |> List.collect (fun (f, ids) -> [ for pid in ids.Split ", " -> pid, codesIn f ])
                                 )
 
                                 printfn $"  {Path.GetFileName project}: builds without them"

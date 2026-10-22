@@ -542,7 +542,7 @@ let private swallows (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
 let private conditionCannotThrow (model: SemanticModel) (binder: string) (condition: ExpressionSyntax) =
     let nonNullReceiver (r: ExpressionSyntax) =
         match r with
-        | :? IdentifierNameSyntax as id when id.Identifier.ValueText = binder -> true
+        | :? IdentifierNameSyntax as pid when pid.Identifier.ValueText = binder -> true
         | _ ->
             match model.GetSymbolInfo(r).Symbol with
             | :? INamedTypeSymbol
@@ -1087,7 +1087,7 @@ let private exceptionDetails (tree: SyntaxTree) (model: SemanticModel) : Suggest
                                         | :? MemberAccessExpressionSyntax as m when
                                             m.Name.Identifier.ValueText = "Message"
                                             && (match m.Expression with
-                                                | :? IdentifierNameSyntax as id -> id.Identifier.ValueText = binder
+                                                | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = binder
                                                 | _ -> false)
                                             && not (m.Parent :? MemberAccessExpressionSyntax)
                                             && not (m.Parent :? InvocationExpressionSyntax)

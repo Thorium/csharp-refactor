@@ -545,7 +545,12 @@ on a queryable that mentions the outer variable; an outer source that is
 chunked or paged (`Chunk`, `Skip`, `Take`, `Batch`, `Page`), or an inner
 filter by the batch (`ids.Contains(o.Id)`, `Skip`/`Take` of the outer
 element), is a batch loop and stays quiet; an in-memory outer sequence is
-the loop whether spelled as `foreach` or query syntax. F# twin: FR0028.
+the loop whether spelled as `foreach` or query syntax. A member of an
+anonymous row built in a `Queryable` projection (`select new { c.Name,
+Orders = db.Orders.Where(…) }`, then `foreach (var o in row.Orders)`) is
+part of the outer statement — LINQ to SQL joins it, EF Core refuses an
+`IQueryable` there — and stays quiet; a row projected in memory, or an
+entity property typed `IQueryable<T>`, still fires. F# twin: FR0028.
 
 ### CR0035 — performance
 

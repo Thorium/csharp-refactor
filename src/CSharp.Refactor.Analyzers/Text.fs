@@ -47,8 +47,8 @@ let crossesDirective (node: SyntaxNode) : bool =
 let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list) : bool =
     let numbers =
         ids
-        |> List.choose (fun id ->
-            match System.Int32.TryParse(id.Substring 2) with
+        |> List.choose (fun pid ->
+            match System.Int32.TryParse(pid.Substring 2) with
             | true, n -> Some n
             | _ -> None)
 
@@ -60,8 +60,8 @@ let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list)
              | _ -> false)
         | :? Syntax.IdentifierNameSyntax as name ->
             ids
-            |> List.exists (fun id ->
-                System.String.Equals(id, name.Identifier.ValueText, System.StringComparison.OrdinalIgnoreCase))
+            |> List.exists (fun pid ->
+                System.String.Equals(pid, name.Identifier.ValueText, System.StringComparison.OrdinalIgnoreCase))
         | _ -> false
 
     let byPragma =
@@ -82,8 +82,8 @@ let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list)
 
     let byOption =
         ids
-        |> List.exists (fun id ->
-            match model.Compilation.Options.SpecificDiagnosticOptions.TryGetValue id with
+        |> List.exists (fun pid ->
+            match model.Compilation.Options.SpecificDiagnosticOptions.TryGetValue pid with
             | true, setting -> setting = ReportDiagnostic.Suppress
             | _ -> false)
 

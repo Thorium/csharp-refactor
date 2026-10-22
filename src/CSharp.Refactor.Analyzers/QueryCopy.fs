@@ -89,8 +89,8 @@ let private column (model: SemanticModel) (param: IParameterSymbol) (e: Expressi
     match e with
     | :? MemberAccessExpressionSyntax as m when m.IsKind SyntaxKind.SimpleMemberAccessExpression ->
         match m.Expression with
-        | :? IdentifierNameSyntax as id when
-            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, param)
+        | :? IdentifierNameSyntax as pid when
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(pid).Symbol, param)
             ->
             match model.GetSymbolInfo(m).Symbol with
             | :? IPropertySymbol as p when not (p.IsStatic || p.IsIndexer) && autoProperty p && not (notMapped p) ->
@@ -322,8 +322,8 @@ let private capturesSettled (model: SemanticModel) (stages: InvocationExpression
                 s.ArgumentList.DescendantNodes()
                 |> Seq.choose (fun n ->
                     match n with
-                    | :? IdentifierNameSyntax as id ->
-                        match model.GetSymbolInfo(id).Symbol with
+                    | :? IdentifierNameSyntax as pid ->
+                        match model.GetSymbolInfo(pid).Symbol with
                         | :? ILocalSymbol as l -> Some(l :> ISymbol)
                         | :? IParameterSymbol as p when
                             not (p.DeclaringSyntaxReferences |> Seq.exists (fun r -> s.Span.Contains r.Span))
@@ -428,7 +428,7 @@ let rec private stableUse (model: SemanticModel) (depth: int) (e: ExpressionSynt
                             ->
                             Some id
                         | _ -> None)
-                    |> Seq.forall (fun id -> stableUse model (depth + 1) id)
+                    |> Seq.forall (fun pid -> stableUse model (depth + 1) pid)
                 | _ -> false
             | _ -> false
         | _ -> false

@@ -231,8 +231,8 @@ let invariantOutside (model: SemanticModel) (tree: SyntaxTree) (node: SyntaxNode
         | e -> e
 
     match root e with
-    | :? IdentifierNameSyntax as id ->
-        match model.GetSymbolInfo(id).Symbol with
+    | :? IdentifierNameSyntax as pid ->
+        match model.GetSymbolInfo(pid).Symbol with
         | :? ILocalSymbol as l ->
             match declarationSpan tree l with
             | Some span -> not (node.Span.Contains span)

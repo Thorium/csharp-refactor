@@ -47,7 +47,7 @@ type private Spelling =
 [<TailCall>]
 let rec private chainRoot (node: SyntaxNode) : IdentifierNameSyntax option =
     match node with
-    | :? IdentifierNameSyntax as id -> Some id
+    | :? IdentifierNameSyntax as pid -> Some pid
     | :? QualifiedNameSyntax as q -> chainRoot q.Left
     | :? MemberAccessExpressionSyntax as m when m.IsKind SyntaxKind.SimpleMemberAccessExpression ->
         chainRoot m.Expression

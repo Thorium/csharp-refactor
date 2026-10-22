@@ -175,7 +175,7 @@ let private build (compilation: Compilation) : CompilationIndex =
             | :? LiteralExpressionSyntax as lit when lit.IsKind SyntaxKind.StringLiteralExpression ->
                 mentionedStrings.Add(string lit.Token.Value) |> ignore
             // `BindingFlags.IgnoreCase` anywhere: a name in any casing reaches a member
-            | :? IdentifierNameSyntax as id when id.Identifier.ValueText = "IgnoreCase" ->
+            | :? IdentifierNameSyntax as pid when pid.Identifier.ValueText = "IgnoreCase" ->
                 mentionedStrings.Add ignoreCaseMark |> ignore
             // a name spelled as a constant another way: `$"_name"`, `"_" + "name"`
             | :? InterpolatedStringExpressionSyntax

@@ -36,7 +36,7 @@ type CSharpRefactorCodeFixProvider() =
 
             // whole or not at all: a target the solution holds no document for
             // leaves the set unapplied rather than half applied
-            if byDocument |> List.exists (fun (id, _) -> id.IsNone) then
+            if byDocument |> List.exists (fun (pid, _) -> pid.IsNone) then
                 return solution
             else
                 for documentId, edits in byDocument do
@@ -108,7 +108,7 @@ type CSharpRefactorCodeFixProvider() =
                         // the fixes that framework offers as well
                         let offered (flavor: Project) : Suggestion list =
                             twins
-                            |> Seq.tryFind (fun (id, _, _) -> id = flavor.Id)
+                            |> Seq.tryFind (fun (pid, _, _) -> pid = flavor.Id)
                             |> Option.map (fun (_, theirTree, theirModel) ->
                                 let theirs =
                                     { Context.forTree options theirModel.Compilation theirTree false with

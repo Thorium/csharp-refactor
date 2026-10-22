@@ -190,7 +190,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                 let nameToken =
                                     match inv.Expression with
                                     | :? MemberAccessExpressionSyntax as ma -> Some ma.Name.Identifier
-                                    | :? IdentifierNameSyntax as id -> Some id.Identifier
+                                    | :? IdentifierNameSyntax as pid -> Some pid.Identifier
                                     | _ -> None
 
                                 match nameToken with

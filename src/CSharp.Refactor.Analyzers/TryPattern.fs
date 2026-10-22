@@ -66,7 +66,7 @@ let private setsOut (name: string) (s: StatementSyntax) =
         | :? AssignmentExpressionSyntax as a when
             a.IsKind SyntaxKind.SimpleAssignmentExpression
             && (match a.Left with
-                | :? IdentifierNameSyntax as id -> id.Identifier.ValueText = name
+                | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = name
                 | _ -> false)
             ->
             Some a.Right

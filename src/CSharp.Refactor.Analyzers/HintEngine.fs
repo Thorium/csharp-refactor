@@ -434,8 +434,8 @@ let private render (rhs: ExpressionSyntax) (env: Map<string, Binding>) : Express
                     let ma = rewritten :?> MemberAccessExpressionSyntax
                     ma.WithOperatorToken(ma.OperatorToken.WithLeadingTrivia trivia) :> SyntaxNode
                 | _ ->
-                    let id = original :?> IdentifierNameSyntax
-                    let name = id.Identifier.ValueText
+                    let pid = original :?> IdentifierNameSyntax
+                    let name = pid.Identifier.ValueText
 
                     match env.[name] with
                     | Expr e ->

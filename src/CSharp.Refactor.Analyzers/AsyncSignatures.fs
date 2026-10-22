@@ -398,8 +398,8 @@ let private taskify (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext)
                                     lookup (nameIndexOf t).Names self.Name
                                     |> Seq.filter (fun n ->
                                         match n with
-                                        | :? IdentifierNameSyntax as id ->
-                                            SymbolEqualityComparer.Default.Equals(m.GetSymbolInfo(id).Symbol, self)
+                                        | :? IdentifierNameSyntax as pid ->
+                                            SymbolEqualityComparer.Default.Equals(m.GetSymbolInfo(pid).Symbol, self)
                                         | _ -> false)
                                     |> Seq.length
 
@@ -507,7 +507,7 @@ let private taskify (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext)
                                             let nameToken =
                                                 match c.Expression with
                                                 | :? MemberAccessExpressionSyntax as ma -> ma.Name.Identifier
-                                                | :? IdentifierNameSyntax as id -> id.Identifier
+                                                | :? IdentifierNameSyntax as pid -> pid.Identifier
                                                 | _ -> m.Identifier
 
                                             if nameToken.SpanStart <> m.Identifier.SpanStart || file.IsSome then

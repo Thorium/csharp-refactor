@@ -58,8 +58,8 @@ let private memberSet (model: SemanticModel) (local: ILocalSymbol) (s: Statement
                 && (ma.Name :? IdentifierNameSyntax)
                 ->
                 match ma.Expression with
-                | :? IdentifierNameSyntax as id when
-                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local)
+                | :? IdentifierNameSyntax as pid when
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(pid).Symbol, local)
                     ->
                     let settable =
                         match model.GetSymbolInfo(ma.Name).Symbol with

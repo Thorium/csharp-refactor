@@ -183,7 +183,7 @@ let run () =
                     use doc = JsonDocument.Parse line
                     let root = doc.RootElement
 
-                    let id =
+                    let pid =
                         match root.TryGetProperty "id" with
                         | true, v -> v.GetRawText()
                         | _ -> "null"
@@ -199,7 +199,7 @@ let run () =
                         | true, v -> Some(v.Clone())
                         | _ -> None
 
-                    id, m, p
+                    pid, m, p
                 with _ -> // an unparsable request answers as a request without an id; fsharpanalyzer: ignore-line FR0055
                     "null", "", None
 

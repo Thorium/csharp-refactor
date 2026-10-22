@@ -65,7 +65,7 @@ module Flavors =
 
     let private holds (project: Project) (path: string) =
         project.Solution.GetDocumentIdsWithFilePath path
-        |> Seq.exists (fun id -> id.ProjectId = project.Id)
+        |> Seq.exists (fun pid -> pid.ProjectId = project.Id)
 
     /// Does the tree branch on a compilation symbol anywhere?
     let branches (tree: SyntaxTree) =
@@ -119,9 +119,9 @@ module Flavors =
                                 Some(Some(CSharpSyntaxTree.ParseText(tree.GetText(), options, path)))
                             | _ ->
                                 p.Solution.GetDocumentIdsWithFilePath path
-                                |> Seq.filter (fun id -> id.ProjectId = p.Id)
-                                |> Seq.tryPick (fun id ->
-                                    match p.GetDocument(id).TryGetSyntaxTree() with
+                                |> Seq.filter (fun pid -> pid.ProjectId = p.Id)
+                                |> Seq.tryPick (fun pid ->
+                                    match p.GetDocument(pid).TryGetSyntaxTree() with
                                     | true, t -> Some t
                                     | _ -> None)
                                 |> Some

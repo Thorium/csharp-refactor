@@ -217,8 +217,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
 
                     let probes =
                         uses
-                        |> List.choose (fun (m, id) ->
-                            match classify m id with
+                        |> List.choose (fun (m, pid) ->
+                            match classify m pid with
                             | Probe inv ->
                                 // in a loop or a collection callback, not probing the collection's own element
                                 let perElement =
@@ -248,8 +248,8 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
                     else
                         let allProbes =
                             uses
-                            |> List.forall (fun (m, id) ->
-                                match classify m id with
+                            |> List.forall (fun (m, pid) ->
+                                match classify m pid with
                                 | Probe _ -> true
                                 | Other -> false)
 

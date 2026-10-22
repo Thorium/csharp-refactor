@@ -156,7 +156,7 @@ let private writtenIn (model: SemanticModel) (local: ISymbol) (node: SyntaxNode)
             | _ -> None
 
         match target with
-        | Some(:? IdentifierNameSyntax as id) -> sameSymbol (symbolOf model id) local
+        | Some(:? IdentifierNameSyntax as pid) -> sameSymbol (symbolOf model pid) local
         | _ -> false)
     || (match local.DeclaringSyntaxReferences |> Seq.tryHead with
         // a `for` declaration with an initialiser is a write of the loop's own
@@ -214,7 +214,7 @@ let private readsOf (model: SemanticModel) (closure: SyntaxNode) (local: ISymbol
                 | _ -> None
 
             match target with
-            | Some(:? IdentifierNameSyntax as id) -> sameSymbol (symbolOf model id) local
+            | Some(:? IdentifierNameSyntax as pid) -> sameSymbol (symbolOf model pid) local
             | _ -> false)
 
     ids, writes
@@ -226,8 +226,8 @@ let private capturedLocals (model: SemanticModel) (closure: SyntaxNode) : ISymbo
     |> fun body -> body.DescendantNodesAndSelf()
     |> Seq.choose (fun n ->
         match n with
-        | :? IdentifierNameSyntax as id ->
-            match symbolOf model id with
+        | :? IdentifierNameSyntax as pid ->
+            match symbolOf model pid with
             | :? ILocalSymbol as l when
                 (l.DeclaringSyntaxReferences
                  |> Seq.forall (fun r -> not (closure.Span.Contains r.Span)))
@@ -449,13 +449,13 @@ let private loopCaptures (tree: SyntaxTree) (model: SemanticModel) : Suggestion 
                                         && (match n with
                                             | :? AssignmentExpressionSyntax as a ->
                                                 (match a.Left with
-                                                 | :? IdentifierNameSyntax as id ->
-                                                     sameSymbol (symbolOf model id) local
+                                                 | :? IdentifierNameSyntax as pid ->
+                                                     sameSymbol (symbolOf model pid) local
                                                  | _ -> false)
                                             | :? PostfixUnaryExpressionSyntax as u ->
                                                 (match u.Operand with
-                                                 | :? IdentifierNameSyntax as id ->
-                                                     sameSymbol (symbolOf model id) local
+                                                 | :? IdentifierNameSyntax as pid ->
+                                                     sameSymbol (symbolOf model pid) local
                                                  | _ -> false)
                                             | _ -> false))
 
@@ -557,7 +557,7 @@ let private loopCaptures (tree: SyntaxTree) (model: SemanticModel) : Suggestion 
                 Suggestion.insert statement.SpanStart $"var {copy} = {local.Name};{nl}{indent}"
                 :: (group
                     |> List.collect (fun (_, _, _, reads) ->
-                        reads |> List.map (fun id -> Suggestion.replace id.Span copy)))
+                        reads |> List.map (fun pid -> Suggestion.replace pid.Span copy)))
 
             let closures = group |> List.map (fun (_, _, c, _) -> (c: SyntaxNode))
             let first = closures |> List.minBy (fun c -> c.SpanStart)
@@ -613,7 +613,7 @@ let rec private mutatesSelf (model: SemanticModel) (visited: Set<string>) (m: IM
                         match e with
                         | :? MemberAccessExpressionSyntax as ma when (ma.Expression :? ThisExpressionSyntax) ->
                             symbolOf declModel ma
-                        | :? IdentifierNameSyntax as id -> symbolOf declModel id
+                        | :? IdentifierNameSyntax as pid -> symbolOf declModel pid
                         | _ -> null
 
                     match sym with

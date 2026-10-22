@@ -186,8 +186,8 @@ let rec private materialised (model: SemanticModel) (depth: int) (e: ExpressionS
     && e.DescendantNodesAndSelf()
        |> Seq.forall (fun n ->
            match n with
-           | :? IdentifierNameSyntax as id ->
-               match model.GetSymbolInfo(id).Symbol with
+           | :? IdentifierNameSyntax as pid ->
+               match model.GetSymbolInfo(pid).Symbol with
                | :? IParameterSymbol as p when
                    // a lambda's own parameter is an element, not a source
                    (match p.ContainingSymbol with
