@@ -1017,3 +1017,19 @@ let ``a data contract naming its members in another casing leaves the fields to 
 
     // "UserId" names the property; only BindingFlags.IgnoreCase would reach `userId` by it
     Assert.Equal<string list>([ "UserId" ], firedText source (suggestCode "CR0186" source))
+
+// ---- attributes that say nothing of the rewrite ----
+
+[<Fact>]
+let ``CR0081 reads past an attribute that says nothing of storage`` () =
+    let on (attribute: string) =
+        csharp
+            $"""
+            using System;
+            class MarkAttribute : Attribute {{ }}
+            [{attribute}]
+            record Point(int X, int Y);
+            """
+
+    Assert.Single(suggestCodeWith apiOpen "CR0081" (on "Obsolete")) |> ignore
+    Assert.Empty(suggestCodeWith apiOpen "CR0081" (on "Mark"))

@@ -297,7 +297,8 @@ let private queriesInLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                             match l.Parent with
                             | :? ArgumentSyntax as arg ->
                                 match arg.Parent.Parent with
-                                | :? InvocationExpressionSyntax as inv -> Some(Option.isSome (Linq.queryableCall model inv))
+                                | :? InvocationExpressionSyntax as inv ->
+                                    Some(Option.isSome (Linq.queryableCall model inv))
                                 | _ -> Some false
                             | _ -> Some false
                         | :? MemberDeclarationSyntax -> Some false
@@ -338,14 +339,16 @@ let private queriesInLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                     match n with
                     | :? ForEachStatementSyntax as f when perRow f.Expression -> Some(f.Expression :> SyntaxNode)
                     | :? InvocationExpressionSyntax as inv when
-                        Linq.consumers.Contains(Linq.nameOf inv) && (Linq.receiverOf inv |> Option.exists perRow)
+                        Linq.consumers.Contains(Linq.nameOf inv)
+                        && (Linq.receiverOf inv |> Option.exists perRow)
                         ->
                         Some(inv :> SyntaxNode)
                     | :? AwaitExpressionSyntax as a ->
                         // `await q.ToListAsync()` and friends
                         match a.Expression with
                         | :? InvocationExpressionSyntax as inv when
-                            (Linq.nameOf inv).EndsWith "Async" && (Linq.receiverOf inv |> Option.exists perRow)
+                            (Linq.nameOf inv).EndsWith "Async"
+                            && (Linq.receiverOf inv |> Option.exists perRow)
                             ->
                             Some(inv :> SyntaxNode)
                         | _ -> None

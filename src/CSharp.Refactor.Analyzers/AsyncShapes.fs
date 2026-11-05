@@ -76,11 +76,14 @@
 /// `CancellationToken` parameter on the enclosing function; the call
 /// resolves to a method whose parameter at that position is a
 /// `CancellationToken`; never inside a `catch`/`finally` (a cancelled
-/// operation must still roll back); never on `Task.Run`/
-/// `Task.Factory.StartNew`, where the token is a scheduling condition and
-/// `None` means "always start the work"; never where the token is already
+/// operation must still roll back); never on `Task.Run`, `StartNew`,
+/// `ContinueWith`, `ContinueWhenAll` or `ContinueWhenAny` by symbol, where the
+/// token is a scheduling condition and `None` means "always start the work";
+/// never where the token is already
 /// among the arguments; never a named argument; never where the `None` is
-/// bound to a name. Yields to CA2016.
+/// bound to a name; only where the work the call starts is waited for
+/// (`taskWaitedFor`), not a discard or a store; never in a factory handed to
+/// `GetOrAdd`/`AddOrUpdate` (`isSharedFactory`). Yields to CA2016.
 module CSharp.Refactor.AsyncShapes
 
 open Microsoft.CodeAnalysis
@@ -1034,119 +1037,6 @@ let private singleTasks (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
 let private isTokenType (t: ITypeSymbol) =
     not (isNull t) && t.ToDisplayString() = "System.Threading.CancellationToken"
 
-let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
-    tree.GetRoot().DescendantNodes()
-    |> Seq.choose (fun n ->
-        match n with
-        | :? ArgumentSyntax as arg when isNull arg.NameColon ->
-            let isNone =
-                match arg.Expression with
-                | :? MemberAccessExpressionSyntax as m -> m.ToString() = "CancellationToken.None"
-                | :? LiteralExpressionSyntax as l ->
-                    l.IsKind SyntaxKind.DefaultLiteralExpression
-                    && isTokenType (model.GetTypeInfo(l).ConvertedType)
-                | :? DefaultExpressionSyntax as d -> isTokenType (model.GetTypeInfo(d).Type)
-                | _ -> false
-
-            if not isNone then
-                None
-            else
-                match arg.Parent.Parent with
-                | :? InvocationExpressionSyntax as inv ->
-                    let callee = inv.Expression.ToString()
-
-                    let scheduling =
-                        callee = "Task.Run"
-                        || callee.EndsWith "Task.Factory.StartNew"
-                        || callee = "Task.Factory.StartNew"
-
-                    // a decision spelled out beside the call, or a best-effort cleanup (the
-                    // call alone in a `try` whose `catch` swallows): the author's `None`
-                    let statement =
-                        arg.Ancestors()
-                        |> Seq.tryPick (fun a ->
-                            match a with
-                            | :? StatementSyntax as s -> Some s
-                            | _ -> None)
-
-                    let deliberate =
-                        match statement with
-                        | Some s ->
-                            let comments =
-                                s.GetLeadingTrivia()
-                                |> Seq.filter (fun t ->
-                                    t.IsKind SyntaxKind.SingleLineCommentTrivia
-                                    || t.IsKind SyntaxKind.MultiLineCommentTrivia)
-                                |> Seq.map (fun t -> t.ToString())
-                                |> String.concat " "
-
-                            let names =
-                                comments.Contains "None"
-                                || comments.IndexOf("cancel", System.StringComparison.OrdinalIgnoreCase) >= 0
-
-                            let bestEffort =
-                                match s.Parent with
-                                | :? BlockSyntax as b when b.Statements.Count = 1 ->
-                                    match b.Parent with
-                                    | :? TryStatementSyntax as t -> t.Catches.Count > 0
-                                    | _ -> false
-                                | _ -> false
-
-                            names || bestEffort
-                        | None -> false
-
-                    match enclosingFunction arg with
-                    | Some f when not (scheduling || deliberate || inCatchOrFinally f arg) ->
-                        let tokenParams =
-                            f.Parameters
-                            |> List.filter (fun p ->
-                                match model.GetDeclaredSymbol p with
-                                | null -> false
-                                | ps -> isTokenType ps.Type)
-
-                        match tokenParams with
-                        | [ p ] ->
-                            let name = p.Identifier.ValueText
-
-                            let alreadyPassed =
-                                inv.ArgumentList.Arguments
-                                |> Seq.exists (fun a -> a.Expression.ToString() = name)
-
-                            let namedArguments =
-                                inv.ArgumentList.Arguments |> Seq.exists (fun a -> not (isNull a.NameColon))
-
-                            // the parameter at that position is a token
-                            let positionIsToken =
-                                match model.GetSymbolInfo(inv).Symbol with
-                                | :? IMethodSymbol as m ->
-                                    let i = inv.ArgumentList.Arguments.IndexOf arg
-                                    i < m.Parameters.Length && isTokenType m.Parameters.[i].Type
-                                | _ -> false
-
-                            if alreadyPassed || namedArguments || not positionIsToken then
-                                None
-                            else
-                                let edit = Suggestion.replace arg.Expression.Span name
-
-                                if Guards.speculativeCheck model [ edit ] then
-                                    Some
-                                        {
-                                            Code = TokenCode
-                                            Message =
-                                                $"'{name}' is in scope: pass it, or the callee has nothing to cancel on"
-                                            Span = arg.Span
-                                            Fixes = [ Suggestion.fix ("Pass " + name) TokenCode [ edit ] ]
-                                        }
-                                else
-                                    None
-                        | _ -> None
-                    | _ -> None
-                | _ -> None
-        | _ -> None)
-    |> List.ofSeq
-
-// ---- CR0189 ----
-
 /// A task, a value task, an async stream or anything with `GetAwaiter`: a
 /// value whose work may outlive the call that started it.
 let private awaitable (t: ITypeSymbol) =
@@ -1160,12 +1050,13 @@ let private awaitable (t: ITypeSymbol) =
         | _ -> not (t.GetMembers "GetAwaiter").IsEmpty)
 
 /// Is the task a call starts waited for by this function or its caller -
-/// awaited (through `ConfigureAwait`), returned, `await foreach`'d, blocked
-/// on (`.Result`, `.Wait()`, `.GetAwaiter().GetResult()`), handed to
-/// `Task.WhenAll`/`WhenAny`, or held in a local that is? Anything else - a
-/// discard, `_ = SendAsync(m);`, a store, an argument elsewhere - may be
-/// fire-and-forget: work meant to outlive the caller, which the caller's
-/// token would cancel when the caller is done.
+/// awaited (through `ConfigureAwait`), returned (also as a lambda's value, or
+/// an arm of a conditional that is), `await foreach`'d, blocked on (`.Result`,
+/// `.Wait()`, `.GetAwaiter().GetResult()`), handed to `Task.WhenAll`/`WhenAny`,
+/// or held in a local that is? Anything else - a discard, `_ = SendAsync(m);`,
+/// a store, an argument elsewhere - may be fire-and-forget: work meant to
+/// outlive the caller, which the caller's token would cancel when the caller
+/// is done.
 let private taskWaitedFor (model: SemanticModel) (body: SyntaxNode) (call: ExpressionSyntax) =
     let rec consumed (depth: int) (e: ExpressionSyntax) =
         // `(e)`, `e.ConfigureAwait(false)`, `e.WithCancellation(…)` stand for e
@@ -1187,6 +1078,14 @@ let private taskWaitedFor (model: SemanticModel) (body: SyntaxNode) (call: Expre
         | :? AwaitExpressionSyntax
         | :? ReturnStatementSyntax
         | :? ArrowExpressionClauseSyntax -> true
+        // a delegate returning void drops the task it starts
+        | :? LambdaExpressionSyntax as l ->
+            obj.ReferenceEquals(l.ExpressionBody, e)
+            && (match model.GetTypeInfo(l).ConvertedType with
+                | :? INamedTypeSymbol as d when not (isNull d.DelegateInvokeMethod) -> not d.DelegateInvokeMethod.ReturnsVoid
+                | _ -> true)
+        | :? ConditionalExpressionSyntax as c when depth < 3 && not (obj.ReferenceEquals(c.Condition, e)) ->
+            consumed (depth + 1) c
         | :? ForEachStatementSyntax as fe -> fe.AwaitKeyword.IsKind SyntaxKind.AwaitKeyword
         | :? MemberAccessExpressionSyntax as ma when obj.ReferenceEquals(ma.Expression, e) ->
             match ma.Name.Identifier.ValueText with
@@ -1233,6 +1132,187 @@ let private taskWaitedFor (model: SemanticModel) (body: SyntaxNode) (call: Expre
 
     consumed 0 call
 
+/// Is this function a factory handed straight to `GetOrAdd`/`AddOrUpdate`,
+/// whose token parameter is then the caller's (`GetOrAdd(k, (key, token) => …,
+/// ct)`)? What it makes goes to every later caller, so that caller's token in it
+/// fails the others when that caller cancels. A synchronous factory would be
+/// safe (it throws and stores nothing), but it is refused with the rest. A
+/// function declared inside the factory has its own token, and a `Lazy` factory
+/// takes no parameter to hold one. A named function handed over elsewhere in the
+/// file counts: a `Func` in a local, a local function, a method group.
+let isSharedFactory (fn: Function) =
+    let rec outside (node: SyntaxNode) =
+        match node.Parent with
+        | :? ParenthesizedExpressionSyntax as paren -> outside paren
+        | parent -> parent
+
+    let isFactoryCall (inv: InvocationExpressionSyntax) =
+        let name = Linq.nameOf inv
+        name = "GetOrAdd" || name = "AddOrUpdate"
+
+    let handedOverByName (name: string) =
+        fn.Node.SyntaxTree.GetRoot().DescendantNodes()
+        |> Seq.exists (fun node ->
+            match node with
+            | :? InvocationExpressionSyntax as inv when isFactoryCall inv ->
+                inv.ArgumentList.Arguments
+                |> Seq.exists (fun a ->
+                    match a.Expression with
+                    | :? IdentifierNameSyntax as id -> id.Identifier.ValueText = name
+                    | _ -> false)
+            | _ -> false)
+
+    match fn.Node, outside fn.Node with
+    | _, (:? ArgumentSyntax as arg) ->
+        match arg.Parent.Parent with
+        | :? InvocationExpressionSyntax as inv -> isFactoryCall inv
+        | _ -> false
+    | _, (:? EqualsValueClauseSyntax as value) ->
+        match value.Parent with
+        | :? VariableDeclaratorSyntax as variable -> handedOverByName variable.Identifier.ValueText
+        | _ -> false
+    | (:? LocalFunctionStatementSyntax as local), _ -> handedOverByName local.Identifier.ValueText
+    | (:? MethodDeclarationSyntax as method), _ -> handedOverByName method.Identifier.ValueText
+    | _ -> false
+
+/// A token handed to the scheduler is a condition on running the work at all:
+/// cancelled, `Task.Run`'s body or a `ContinueWith` cleanup never runs, and
+/// nothing awaits the task to say so. By symbol, however spelled.
+let private schedulesWork (m: IMethodSymbol) =
+    let owner = m.ContainingType.OriginalDefinition.ToDisplayString()
+
+    (owner = "System.Threading.Tasks.Task"
+     || owner = "System.Threading.Tasks.Task<TResult>"
+     || owner = "System.Threading.Tasks.TaskFactory"
+     || owner = "System.Threading.Tasks.TaskFactory<TResult>")
+    && (m.Name = "Run"
+        || m.Name = "StartNew"
+        || m.Name = "ContinueWith"
+        || m.Name = "ContinueWhenAll"
+        || m.Name = "ContinueWhenAny")
+
+let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+    tree.GetRoot().DescendantNodes()
+    |> Seq.choose (fun n ->
+        match n with
+        | :? ArgumentSyntax as arg when isNull arg.NameColon ->
+            let isNone =
+                match arg.Expression with
+                | :? MemberAccessExpressionSyntax as m -> m.ToString() = "CancellationToken.None"
+                | :? LiteralExpressionSyntax as l ->
+                    l.IsKind SyntaxKind.DefaultLiteralExpression
+                    && isTokenType (model.GetTypeInfo(l).ConvertedType)
+                | :? DefaultExpressionSyntax as d -> isTokenType (model.GetTypeInfo(d).Type)
+                | _ -> false
+
+            if not isNone then
+                None
+            else
+                match arg.Parent.Parent with
+                | :? InvocationExpressionSyntax as inv ->
+                    let scheduling =
+                        match model.GetSymbolInfo(inv).Symbol with
+                        | :? IMethodSymbol as m -> schedulesWork m
+                        | _ -> false
+
+                    // a decision spelled out beside the call, or a best-effort cleanup (the
+                    // call alone in a `try` whose `catch` swallows): the author's `None`
+                    let statement =
+                        arg.Ancestors()
+                        |> Seq.tryPick (fun a ->
+                            match a with
+                            | :? StatementSyntax as s -> Some s
+                            | _ -> None)
+
+                    let deliberate =
+                        match statement with
+                        | Some s ->
+                            let comments =
+                                s.GetLeadingTrivia()
+                                |> Seq.filter (fun t ->
+                                    t.IsKind SyntaxKind.SingleLineCommentTrivia
+                                    || t.IsKind SyntaxKind.MultiLineCommentTrivia)
+                                |> Seq.map (fun t -> t.ToString())
+                                |> String.concat " "
+
+                            let names =
+                                comments.Contains "None"
+                                || comments.IndexOf("cancel", System.StringComparison.OrdinalIgnoreCase) >= 0
+
+                            let bestEffort =
+                                match s.Parent with
+                                | :? BlockSyntax as b when b.Statements.Count = 1 ->
+                                    match b.Parent with
+                                    | :? TryStatementSyntax as t -> t.Catches.Count > 0
+                                    | _ -> false
+                                | _ -> false
+
+                            names || bestEffort
+                        | None -> false
+
+                    match enclosingFunction arg with
+                    | Some f when not (scheduling || deliberate || inCatchOrFinally f arg || isSharedFactory f) ->
+                        let tokenParams =
+                            f.Parameters
+                            |> List.filter (fun p ->
+                                match model.GetDeclaredSymbol p with
+                                | null -> false
+                                | ps -> isTokenType ps.Type)
+
+                        match tokenParams with
+                        | [ p ] ->
+                            let name = p.Identifier.ValueText
+
+                            let alreadyPassed =
+                                inv.ArgumentList.Arguments
+                                |> Seq.exists (fun a -> a.Expression.ToString() = name)
+
+                            let namedArguments =
+                                inv.ArgumentList.Arguments |> Seq.exists (fun a -> not (isNull a.NameColon))
+
+                            let callee = model.GetSymbolInfo(inv).Symbol
+
+                            // the parameter at that position is a token
+                            let positionIsToken =
+                                match callee with
+                                | :? IMethodSymbol as m ->
+                                    let i = inv.ArgumentList.Arguments.IndexOf arg
+                                    // `ct.Equals(CancellationToken.None)` asks about the value
+                                    m.Name <> "Equals" && i < m.Parameters.Length && isTokenType m.Parameters.[i].Type
+                                | _ -> false
+
+                            // work started and not waited for is the author's to
+                            // detach: a discard, or a store other callers read
+                            let detached =
+                                match callee with
+                                | :? IMethodSymbol as m ->
+                                    awaitable m.ReturnType && not (taskWaitedFor model f.Body inv)
+                                | _ -> false
+
+                            if alreadyPassed || namedArguments || not positionIsToken || detached then
+                                None
+                            else
+                                let edit = Suggestion.replace arg.Expression.Span name
+
+                                if Guards.speculativeCheck model [ edit ] then
+                                    Some
+                                        {
+                                            Code = TokenCode
+                                            Message =
+                                                $"'{name}' is in scope: pass it, or the callee has nothing to cancel on"
+                                            Span = arg.Span
+                                            Fixes = [ Suggestion.fix ("Pass " + name) TokenCode [ edit ] ]
+                                        }
+                                else
+                                    None
+                        | _ -> None
+                    | _ -> None
+                | _ -> None
+        | _ -> None)
+    |> List.ofSeq
+
+// ---- CR0189 ----
+
 /// CR0189 (correctness, fix): a call that omits the `CancellationToken` in
 /// scope, where the callee takes one - `await repo.GetAsync(id)` inside
 /// `Task Load(int id, CancellationToken ct)` - runs to the end whatever the
@@ -1244,7 +1324,8 @@ let private taskWaitedFor (model: SemanticModel) (body: SyntaxNode) (call: Expre
 /// same name, the same parameters in order, the same return type. Guards: as
 /// CR0055 - exactly one token parameter on the enclosing function, not in a
 /// `catch` or `finally` (cleanup must run after a cancel), not `Task.Run`/
-/// `StartNew`/`ContinueWith` by symbol (a scheduling condition), not after
+/// `StartNew`/`ContinueWith` by symbol (a scheduling condition), not in a
+/// factory handed to `GetOrAdd`/`AddOrUpdate` (`isSharedFactory`), not after
 /// an `IsCancellationRequested` read earlier in the function but a loop
 /// condition around the call (that code may run because of the cancel), no
 /// named arguments, the token not already among the arguments; a call in a
@@ -1261,25 +1342,9 @@ let private omittedTokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion
         | :? InvocationExpressionSyntax as inv when
             inv.ArgumentList.Arguments |> Seq.forall (fun a -> isNull a.NameColon)
             ->
-            // a token handed to the scheduler is a condition on running the work at
-            // all: cancelled, `Task.Run`'s body or a `ContinueWith` cleanup never
-            // runs, and nothing awaits the task to say so. By symbol, however spelled
-            let scheduling (m: IMethodSymbol) =
-                let owner = m.ContainingType.OriginalDefinition.ToDisplayString()
-
-                (owner = "System.Threading.Tasks.Task"
-                 || owner = "System.Threading.Tasks.Task<TResult>"
-                 || owner = "System.Threading.Tasks.TaskFactory"
-                 || owner = "System.Threading.Tasks.TaskFactory<TResult>")
-                && (m.Name = "Run"
-                    || m.Name = "StartNew"
-                    || m.Name = "ContinueWith"
-                    || m.Name = "ContinueWhenAll"
-                    || m.Name = "ContinueWhenAny")
-
             match enclosingFunction inv, model.GetSymbolInfo(inv).Symbol with
             | Some f, (:? IMethodSymbol as m) when
-                not (scheduling m || inCatchOrFinally f inv)
+                not (schedulesWork m || inCatchOrFinally f inv || isSharedFactory f)
                 // a callback handed to a token's `Register`/`UnsafeRegister` runs
                 // because of the cancel: its own token parameter is already
                 // cancelled, and a wait given it throws at once (FR0118's

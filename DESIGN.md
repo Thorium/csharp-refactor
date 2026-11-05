@@ -721,6 +721,8 @@ Guards.
 | CR0053 | correctness | v | | | `list.ForEach(async x => …)`, `Parallel.ForEach(xs, async x => …)`: an `async` lambda converted to a `void`-returning delegate | note: `async void` in disguise | — | VSTHRD101 |
 | CR0054 | performance | v | | | `Task.WhenAll(new[] { t })`, `Task.WaitAll(t)` | note: the direct form changes the result type | FR0079 | CA1842/CA1843 |
 | CR0055 | correctness | v | | | `Foo(x, CancellationToken.None)` / `Foo(x, default)` while a token parameter is in scope | `Foo(x, ct)` | FR0118 | CA2016 |
+| CR0198 | correctness | v | | | `request.Headers.Add("PLAID-SECRET", secret)`, `req.Headers.Add(h, v)` in a file that never sets `AllowAutoRedirect = false` | note: a redirect carries the header | FR0183 | |
+| CR0199 | correctness | | | | `new HttpClient()`, `WebRequest.Create(url)`, `new WebClient()` in a file that never turns redirects off | note, off by default | FR0184 | |
 | CR0197 | correctness | v | | | `try { t.Wait(); } catch (IOException) { … }` — also `Result`, `Task.WaitAll` — with no clause for `AggregateException` | note; editor: a clause for the wrapper filtered on `InnerException` or `GetBaseException()`, or the removal of a clause nothing reaches | — | — |
 
 Guards.

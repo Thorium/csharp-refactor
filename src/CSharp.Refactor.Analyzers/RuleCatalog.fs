@@ -318,6 +318,15 @@ let rules: Rule list =
         rule "CR0195" Category.Correctness "an assignment stands where a condition compares"
         rule "CR0196" Category.Correctness "a value that is never null is compared with null"
         rule "CR0197" Category.Correctness "a catch around a blocking wait never sees the task's exception"
+        rule
+            "CR0198"
+            Category.Correctness
+            "a header that may hold a secret is added where redirects are followed, which carry it to another host"
+        rule
+            "CR0199"
+            Category.Correctness
+            "a request maker follows redirects, which carry the body and custom headers to another host"
+        |> off
     ]
 
 let private byCode = rules |> List.map (fun r -> r.Code, r) |> Map.ofList

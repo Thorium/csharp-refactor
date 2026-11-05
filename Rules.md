@@ -160,6 +160,8 @@ a section, and its category and default state match the code.
 | CR0195 | Correctness | v | | | | `if (done = false)`, `if (a = b)`, `c && (a = b)`, `where ex = true` — an assignment standing as a condition | `if (done == false)` (the editor also offers `if (!done)`), `if (a == b)`; a note for an assignment that runs something (`if (found = map.TryGetValue(k, out v))`) |
 | CR0196 | Correctness | v | | | | `if (d == null) return;`, `d != null ? a : b`, `d == null || p` on a `DateTime`, `decimal`, `Guid`, `int`, an enum — never null | the dead test goes: the statement removed or its live branch kept, `a`, `p`; a note elsewhere |
 | CR0197 | Correctness | v | | | | `try { t.Wait(); } catch (IOException) { … }` — the task's exception arrives wrapped in an `AggregateException` | note; the editor offers `catch (AggregateException ae) when (ae.InnerException is IOException)`, the same on `GetBaseException()`, or the removal of a clause nothing reaches |
+| CR0198 | Correctness | v | | | | `request.Headers.Add("PLAID-SECRET", secret)`, `client.DefaultRequestHeaders.Add("X-Auth-Token", token)`, `req.Headers.Add(h, v)` in a file that never sets `AllowAutoRedirect = false` | note |
+| CR0199 | Correctness | | | | | `new HttpClient()`, `new HttpClientHandler()`, `WebRequest.Create(url)`, `new WebClient()`, `services.AddHttpClient("x")` in a file that never turns redirects off | note |
 
 \*) Enabled by default. A blank cell means the rule is off until
 `.editorconfig` turns it on (`dotnet_diagnostic.CRxxxx.severity = suggestion`)
@@ -765,7 +767,17 @@ still both run, only the stored value is one. F# twin: FR0154.
 `Lazy` caches a faulted value for good: the first failure becomes every
 later caller's answer. Note: evict on failure, or cache a factory that
 retries. Gated on the dictionary's value type argument; a factory that
-merely throws caches nothing and is not reported. F# twin: FR0152.
+merely throws caches nothing and is not reported. Quiet where the file
+removes entries from that dictionary, compared by symbol: `TryRemove` or
+`Remove` on it, directly or through a cast
+(`((ICollection<KeyValuePair<K, V>>)cache).Remove(pair)`); whether the
+removal runs on a fault is not read. Also quiet where the scan cannot tell:
+the dictionary handed on (an argument, an alias, a returned value), a field
+or property that is not private or whose type has a part in another file, a
+dictionary-typed removal with no name (`Pick().TryRemove(k, out _)`), or a
+`GetOrAdd` with no name and any dictionary-typed removal in the file. A
+dictionary received as a parameter, with no removal beside it, is reported.
+F# twin: FR0152.
 
 ### CR0051 — correctness
 
@@ -830,10 +842,19 @@ Guards: exactly one `CancellationToken` parameter on the enclosing
 function (method, lambda or local function); the call resolves to a method
 whose parameter at that position is a `CancellationToken`; never inside a
 `catch` or `finally` (a cancelled operation must still roll back); never on
-`Task.Run`/`Task.Factory.StartNew`, where the token is a scheduling
-condition and an explicit `None` is the author choosing to always start
-the work; never where the token is already among the arguments; never in a
-call with named arguments; never where the `None` is bound to a name; never where a comment on the statement names the
+`Task.Run`, `StartNew`, `ContinueWith`, `ContinueWhenAll` or `ContinueWhenAny`
+by symbol, where the token is a scheduling condition and an explicit `None`
+is the author choosing to always start the work (the overloads taking a
+scheduler or options demand a token); never where the token is already among
+the arguments; never in a
+call with named arguments; never where the `None` is bound to a name; only
+where the work the call starts is waited for, as CR0189 reads it (a discard,
+or a task written to a store, was detached from the caller on purpose); never
+in a factory handed to `GetOrAdd`/`AddOrUpdate` (`GetOrAdd(k, (key, token) =>
+…, ct)`), whose value goes to every later caller, so one caller's token there
+fails the others when that caller cancels (a synchronous factory would be safe,
+and is refused with the rest; a `Lazy` factory takes no token parameter, so a
+call in it has none in scope); never where a comment on the statement names the
 choice (`None`, "cancel") or the call is the sole statement of a `try` whose
 `catch` swallows — a best-effort cleanup that a client disconnect must not
 cancel. F# twin: FR0118. Yields to CA2016.
@@ -2398,7 +2419,8 @@ is the function's own, not a field; the loop is not nested inside another
 loop of the same function (the outer loop is the author's granularity);
 the body is a block with at least one statement (an expression-bodied
 loop is a note); the loop is not inside a `finally` (nothing should throw
-there). Iterators are included; a token parameter defaulted to
+there), nor directly in a factory handed to `GetOrAdd`/`AddOrUpdate` (its
+value is shared: see CR0055). Iterators are included; a token parameter defaulted to
 `default` is included (the caller who passes one expects it honoured).
 
 ### CR0171 — correctness
@@ -2967,8 +2989,9 @@ that bound before. Guards: exactly one token parameter on the enclosing
 function (a lambda answers to its own); not in a `catch` or `finally`
 (cleanup must run after a cancel); not in a callback handed to a token's
 `Register`/`UnsafeRegister` (it runs because of the cancel: its own token
-parameter is already cancelled); not after an `IsCancellationRequested`
-read anywhere earlier in the function, but the condition of a loop around
+parameter is already cancelled); not in a factory handed to
+`GetOrAdd`/`AddOrUpdate` (its value is shared: see CR0055); not after an
+`IsCancellationRequested` read anywhere earlier in the function, but the condition of a loop around
 the call - `if (ct.IsCancellationRequested) { await
 log.WriteAsync("cancelled"); }`, a flush after `while
 (!ct.IsCancellationRequested) { … }`, code after `bool stopping =
@@ -2985,7 +3008,8 @@ to two); not a scheduler by symbol, however spelled
 silently), not a `params` call, no named arguments, the token not already
 among the arguments. A call starting work - a task, a value task, an async
 stream - gets the token only when that work is waited for: awaited
-(through `ConfigureAwait`), returned, `await foreach`'d, blocked on
+(through `ConfigureAwait`), returned (also as a lambda's value, or an arm of a
+conditional that is waited for), `await foreach`'d, blocked on
 (`.Result`, `.Wait()`, `.GetAwaiter().GetResult()`), handed to
 `Task.WhenAll`/`WhenAny`, or held in a local that is. `_ =
 bus.SendAsync(m);`, a bare `bus.SendAsync(m);`, a task stored in a field or
@@ -3291,3 +3315,31 @@ without a filter of its own; a clause whose body rethrows with `throw;`
 gets no copied clause (the copy would rethrow the wrapper, not the
 exception the clause names); nothing is offered across a preprocessor
 directive. `ValueTask.Result` unwraps and is not read.
+
+### CR0198 — correctness
+
+A header that may hold a secret, added in a file that never turns redirects
+off: `request.Headers.Add("PLAID-SECRET", secret)`,
+`client.DefaultRequestHeaders.Add("X-Auth-Token", token)`. .NET follows
+redirects by default, on modern .NET and .NET Framework alike. It drops
+`Authorization` on the way and keeps every other header, so a host that answers
+with a redirect sends the secret wherever it names. A constant name holding
+secret, token, password, api key, signature or credential counts, or the word
+key on its own. So does a name that isn't constant, as in a helper's
+`req.Headers.Add(h, v)`, because the caller may pass a secret. `Authorization`,
+idempotency keys and a response's headers stay quiet, and so does a file that sets
+`AllowAutoRedirect = false`. A library handed its `HttpClient` can't turn
+redirects off, so the note stays there: its docs have to ask callers to. A
+note, not a fix: a followed redirect becomes a failure the caller has to handle,
+and `HttpWebRequest` then returns a 3xx as an ordinary response. Test files are
+quiet.
+
+### CR0199 — correctness
+
+A request maker with redirects on, in a file that never turns them off:
+`new HttpClient()`, `HttpClientHandler`, `SocketsHttpHandler`,
+`WebRequest.Create`, `WebClient`, `AddHttpClient`. A redirect sends the body
+again on a 307 or 308, and custom headers on any redirect, to whatever host it
+names. Off by default: downloads and public pages are fine as they are, and this
+fires on most HTTP code. Turn it on for a code base that sends secrets or
+personal data. A note, not a fix, for the reasons under CR0198.

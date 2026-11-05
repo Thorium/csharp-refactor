@@ -110,7 +110,7 @@ let private recordStructs (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCo
             match n with
             | :? RecordDeclarationSyntax as r when
                 r.ClassOrStructKeyword.IsKind SyntaxKind.None
-                && r.AttributeLists.Count = 0
+                && Text.onlyAttributesNamed [ "Obsolete"; "DebuggerDisplay"; "Serializable" ] r.AttributeLists
                 && not (
                     r.Modifiers
                     |> Seq.exists (fun m -> m.IsKind SyntaxKind.AbstractKeyword || m.IsKind SyntaxKind.PartialKeyword)

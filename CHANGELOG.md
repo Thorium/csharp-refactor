@@ -4,7 +4,18 @@ The analyzers package, the `csharp-refactor` tool and both editor extensions sha
 
 ## 0.1.23
 
+- New rule CR0198 (correctness, note): a header that may hold a secret goes to wherever a redirect points, because .NET keeps every header but `Authorization`. A constant name such as `PLAID-SECRET` or `X-Auth-Token` counts, as does a name a helper is passed. A file that sets `AllowAutoRedirect = false` is quiet.
+- New rule CR0199 (correctness, note, off by default): any request maker that follows redirects, in a file that never turns them off.
 - CR0034 no longer flags a member of an anonymous row built in a `Queryable` projection (`select new { c.Name, Orders = db.Orders.Where(…) }`, then `foreach (var o in row.Orders)`): the provider translates the sub-query with the outer statement, so it is never one query per row. A row projected in memory and an entity property typed `IQueryable<T>` still fire.
+- CR0055, CR0189 and CR0170 leave a factory handed to `GetOrAdd`/`AddOrUpdate` alone (`GetOrAdd(k, (key, token) => …, ct)`): its value goes to every later caller, so the caller's token in it let one caller's cancellation fail the others.
+- CR0055 no longer rewrites `ct.Equals(CancellationToken.None)`, which made `ct.Equals(ct)`. CR0055, CR0189 and CR0170 read a parenthesised factory, a `Func` in a local, a local function and a method group as a `GetOrAdd` factory.
+- CR0055 and CR0189 count a void delegate's call as not waited for.
+- CR0198 reads a local bound once to a literal and `HeaderNames` as the header's name. CR0198 and CR0199 count only code that sets `AllowAutoRedirect` to false, not a comment or string.
+- Attributes that say nothing of the rewrite no longer stop it: CR0081 (`Obsolete`, `DebuggerDisplay`, `Serializable`), CR0172 (`Obsolete`, `EditorBrowsable`, `DebuggerBrowsable`).
+- CR0055 keeps a `CancellationToken.None` on work that is not waited for (a discard, a store), the rule CR0189 already followed.
+- CR0055 keeps a `CancellationToken.None` on `ContinueWith`, `ContinueWhenAll`, `ContinueWhenAny` and any spelling of `Task.Run`/`StartNew` (`factory.StartNew`), read by symbol as CR0189 does: their overloads with a scheduler or options demand a token, and that token decides whether the work runs.
+- CR0189 reads a call that is a lambda's value, or an arm of a conditional that is waited for, as waited for.
+- CR0050 stays quiet when the file removes from that dictionary (`TryRemove`, `Remove`, also through a cast to `ICollection<KeyValuePair<K, V>>`), and when the scan cannot tell: the dictionary handed on, a field or property that is not private or whose type has a part in another file, or a dictionary-typed removal with no name.
 
 ## 0.1.22
 

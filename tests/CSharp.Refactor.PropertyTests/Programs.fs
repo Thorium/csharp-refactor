@@ -269,6 +269,8 @@ type Shape =
     | NeverNullTest
     /// CR0197: a specific catch around a blocking wait
     | WrappedCatch
+    /// CR0198: a secret in a custom header
+    | SecretHeader
 
 let private parameters =
     variables |> Array.map (fun v -> $"int {v}") |> String.concat ", "
@@ -965,6 +967,8 @@ static string M{i}() {{ var local = \"{w}\"; int n = 3; return local + n + Name{
                 "    return n;"
                 "}"
             ]
+    | SecretHeader ->
+        $"static void M{i}(System.Net.Http.HttpRequestMessage r, string secret) => r.Headers.Add(\"X-Auth-Token\", secret);"
     | WrappedCatch ->
         lines
             [
@@ -1176,6 +1180,7 @@ let genShape (size: int) : Gen<Shape> =
             1, Gen.constant AssignmentTest
             1, Gen.constant NeverNullTest
             1, Gen.constant WrappedCatch
+            1, Gen.constant SecretHeader
         ]
 
 let genProgram: Gen<Shape list> =
@@ -1352,6 +1357,7 @@ let targetedCodes =
         "CR0195"
         "CR0196"
         "CR0197"
+        "CR0198"
     ]
 
 /// Instances of every shape, built by reflection over the union so a shape

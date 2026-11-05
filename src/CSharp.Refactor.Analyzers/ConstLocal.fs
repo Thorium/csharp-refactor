@@ -196,7 +196,7 @@ let private fields (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) 
     |> Seq.choose (fun node ->
         match node with
         | :? FieldDeclarationSyntax as fd when
-            fd.AttributeLists.Count = 0
+            Text.onlyAttributesNamed [ "Obsolete"; "EditorBrowsable"; "DebuggerBrowsable" ] fd.AttributeLists
             && fd.Modifiers |> Seq.exists (fun m -> m.IsKind SyntaxKind.StaticKeyword)
             && fd.Modifiers |> Seq.exists (fun m -> m.IsKind SyntaxKind.ReadOnlyKeyword)
             && not (fd.Modifiers |> Seq.exists (fun m -> m.IsKind SyntaxKind.ConstKeyword))

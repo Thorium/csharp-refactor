@@ -109,6 +109,7 @@
     <Compile Include="DateShapes.fs" />
     <Compile Include="DefectNotes.fs" />
     <Compile Include="ConditionDefects.fs" />
+    <Compile Include="RedirectExposure.fs" />
     <Compile Include="EnumerationMutation.fs" />
     <Compile Include="Analyzers.fs" />
     <Compile Include="References.fs" />

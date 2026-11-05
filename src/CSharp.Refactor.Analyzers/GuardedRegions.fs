@@ -694,6 +694,7 @@ let private tokenLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
         | Some(loop, body) ->
             match AsyncShapes.enclosingFunction loop with
             | None -> None
+            | Some fn when AsyncShapes.isSharedFactory fn -> None
             | Some fn ->
                 let token =
                     fn.Parameters

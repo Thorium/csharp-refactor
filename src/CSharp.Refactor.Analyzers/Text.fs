@@ -6,6 +6,17 @@ open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.Text
 
+/// Does the list carry only these attributes (short names, with or without the suffix)? Rules that rewrite a declaration
+/// read an attribute they don't know as a reason to leave it alone.
+let onlyAttributesNamed (names: string list) (lists: SyntaxList<Syntax.AttributeListSyntax>) =
+    lists
+    |> Seq.forall (fun list ->
+        list.Attributes
+        |> Seq.forall (fun attribute ->
+            let written = attribute.Name.ToString()
+            let name = written.Substring(written.LastIndexOf '.' + 1)
+            names |> List.exists (fun allowed -> name = allowed || name = allowed + "Attribute")))
+
 /// The source text of a span, as written.
 let textOf (tree: SyntaxTree) (span: TextSpan) : string = tree.GetText().ToString span
 

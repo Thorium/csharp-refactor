@@ -1112,3 +1112,21 @@ let ``CR0173 a chain is an arm a line, never a conditional nested on one line`` 
 
     Assert.Contains("return box is null ? \"\" : watermark ? \"\" : box;", fixedSource)
     Assert.DoesNotContain("(watermark", fixedSource)
+
+[<Fact>]
+let ``CR0172 reads past an attribute that says nothing of the value`` () =
+    let on (attribute: string) =
+        csharp
+            $"""
+            using System;
+            class MarkAttribute : Attribute {{ }}
+            static class C
+            {{
+                [{attribute}]
+                private static readonly int Limit = 3;
+                public static int Twice() => Limit * 2;
+            }}
+            """
+
+    Assert.Single(suggestCode "CR0172" (on "Obsolete")) |> ignore
+    Assert.Empty(suggestCode "CR0172" (on "Mark"))

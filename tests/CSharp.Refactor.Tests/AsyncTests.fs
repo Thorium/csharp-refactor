@@ -623,6 +623,397 @@ let ``CR0050 leaves a GetOrAdd whose factory only throws: an unknown country cac
 
     Assert.Empty(suggestCode "CR0050" source)
 
+[<Fact>]
+let ``CR0050 leaves a cache removing its entry through ICollection`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Concurrent;
+            using System.Collections.Generic;
+            using System.Threading.Tasks;
+            class KeyCache
+            {
+                readonly ConcurrentDictionary<string, Lazy<Task<int>>> fetches = new();
+                void Forget(string key, Lazy<Task<int>> fetch) =>
+                    ((ICollection<KeyValuePair<string, Lazy<Task<int>>>>)fetches).Remove(new KeyValuePair<string, Lazy<Task<int>>>(key, fetch));
+                public Task<int> Get(string key)
+                {
+                    Lazy<Task<int>> mine = null!;
+                    mine = new Lazy<Task<int>>(async () =>
+                    {
+                        try { return await Task.FromResult(1); }
+                        finally { Forget(key, mine); }
+                    });
+                    return fetches.GetOrAdd(key, mine).Value;
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0050" source)
+
+[<Fact>]
+let ``CR0050 leaves a dictionary a TryRemove or Remove empties, however it is spelled`` () =
+    for removal in
+        [
+            "cache.TryRemove(k, out _);"
+            "this.cache.TryRemove(k, out _);"
+            "(cache).TryRemove(k, out _);"
+            "((IDictionary<string, Task<int>>)cache).Remove(k);"
+            "(cache as IDictionary<string, Task<int>>)!.Remove(k);"
+        ] do
+        let source =
+            csharp
+                $$"""
+                using System.Collections.Concurrent;
+                using System.Collections.Generic;
+                using System.Threading.Tasks;
+                class C
+                {
+                    readonly ConcurrentDictionary<string, Task<int>> cache = new();
+                    public Task<int> Get(string k) => cache.GetOrAdd(k, _ => Task.FromResult(1));
+                    public void Evict(string k) { {{removal}} }
+                }
+                """
+
+        Assert.Empty(suggestCode "CR0050" source)
+
+[<Fact>]
+let ``CR0050 leaves a local or parameter removed in the same method`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Concurrent;
+            using System.Threading.Tasks;
+            class C
+            {
+                Task<int> Local(string k)
+                {
+                    var cache = new ConcurrentDictionary<string, Task<int>>();
+                    var t = cache.GetOrAdd(k, _ => Task.FromResult(1));
+                    if (t.IsFaulted) cache.TryRemove(k, out _);
+                    return t;
+                }
+                Task<int> Parameter(ConcurrentDictionary<string, Task<int>> cache, string k)
+                {
+                    var t = cache.GetOrAdd(k, _ => Task.FromResult(1));
+                    if (t.IsFaulted) cache.TryRemove(k, out _);
+                    return t;
+                }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0050" source)
+
+[<Fact>]
+let ``CR0050 reports a removal from another dictionary, a same-named field or parameter`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Concurrent;
+            using System.Threading.Tasks;
+            class Evicting
+            {
+                readonly ConcurrentDictionary<string, Task<int>> cache = new();
+                public Task<int> Get(string k) => cache.GetOrAdd(k, _ => Task.FromResult(1));
+                public void Evict(string k) => cache.TryRemove(k, out _);
+            }
+            class Keeping
+            {
+                readonly ConcurrentDictionary<string, Task<int>> cache = new();
+                readonly ConcurrentDictionary<string, int> counts = new();
+                public Task<int> Get(string k) => cache.GetOrAdd(k, _ => Task.FromResult(2));
+                public void Forget(string k) => counts.TryRemove(k, out _);
+            }
+            class Passed
+            {
+                public Task<int> Get(ConcurrentDictionary<string, Task<int>> cache, string k) =>
+                    cache.GetOrAdd(k, _ => Task.FromResult(3));
+                public void Evict(ConcurrentDictionary<string, Task<int>> cache, string k) =>
+                    cache.TryRemove(k, out _);
+            }
+            """
+
+    Assert.Equal<string list>(
+        [
+            "cache.GetOrAdd(k, _ => Task.FromResult(2))"
+            "cache.GetOrAdd(k, _ => Task.FromResult(3))"
+        ],
+        firedText source (suggestCode "CR0050" source)
+    )
+
+[<Fact>]
+let ``CR0050 refuses when the dictionary is handed on or a dictionary is emptied through something unnamed`` () =
+    for line in
+        [
+            "public ConcurrentDictionary<string, Task<int>> Exposed => cache;"
+            "public void Passed(string k) => Evict(cache, k);"
+            "public IDictionary<string, Task<int>> View() { IDictionary<string, Task<int>> view = cache; return view; }"
+            "public void Unnamed(string k) => Pick().TryRemove(k, out _);"
+            "public void Conditional(string k) => cache?.TryRemove(k, out _);"
+        ] do
+        let source =
+            csharp
+                $$"""
+                using System.Collections.Concurrent;
+                using System.Collections.Generic;
+                using System.Threading.Tasks;
+                class C
+                {
+                    readonly ConcurrentDictionary<string, Task<int>> cache = new();
+                    static ConcurrentDictionary<string, Task<int>> Pick() => new();
+                    static void Evict(ConcurrentDictionary<string, Task<int>> d, string k) { }
+                    public Task<int> Get(string k) => cache.GetOrAdd(k, _ => Task.FromResult(1));
+                    {{line}}
+                }
+                """
+
+        Assert.Empty(suggestCode "CR0050" source)
+
+[<Fact>]
+let ``CR0050 refuses a field of a partial type with another part in another file`` () =
+    let cache =
+        csharp
+            """
+            using System.Collections.Concurrent;
+            using System.Threading.Tasks;
+            partial class C
+            {
+                readonly ConcurrentDictionary<string, Task<int>> cache = new();
+                public Task<int> Get(string k) => cache.GetOrAdd(k, _ => Task.FromResult(1));
+            }
+            """
+
+    let evict =
+        csharp
+            """
+            partial class C
+            {
+                public void Evict(string k) => cache.TryRemove(k, out _);
+            }
+            """
+
+    Assert.Empty(suggestInProject false false "CR0050" [ "Cache.cs", cache; "Evict.cs", evict ])
+
+[<Fact>]
+let ``CR0050 still reports reads of the entries and a Remove on a string`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Concurrent;
+            using System.Threading.Tasks;
+            class C
+            {
+                readonly ConcurrentDictionary<string, Task<int>> cache = new();
+                public Task<int> Get(string k) => cache.GetOrAdd(k, _ => Task.FromResult(1));
+                public Task<int> Read(string k) => cache[k];
+                public void Write(string k) => cache[k] = Task.FromResult(2);
+                public int Count => cache.Count;
+                public int Keys() { var n = 0; foreach (var kv in cache) n++; return n; }
+                public string Trim(string s) => s.Trim().Remove(1);
+            }
+            """
+
+    fires 1 "CR0050" source |> ignore
+
+[<Fact>]
+let ``CR0050 reports a GetOrAdd on something unnamed unless a dictionary in the file is emptied`` () =
+    let head =
+        """
+        using System.Collections.Concurrent;
+        using System.Threading.Tasks;
+        class C
+        {
+            readonly ConcurrentDictionary<string, int> other = new();
+            static ConcurrentDictionary<string, Task<int>> Pick() => new();
+            public Task<int> Get(string k) => Pick().GetOrAdd(k, _ => Task.FromResult(1));
+            REST
+        }
+        """
+
+    fires 1 "CR0050" (head.Replace("REST", "")) |> ignore
+
+    Assert.Empty(
+        suggestCode "CR0050" (head.Replace("REST", "public void Evict(string k) => other.TryRemove(k, out _);"))
+    )
+
+// ---- CR0055 / CR0189 / CR0170: shared and detached work ----
+
+[<Fact>]
+let ``CR0055 keeps an explicit None on shared, stored or detached work`` () =
+    // one caller's token in a value every caller holds: that caller cancelling
+    // fails the others; work left running was detached from the caller on purpose
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Concurrent;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class KeyCache
+            {
+                readonly ConcurrentDictionary<string, Lazy<Task<int>>> fetches = new();
+                readonly ConcurrentDictionary<string, Task<int>> tasks = new();
+                Task<int> FetchAsync(string key, CancellationToken token) => Task.FromResult(key.Length);
+                Task<int> A(string key, CancellationToken ct) =>
+                    fetches.GetOrAdd(key, new Lazy<Task<int>>(() => FetchAsync(key, CancellationToken.None))).Value;
+                Task<int> B(string key, CancellationToken ct) =>
+                    tasks.GetOrAdd(key, FetchAsync(key, CancellationToken.None));
+                Task<int> C(string key, CancellationToken ct) =>
+                    tasks.GetOrAdd(key, _ => FetchAsync(key, CancellationToken.None));
+                Task<int> D(string key, CancellationToken ct) =>
+                    tasks.GetOrAdd(key, (k, token) => FetchAsync(k, CancellationToken.None), ct);
+                Task<int> E(string key, CancellationToken ct) =>
+                    tasks.GetOrAdd(key, async (k, token) => await FetchAsync(k, CancellationToken.None), ct);
+                Task<int> F(string key, CancellationToken ct) =>
+                    tasks.AddOrUpdate(key, (k, token) => FetchAsync(k, CancellationToken.None), (k, old, token) => old, ct);
+                void G(string key, CancellationToken ct) { tasks[key] = FetchAsync(key, CancellationToken.None); }
+                void H(string key, CancellationToken ct) { _ = FetchAsync(key, CancellationToken.None); }
+                void I(string key, CancellationToken ct) { tasks.TryAdd(key, FetchAsync(key, CancellationToken.None)); }
+                void J(string key, CancellationToken ct) { var running = FetchAsync(key, CancellationToken.None); GC.KeepAlive(running); }
+                Lazy<Task<int>> K(string key, CancellationToken ct) => new Lazy<Task<int>>(FetchAsync(key, CancellationToken.None));
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0055" source)
+
+[<Fact>]
+let ``CR0055 keeps an explicit None on a continuation or a scheduler, however spelled`` () =
+    // the overloads taking a scheduler or options demand a token, so the None
+    // is how the call reaches them; a cancelled token also skips the body
+    let source =
+        csharp
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                async Task A(Task t, CancellationToken ct) { await t.ContinueWith(_ => { }, CancellationToken.None); }
+                async Task B(Task t, CancellationToken ct) { await t.ContinueWith(_ => { }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default); }
+                async Task<int> D(Task<int> t, CancellationToken ct) => await t.ContinueWith(a => a.Result + 1, CancellationToken.None);
+                async Task E(Task[] ts, CancellationToken ct) { await Task.Factory.ContinueWhenAll(ts, _ => { }, CancellationToken.None); }
+                async Task F(Task[] ts, CancellationToken ct) { await Task.Factory.ContinueWhenAny(ts, _ => { }, CancellationToken.None); }
+                async Task G(TaskFactory f, CancellationToken ct) { await f.StartNew(() => { }, CancellationToken.None); }
+                async Task H(CancellationToken ct) { await System.Threading.Tasks.Task.Run(() => { }, CancellationToken.None); }
+                async Task I(CancellationToken ct) { await Task.Factory.StartNew(() => { }, CancellationToken.None); }
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0055" source)
+
+[<Fact>]
+let ``CR0055 replaces a None on a ContinueWith or Run of another type`` () =
+    let source =
+        csharp
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+            class Chain
+            {
+                public Task ContinueWith(int step, CancellationToken token) => Task.CompletedTask;
+                public Task Run(int step, CancellationToken token) => Task.CompletedTask;
+            }
+            class C
+            {
+                async Task A(Chain chain, CancellationToken ct) { await chain.ContinueWith(1, CancellationToken.None); }
+                async Task B(Chain chain, CancellationToken ct) { await chain.Run(1, CancellationToken.None); }
+            }
+            """
+
+    fires 2 "CR0055" source |> ignore
+
+[<Fact>]
+let ``CR0055 replaces a None on work waited for, a synchronous call and a token of the function's own`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Concurrent;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                readonly ConcurrentDictionary<string, Task<int>> tasks = new();
+                Task<int> FetchAsync(string key, CancellationToken token) => Task.FromResult(key.Length);
+                async Task<int> Awaited(CancellationToken ct) => await FetchAsync("awaited", CancellationToken.None);
+                Task<int> Returned(CancellationToken ct) { return FetchAsync("returned", CancellationToken.None); }
+                async Task<int> Held(CancellationToken ct) { var t = FetchAsync("held", CancellationToken.None); return await t; }
+                int Blocked(CancellationToken ct) => FetchAsync("blocked", CancellationToken.None).Result;
+                Task All(CancellationToken ct) => Task.WhenAll(FetchAsync("all", CancellationToken.None));
+                Task<int> Either(bool c, CancellationToken ct) => c ? FetchAsync("either", CancellationToken.None) : Task.FromResult(1);
+                void Sync(SemaphoreSlim gate, CancellationToken ct) { gate.Wait(CancellationToken.None); }
+                Func<CancellationToken, Task<int>> Own() => token => FetchAsync("own", CancellationToken.None);
+                Task<int> Inner(string key) =>
+                    tasks.GetOrAdd(key, _ =>
+                    {
+                        Task<int> Run(CancellationToken token) => FetchAsync("inner", CancellationToken.None);
+                        return Task.FromResult(1);
+                    });
+            }
+            """
+
+    fires 9 "CR0055" source |> ignore
+    fixAll "CR0055" source |> ignore
+
+[<Fact>]
+let ``CR0189 and CR0170 leave a GetOrAdd factory the caller's token is handed to`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Concurrent;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                readonly ConcurrentDictionary<string, Task<int>> tasks = new();
+                Task<int> FetchAsync(string key) => Task.FromResult(key.Length);
+                Task<int> FetchAsync(string key, CancellationToken token) => Task.FromResult(key.Length);
+                Task<int> Single(string key, CancellationToken ct) =>
+                    tasks.GetOrAdd(key, async (k, token) => await FetchAsync(k), ct);
+                Task<int> Loop(string key, CancellationToken ct) =>
+                    tasks.GetOrAdd(key, async (k, token) =>
+                    {
+                        var n = 0;
+                        while (n < 3) { n += await Task.FromResult(1); }
+                        return n;
+                    }, ct);
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0189" source)
+    Assert.Empty(suggestCode "CR0170" source)
+
+[<Fact>]
+let ``CR0189 and CR0170 still reach the same function outside a GetOrAdd`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                Task<int> FetchAsync(string key) => Task.FromResult(key.Length);
+                Task<int> FetchAsync(string key, CancellationToken token) => Task.FromResult(key.Length);
+                Func<string, CancellationToken, Task<int>> Single() =>
+                    async (k, token) => await FetchAsync(k);
+                Func<string, CancellationToken, Task<int>> Direct() =>
+                    (k, token) => FetchAsync(k);
+                Task<int> Either(bool c, CancellationToken ct) => c ? FetchAsync("either") : Task.FromResult(1);
+                Func<string, CancellationToken, Task<int>> Loop() =>
+                    async (k, token) =>
+                    {
+                        var n = 0;
+                        while (n < 3) { n += await Task.FromResult(1); }
+                        return n;
+                    };
+            }
+            """
+
+    fires 3 "CR0189" source |> ignore
+    fires 1 "CR0170" source |> ignore
+    fixAll "CR0189" source |> ignore
+
 // ---- CR0051 / CR0052 ----
 
 [<Fact>]
@@ -1213,3 +1604,92 @@ let ``CR0189 never picks the enclosing method as the token-taking overload`` () 
     let fixedSource = fixAll "CR0189" source
     Assert.Contains("WaitForExitAsync().WithCancellation(token)", fixedSource)
     Assert.Contains("public Task<int> Run(CancellationToken token) => LoadAsync(token);", fixedSource)
+
+[<Fact>]
+let ``CR0055 leaves a comparison with CancellationToken.None alone`` () =
+    let source =
+        csharp
+            """
+            using System.Threading;
+
+            class C
+            {
+                bool Same(CancellationToken ct) => ct.Equals(CancellationToken.None);
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0055" source)
+
+[<Fact>]
+let ``CR0055 leaves a GetOrAdd factory alone in parentheses too`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Concurrent;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            class C
+            {
+                ConcurrentDictionary<string, Task<int>> tasks = new();
+                Task<int> Fetch(string key, CancellationToken ct) => Task.FromResult(1);
+                Task<int> Get(string key, CancellationToken ct) =>
+                    tasks.GetOrAdd(key, ((string k, CancellationToken token) => Fetch(k, CancellationToken.None)), ct);
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0055" source)
+
+[<Fact>]
+let ``CR0189 gives no token to a task a void delegate drops`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            class C
+            {
+                Task Send(int n) => Task.CompletedTask;
+                Task Send(int n, CancellationToken ct) => Task.CompletedTask;
+                Action<CancellationToken> Dropped() => ct => Send(1);
+                Func<CancellationToken, Task> Returned() => ct => Send(1);
+            }
+            """
+
+    Assert.Single(suggestCode "CR0189" source) |> ignore
+
+[<Fact>]
+let ``CR0055 leaves a named GetOrAdd factory alone`` () =
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Concurrent;
+            using System.Threading;
+            using System.Threading.Tasks;
+
+            class C
+            {
+                ConcurrentDictionary<string, Task<int>> tasks = new();
+                Task<int> Fetch(string key, CancellationToken ct) => Task.FromResult(1);
+
+                Task<int> Local(string key, CancellationToken ct)
+                {
+                    Func<string, CancellationToken, Task<int>> make = (k, token) => Fetch(k, CancellationToken.None);
+                    return tasks.GetOrAdd(key, make, ct);
+                }
+
+                Task<int> LocalFunction(string key, CancellationToken ct)
+                {
+                    Task<int> Make(string k, CancellationToken token) => Fetch(k, CancellationToken.None);
+                    return tasks.GetOrAdd(key, Make, ct);
+                }
+
+                Task<int> Group(string key, CancellationToken ct) => tasks.GetOrAdd(key, Maker, ct);
+                Task<int> Maker(string k, CancellationToken token) => Fetch(k, CancellationToken.None);
+            }
+            """
+
+    Assert.Empty(suggestCode "CR0055" source)

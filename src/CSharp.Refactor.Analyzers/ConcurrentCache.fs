@@ -27,7 +27,14 @@
 /// CR0050 (correctness, note): `cd.GetOrAdd(k, factory)` whose value type
 /// is `Task`, `ValueTask` or `Lazy` caches a faulted value for good: the
 /// first failure is every later caller's answer. A factory that merely
-/// throws caches nothing and is not reported.
+/// throws caches nothing and is not reported. Quiet where the file removes
+/// entries from that dictionary, by symbol: `TryRemove` or `Remove` on it,
+/// directly or through a cast (`((ICollection&lt;KeyValuePair&lt;K, V&gt;&gt;)cache).Remove(pair)`);
+/// whether the removal runs on a fault is not read. Also quiet where the scan
+/// cannot tell: the dictionary handed on (an argument, an alias, a returned
+/// value), a field or property that is not private or whose type has a part in
+/// another file, a dictionary-typed removal with no name (`Pick().TryRemove(k, out _)`),
+/// or a `GetOrAdd` with no name and any dictionary-typed removal in the file.
 module CSharp.Refactor.ConcurrentCache
 
 open Microsoft.CodeAnalysis
@@ -229,7 +236,120 @@ let private checkThenStore (tree: SyntaxTree) (model: SemanticModel) : Suggestio
 
 // ---- CR0050 ----
 
+/// `e` without the parens, casts and `!` around it.
+[<TailCall>]
+let rec private uncast (e: ExpressionSyntax) : ExpressionSyntax =
+    match e with
+    | :? ParenthesizedExpressionSyntax as p -> uncast p.Expression
+    | :? CastExpressionSyntax as c -> uncast c.Expression
+    | :? PostfixUnaryExpressionSyntax as p when p.IsKind SyntaxKind.SuppressNullableWarningExpression ->
+        uncast p.Operand
+    | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.AsExpression -> uncast b.Left
+    | _ -> e
+
+/// The field, property, local or parameter a receiver names, past any cast;
+/// `None` for anything else, a call or an index.
+let private namedDictionary (model: SemanticModel) (receiver: ExpressionSyntax) : ISymbol option =
+    let named = uncast receiver
+
+    match named with
+    | :? IdentifierNameSyntax
+    | :? MemberAccessExpressionSyntax ->
+        let symbol = model.GetSymbolInfo(named).Symbol
+
+        match symbol with
+        | :? IFieldSymbol
+        | :? IPropertySymbol
+        | :? ILocalSymbol
+        | :? IParameterSymbol -> Some symbol.OriginalDefinition
+        | _ -> None
+    | _ -> None
+
+let private isDictionaryType (t: ITypeSymbol) =
+    match t with
+    | null -> false
+    | t ->
+        match t.OriginalDefinition.ToDisplayString() with
+        | "System.Collections.Concurrent.ConcurrentDictionary<TKey, TValue>"
+        | "System.Collections.Generic.IDictionary<TKey, TValue>"
+        | "System.Collections.IDictionary" -> true
+        | "System.Collections.Generic.ICollection<T>" -> t.ToDisplayString().Contains "KeyValuePair<"
+        | _ -> false
+
+/// Is this mention of the dictionary something other than reading or storing
+/// its entries, so that what happens to it is out of the scan's sight?
+let private handedOn (id: IdentifierNameSyntax) =
+    let mention: ExpressionSyntax =
+        match id.Parent with
+        | :? MemberAccessExpressionSyntax as q when obj.ReferenceEquals(q.Name, id) -> q
+        | _ -> id
+
+    match mention.Parent with
+    | :? MemberAccessExpressionSyntax as m -> not (obj.ReferenceEquals(m.Expression, mention))
+    | :? ElementAccessExpressionSyntax as a -> not (obj.ReferenceEquals(a.Expression, mention))
+    | :? ForEachStatementSyntax as f -> not (obj.ReferenceEquals(f.Expression, mention))
+    | :? AssignmentExpressionSyntax as a -> not (obj.ReferenceEquals(a.Left, mention))
+    | _ -> true
+
 let private cachedFailures (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
+    // built for the first capturing GetOrAdd, which most files never have
+    let removalReceivers =
+        lazy
+            (tree.GetRoot().DescendantNodes()
+             |> Seq.choose (fun n ->
+                 match n with
+                 | :? InvocationExpressionSyntax as inv ->
+                     match inv.Expression with
+                     | :? MemberAccessExpressionSyntax as ma when
+                         ma.Name.Identifier.ValueText = "TryRemove"
+                         || ma.Name.Identifier.ValueText = "Remove"
+                         ->
+                         Some ma.Expression
+                     | _ -> None
+                 | _ -> None)
+             |> List.ofSeq)
+
+    let identifiers =
+        lazy
+            (tree.GetRoot().DescendantNodes()
+             |> Seq.choose (fun n ->
+                 match n with
+                 | :? IdentifierNameSyntax as pid -> Some pid
+                 | _ -> None)
+             |> List.ofSeq)
+
+    let removedOrUnknown (receiver: ExpressionSyntax) =
+        let isDictionaryTyped (r: ExpressionSyntax) =
+            isDictionaryType (model.GetTypeInfo(r).Type)
+
+        match namedDictionary model receiver with
+        | None -> removalReceivers.Value |> List.exists isDictionaryTyped
+        | Some dictionary ->
+            let isIt (s: ISymbol) =
+                not (isNull s)
+                && SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, dictionary)
+
+            let outOfSight =
+                match dictionary with
+                | :? IFieldSymbol
+                | :? IPropertySymbol ->
+                    dictionary.DeclaredAccessibility <> Accessibility.Private
+                    || dictionary.ContainingType.DeclaringSyntaxReferences
+                       |> Seq.exists (fun d -> not (obj.ReferenceEquals(d.SyntaxTree, tree)))
+                | _ -> false
+
+            outOfSight
+            || removalReceivers.Value
+               |> List.exists (fun r ->
+                   match namedDictionary model r with
+                   | Some named -> isIt named
+                   | None -> isDictionaryTyped r)
+            || identifiers.Value
+               |> List.exists (fun id ->
+                   id.Identifier.ValueText = dictionary.Name
+                   && handedOn id
+                   && isIt (model.GetSymbolInfo(id).Symbol))
+
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
         match n with
@@ -254,7 +374,7 @@ let private cachedFailures (tree: SyntaxTree) (model: SemanticModel) : Suggestio
                                 | _ -> false
                             | _ -> false
 
-                        if onlyThrows then
+                        if onlyThrows || removedOrUnknown m.Expression then
                             None
                         else
                             Some(

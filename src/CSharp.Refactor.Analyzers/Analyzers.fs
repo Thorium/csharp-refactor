@@ -175,6 +175,7 @@ module Rules =
             "DateShapes", DateShapes.analyze
             "DefectNotes", DefectNotes.analyze
             "ConditionDefects", ConditionDefects.analyze
+            "RedirectExposure", RedirectExposure.analyze
             "EnumerationMutation", EnumerationMutation.analyze
         ]
 
