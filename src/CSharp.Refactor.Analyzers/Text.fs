@@ -15,7 +15,9 @@ let onlyAttributesNamed (names: string list) (lists: SyntaxList<Syntax.Attribute
         |> Seq.forall (fun attribute ->
             let written = attribute.Name.ToString()
             let name = written.Substring(written.LastIndexOf '.' + 1)
-            names |> List.exists (fun allowed -> name = allowed || name = allowed + "Attribute")))
+
+            names
+            |> List.exists (fun allowed -> name = allowed || name = allowed + "Attribute")))
 
 /// The source text of a span, as written.
 let textOf (tree: SyntaxTree) (span: TextSpan) : string = tree.GetText().ToString span

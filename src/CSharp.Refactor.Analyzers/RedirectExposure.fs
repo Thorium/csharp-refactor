@@ -187,10 +187,7 @@ let private calledClient (inv: InvocationExpressionSyntax) (m: IMethodSymbol) =
     | _ -> None
 
 let analyze (tree: SyntaxTree) (model: SemanticModel) (_: RuleContext) : Suggestion list =
-    if
-        Text.isTestFileIn model.Compilation tree
-        || redirectsOff tree
-    then
+    if Text.isTestFileIn model.Compilation tree || redirectsOff tree then
         []
     else
         tree.GetRoot().DescendantNodes()

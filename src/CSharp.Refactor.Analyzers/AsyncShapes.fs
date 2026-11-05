@@ -1082,7 +1082,8 @@ let private taskWaitedFor (model: SemanticModel) (body: SyntaxNode) (call: Expre
         | :? LambdaExpressionSyntax as l ->
             obj.ReferenceEquals(l.ExpressionBody, e)
             && (match model.GetTypeInfo(l).ConvertedType with
-                | :? INamedTypeSymbol as d when not (isNull d.DelegateInvokeMethod) -> not d.DelegateInvokeMethod.ReturnsVoid
+                | :? INamedTypeSymbol as d when not (isNull d.DelegateInvokeMethod) ->
+                    not d.DelegateInvokeMethod.ReturnsVoid
                 | _ -> true)
         | :? ConditionalExpressionSyntax as c when depth < 3 && not (obj.ReferenceEquals(c.Condition, e)) ->
             consumed (depth + 1) c
@@ -1158,7 +1159,7 @@ let isSharedFactory (fn: Function) =
                 inv.ArgumentList.Arguments
                 |> Seq.exists (fun a ->
                     match a.Expression with
-                    | :? IdentifierNameSyntax as id -> id.Identifier.ValueText = name
+                    | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = name
                     | _ -> false)
             | _ -> false)
 
@@ -1278,7 +1279,9 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                                 | :? IMethodSymbol as m ->
                                     let i = inv.ArgumentList.Arguments.IndexOf arg
                                     // `ct.Equals(CancellationToken.None)` asks about the value
-                                    m.Name <> "Equals" && i < m.Parameters.Length && isTokenType m.Parameters.[i].Type
+                                    m.Name <> "Equals"
+                                    && i < m.Parameters.Length
+                                    && isTokenType m.Parameters.[i].Type
                                 | _ -> false
 
                             // work started and not waited for is the author's to
