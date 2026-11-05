@@ -101,6 +101,8 @@ type CSharpRefactorCodeFixProvider() =
                         let ctx =
                             { Context.forTree options model.Compilation tree false with
                                 References = Some(References.oracle document.Project.Solution tree)
+                                ConsumerStructHostile =
+                                    Some(References.consumerStructHostile document.Project.Solution document.Project)
                                 Mentions = Some(References.mentions document.Project.Solution document.Project)
                             }
 
@@ -113,6 +115,12 @@ type CSharpRefactorCodeFixProvider() =
                                 let theirs =
                                     { Context.forTree options theirModel.Compilation theirTree false with
                                         References = Some(References.oracle flavor.Solution theirTree)
+                                        ConsumerStructHostile =
+                                            Some(
+                                                References.consumerStructHostile
+                                                    document.Project.Solution
+                                                    document.Project
+                                            )
                                         Mentions = Some(References.mentions flavor.Solution flavor)
                                     }
 

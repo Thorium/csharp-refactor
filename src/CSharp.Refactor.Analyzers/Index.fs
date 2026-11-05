@@ -418,6 +418,20 @@ let private build (compilation: Compilation) : CompilationIndex =
                         | _ -> ()
             | _ -> ()
 
+            // a class-constrained type argument the compiler inferred: services.AddSingleton(settings) spells no generic name
+            match n with
+            | :? InvocationExpressionSyntax as call ->
+                match m.GetSymbolInfo(call).Symbol with
+                | :? IMethodSymbol as ms when ms.IsGenericMethod ->
+                    Seq.iter2
+                        (fun (p: ITypeParameterSymbol) (a: ITypeSymbol) ->
+                            if p.HasReferenceTypeConstraint then
+                                addType hostile a)
+                        ms.TypeParameters
+                        ms.TypeArguments
+                | _ -> ()
+            | _ -> ()
+
             // a boxing conversion or an expression-tree position of any expression
             match n with
             | :? ExpressionSyntax as e when not (e :? TypeSyntax) ->
@@ -568,6 +582,10 @@ let identityUsed (index: CompilationIndex) (t: ITypeSymbol) = index.IdentityType
 let isDerivedFrom (index: CompilationIndex) (t: ITypeSymbol) = index.DerivedFrom.Contains(key t)
 let structHostile (index: CompilationIndex) (t: ITypeSymbol) = index.StructHostile.Contains(key t)
 let formatted (index: CompilationIndex) (t: ITypeSymbol) = index.FormattedTypes.Contains(key t)
+
+/// The full names of the struct-hostile types, to compare across compilations: another project sees a type as metadata.
+let structHostileNames (index: CompilationIndex) =
+    index.StructHostile |> Seq.map (fun s -> s.ToDisplayString()) |> Set.ofSeq
 
 let constructionsOf (index: CompilationIndex) (t: ITypeSymbol) =
     match index.Constructions.TryGetValue(key t) with

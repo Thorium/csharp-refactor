@@ -2,6 +2,10 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
 
+## 0.1.24
+
+- CR0081 reads inferred `class`-constrained type arguments, and looks in the C# projects referencing the type too: `readonly record struct` stopped `AddSingleton(settings)` compiling.
+
 ## 0.1.23
 
 - New rule CR0198 (correctness, note): a header that may hold a secret goes to wherever a redirect points, because .NET keeps every header but `Authorization`. A constant name such as `PLAID-SECRET` or `X-Auth-Token` counts, as does a name a helper is passed. A file that sets `AllowAutoRedirect = false` is quiet.

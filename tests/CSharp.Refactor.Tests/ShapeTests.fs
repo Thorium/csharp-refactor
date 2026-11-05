@@ -349,6 +349,43 @@ let ``CR0081 holds a record another file uses by null, as, coalesce, conditional
         ] do
         Assert.Empty(suggestInProject false false "CR0081" [ "Small.cs", small; "U.cs", other ])
 
+[<Fact>]
+let ``CR0081 holds a record given to a class-constrained parameter, the type argument inferred`` () =
+    let small = "record Small(int X);"
+
+    for other in
+        [
+            "class U { static T Id<T>(T x) where T : class => x; Small M(Small s) => Id(s); }"
+            // an extension method, called on its receiver, as AddSingleton is
+            csharp
+                """
+                static class Registry { public static string Keep<T>(this string services, T value) where T : class => services; }
+                class U { string M(Small s) => "services".Keep(s); }
+                """
+        ] do
+        Assert.Empty(suggestInProject false false "CR0081" [ "Small.cs", small; "U.cs", other ])
+
+    // a parameter that takes anything is no reason
+    Assert.Single(
+        suggestInProject
+            false
+            false
+            "CR0081"
+            [
+                "Small.cs", small
+                "U.cs", "class U { static T Id<T>(T x) => x; Small M(Small s) => Id(s); }"
+            ]
+    )
+    |> ignore
+
+[<Theory>]
+[<InlineData("CompletionSettings")>]
+[<InlineData("RetryOptions")>]
+[<InlineData("Point")>]
+let ``CR0081 goes by uses, and a type's name is no reason either way`` (name: string) =
+    Assert.Single(suggestInProject false false "CR0081" [ "Small.cs", $"record {name}(int X);" ])
+    |> ignore
+
 // ---- CR0082 ----
 
 [<Fact>]

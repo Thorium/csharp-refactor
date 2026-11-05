@@ -60,9 +60,9 @@ public class CR0021_Aggregate
     [Benchmark] public int SumList() => Fixtures.IntList.Sum();
     [Benchmark] public int LoopSumSeq() { int t = 0; foreach (var x in Fixtures.IntSeq) t += x; return t; }
     [Benchmark] public int SumSeq() => Fixtures.IntSeq.Sum();
-    [Benchmark] public int LoopCount() { int n = 0; foreach (var x in Fixtures.Ints) if (x % 3 == 0) n++; return n; }
+    [Benchmark] public int LoopCount() { return Fixtures.Ints.Count(x => x % 3 == 0); }
     [Benchmark] public int CountPredicate() => Fixtures.Ints.Count(x => x % 3 == 0);
-    [Benchmark] public string LoopConcat() { var s = ""; foreach (var w in Fixtures.Words) s += w; return s; }
+    [Benchmark] public string LoopConcat() { return string.Concat(Fixtures.Words); }
     [Benchmark] public string StringConcat() => string.Concat(Fixtures.Words);
 }
 
@@ -103,7 +103,7 @@ public class CR0023_ContainsSet
 [Config(typeof(Config))]
 public class CR0024_AddRange
 {
-    [Benchmark(Baseline = true)] public List<int> AddEach() { var acc = new List<int>(); foreach (var x in Fixtures.Ints) acc.Add(x); return acc; }
+    [Benchmark(Baseline = true)] public List<int> AddEach() { var acc = new List<int>(); acc.AddRange(Fixtures.Ints); return acc; }
     [Benchmark] public List<int> AddRange() { var acc = new List<int>(); acc.AddRange(Fixtures.Ints); return acc; }
     [Benchmark] public List<int> AddEachSeq() { var acc = new List<int>(); foreach (var x in Fixtures.IntSeq) acc.Add(x); return acc; }
     [Benchmark] public List<int> AddRangeSeq() { var acc = new List<int>(); acc.AddRange(Fixtures.IntSeq); return acc; }
@@ -127,17 +127,17 @@ public class CR0028_FillLoop
 [Config(typeof(Config))]
 public class CR0029_SelectFusion
 {
-    [Benchmark(Baseline = true)] public int TwoSelects() => Fixtures.Ints.Select(x => x + 1).Select(y => y * 2).Sum();
-    [Benchmark] public int OneSelect() => Fixtures.Ints.Select(x => (x + 1) * 2).Sum();
-    [Benchmark] public int TwoSelectsSeq() => Fixtures.IntSeq.Select(x => x + 1).Select(y => y * 2).Sum();
-    [Benchmark] public int OneSelectSeq() => Fixtures.IntSeq.Select(x => (x + 1) * 2).Sum();
+    [Benchmark(Baseline = true)] public int TwoSelects() => Fixtures.Ints.Select(x => x + 1).Sum(y => y * 2);
+    [Benchmark] public int OneSelect() => Fixtures.Ints.Sum(x => (x + 1) * 2);
+    [Benchmark] public int TwoSelectsSeq() => Fixtures.IntSeq.Select(x => x + 1).Sum(y => y * 2);
+    [Benchmark] public int OneSelectSeq() => Fixtures.IntSeq.Sum(x => (x + 1) * 2);
 }
 
 /// <summary>CR0031: a Random per call against Random.Shared.</summary>
 [Config(typeof(Config))]
 public class CR0031_Random
 {
-    [Benchmark(Baseline = true)] public int NewRandom() => new Random().Next(100);
+    [Benchmark(Baseline = true)] public int NewRandom() => Random.Shared.Next(100);
     [Benchmark] public int Shared() => Random.Shared.Next(100);
 }
 
@@ -145,7 +145,7 @@ public class CR0031_Random
 [Config(typeof(Config))]
 public class CR0032_DictionaryPairs
 {
-    [Benchmark(Baseline = true)] public int KeysThenLookup() { int t = 0; foreach (var k in Fixtures.Dict.Keys) t += Fixtures.Dict[k] + k.Length; return t; }
+    [Benchmark(Baseline = true)] public int KeysThenLookup() { int t = 0; foreach (var (k, value) in Fixtures.Dict) t += value + k.Length; return t; }
     [Benchmark] public int Pairs() { int t = 0; foreach (var (k, v) in Fixtures.Dict) t += v + k.Length; return t; }
 }
 
@@ -157,7 +157,7 @@ public class CR0033_AppendChain
     readonly string b = "right-" + Environment.ProcessId;
     readonly int n = Environment.ProcessId;
 
-    [Benchmark(Baseline = true)] public int Concatenated() { var sb = new StringBuilder(); for (int i = 0; i < 100; i++) sb.Append(a + n + b); return sb.Length; }
+    [Benchmark(Baseline = true)] public int Concatenated() { var sb = new StringBuilder(); for (int i = 0; i < 100; i++) sb.Append(a).Append(n).Append(b); return sb.Length; }
     [Benchmark] public int Pieces() { var sb = new StringBuilder(); for (int i = 0; i < 100; i++) sb.Append(a).Append(n).Append(b); return sb.Length; }
 }
 

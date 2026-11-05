@@ -787,6 +787,9 @@ let private analyzeProject
     // references are searched once, not once per half
     let solutionOracle = References.solutionOracle project.Solution
 
+    let consumerStructHostile =
+        References.consumerStructHostile project.Solution project
+
     // the literals of the other projects (a test asserting on a message), for
     // the analyzer run and the tool's own pass alike
     let mentions = References.mentions project.Solution project
@@ -922,6 +925,7 @@ let private analyzeProject
                         ApiChanges = c.ApiChanges && not held
                         // callers in other files and projects, for the cross-file edit sets
                         References = Some(solutionOracle tree)
+                        ConsumerStructHostile = Some consumerStructHostile
                         Mentions = Some mentions
                     }
 

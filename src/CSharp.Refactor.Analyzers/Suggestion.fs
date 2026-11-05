@@ -88,6 +88,10 @@ type RuleContext =
         /// an editor without a solution have `None`, and a rule then
         /// rewrites callers in its own file only, or stands down.
         References: (ISymbol -> ReferenceSite list) option
+        /// Does a project referencing this one use the type in a way a struct can't take (boxed, null-tested, a
+        /// `class`-constrained type argument)? The tool and the fix provider answer; the compiler has `None`, and sees
+        /// its own compilation only.
+        ConsumerStructHostile: (ITypeSymbol -> bool) option
         /// The literals of the host's solution beyond this compilation —
         /// the tool and the fix provider answer, the compiler has `None`.
         Mentions: TextMentions option
@@ -149,6 +153,7 @@ module RuleContext =
                 Microsoft.CodeAnalysis.CSharp.LanguageVersionFacts.MapSpecifiedToEffectiveVersion
                     Microsoft.CodeAnalysis.CSharp.LanguageVersion.Latest
             References = None
+            ConsumerStructHostile = None
             Mentions = None
         }
 

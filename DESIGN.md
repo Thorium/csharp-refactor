@@ -930,7 +930,9 @@ Guards.
   bytes; no inheritance either way; no interface beyond the compiler's
   `IEquatable<T>`; not used as `T?` anywhere (that spelling would change from
   a nullable reference to `Nullable<T>`), not compared with `null`, not boxed
-  to `object`/an interface, not `lock`ed; `readonly record struct` needs C# 10;
+  to `object`/an interface, not `lock`ed, not a type argument (spelled or
+  inferred) of a `class`-constrained parameter, in this compilation or a C#
+  project referencing it; `readonly record struct` needs C# 10;
   measured on the allocation axis.
 - **CR0082** — `Tuple<…>` typed; private/internal members and fields (a
   public signature is API); `Item1..ItemN` names are shared by `ValueTuple`

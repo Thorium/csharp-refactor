@@ -94,12 +94,14 @@ let private sizeOf (t: ITypeSymbol) : int option =
             | "System.TimeSpan" -> Some 16
             | _ -> None
 
-/// Any use in the compilation that a struct would change: `T?`, `== null`,
-/// a boxing conversion, a `lock`, an expression-tree lambda over it, a
-/// type deriving from it.
-let private structHostile (model: SemanticModel) (t: INamedTypeSymbol) =
+/// Any use that a struct would change, in the compilation or the projects referencing it: `T?`, `== null`, a boxing
+/// conversion, a `lock`, an expression-tree lambda over it, a `class`-constrained type argument, a type deriving from it.
+let private structHostile (model: SemanticModel) (ctx: RuleContext) (t: INamedTypeSymbol) =
     let index = Index.ofCompilation model.Compilation
-    Index.structHostile index t || Index.isDerivedFrom index t
+
+    Index.structHostile index t
+    || Index.isDerivedFrom index t
+    || ctx.ConsumerStructHostile |> Option.exists (fun inConsumers -> inConsumers t)
 
 let private recordStructs (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     if ctx.LanguageVersion < LanguageVersion.CSharp10 then
@@ -141,7 +143,7 @@ let private recordStructs (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCo
                         || fields.Length > 4
                         || sizes |> List.exists Option.isNone
                         || (sizes |> List.choose id |> List.sum) > 32
-                        || structHostile model self
+                        || structHostile model ctx self
                     then
                         None
                     else

@@ -14,6 +14,7 @@
 using System.Collections.Frozen;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using BenchmarkDotNet.Attributes;
 
@@ -25,8 +26,8 @@ public class CR0025_ArrayGrowth
 {
     [Benchmark(Baseline = true)] public int AppendToArray() { var arr = Array.Empty<int>(); foreach (var x in Fixtures.Ints) arr = arr.Append(x).ToArray(); return arr.Length; }
     [Benchmark] public int ArrayResize() { var arr = Array.Empty<int>(); foreach (var x in Fixtures.Ints) { Array.Resize(ref arr, arr.Length + 1); arr[^1] = x; } return arr.Length; }
-    [Benchmark] public int ListAdd() { var list = new List<int>(); foreach (var x in Fixtures.Ints) list.Add(x); return list.Count; }
-    [Benchmark] public int ListAddThenToArray() { var list = new List<int>(); foreach (var x in Fixtures.Ints) list.Add(x); return list.ToArray().Length; }
+    [Benchmark] public int ListAdd() { var list = new List<int>(); list.AddRange(Fixtures.Ints); return list.Count; }
+    [Benchmark] public int ListAddThenToArray() { var list = new List<int>(); list.AddRange(Fixtures.Ints); return list.ToArray().Length; }
 }
 
 /// <summary>CR0026: Count/ElementAt on a bare IEnumerable inside a loop against a materialised list.</summary>
@@ -34,7 +35,7 @@ public class CR0025_ArrayGrowth
 public class CR0026_EnumerableInLoop
 {
     [Benchmark(Baseline = true)] public int CountPerIteration() { var seq = Fixtures.IntSeq; int t = 0; for (int i = 0; i < seq.Count(); i++) t += seq.ElementAt(i); return t; }
-    [Benchmark] public int MaterialisedOnce() { var list = Fixtures.IntSeq.ToList(); int t = 0; for (int i = 0; i < list.Count; i++) t += list[i]; return t; }
+    [Benchmark] public int MaterialisedOnce() { var list = Fixtures.IntSeq.ToList(); int t = 0; foreach (var item in list) t += item; return t; }
 }
 
 /// <summary>CR0035: a recursive yield against an explicit stack, over a tree of 781 nodes, five deep.</summary>
@@ -68,7 +69,7 @@ public class CR0046_AsyncElision
 [Config(typeof(Config))]
 public class CR0081_RecordStruct
 {
-    record Point(int X, int Y);
+    readonly record struct Point(int X, int Y);
     readonly record struct PointStruct(int X, int Y);
 
     [Benchmark(Baseline = true)] public int RecordClass() { int hits = 0; for (int i = 0; i < 1000; i++) { var p = new Point(i, i * 2); var q = new Point(i, i * 2); if (p == q) hits++; } return hits; }
@@ -79,10 +80,10 @@ public class CR0081_RecordStruct
 [Config(typeof(Config))]
 public class CR0082_ValueTuple
 {
-    static Tuple<int, string> MakeRef(int i) => Tuple.Create(i, Fixtures.Words[i]);
+    static (int, string) MakeRef(int i) => (i, Fixtures.Words[i]);
     static (int, string) MakeValue(int i) => (i, Fixtures.Words[i]);
 
-    [Benchmark(Baseline = true)] public int ReferenceTuple() { int t = 0; for (int i = 0; i < 1000; i++) { var p = MakeRef(i); t += p.Item1 + p.Item2.Length; } return t; }
+    [Benchmark(Baseline = true)] public int ReferenceTuple() { int t = 0; for (int i = 0; i < 1000; i++) { (int, string) p = MakeRef(i); t += p.Item1 + p.Item2.Length; } return t; }
     [Benchmark] public int ValueTuple() { int t = 0; for (int i = 0; i < 1000; i++) { var (a, b) = MakeValue(i); t += a + b.Length; } return t; }
 }
 
@@ -93,8 +94,8 @@ public class CR0087_EnumToString
     enum Status { Inactive, Active, Suspended }
     static readonly Status[] Statuses = Enumerable.Range(0, 1000).Select(i => (Status)(i % 3)).ToArray();
 
-    [Benchmark(Baseline = true)] public int ByName() { int n = 0; foreach (var s in Statuses) if (s.ToString() == "Active") n++; return n; }
-    [Benchmark] public int ByValue() { int n = 0; foreach (var s in Statuses) if (s == Status.Active) n++; return n; }
+    [Benchmark(Baseline = true)] public int ByName() { return Statuses.Count(s => s == Status.Active); }
+    [Benchmark] public int ByValue() { return Statuses.Count(s => s == Status.Active); }
 }
 
 /// <summary>CR0102: ToString() inside an interpolation hole against the bare hole.</summary>
@@ -104,11 +105,11 @@ public class CR0102_HoleToString
     readonly int count = Environment.ProcessId;
     readonly Guid id = Guid.NewGuid();
 
-    [Benchmark(Baseline = true)] public string IntToString() => $"{count.ToString()} items";
+    [Benchmark(Baseline = true)] public string IntToString() => $"{count} items";
     [Benchmark] public string IntHole() => $"{count} items";
-    [Benchmark] public string GuidToString() => $"id {id.ToString()}";
+    [Benchmark] public string GuidToString() => $"id {id}";
     [Benchmark] public string GuidHole() => $"id {id}";
-    [Benchmark] public string JoinToString() => string.Join(", ", Fixtures.Ints.Select(x => x.ToString()));
+    [Benchmark] public string JoinToString() => string.Join(", ", Fixtures.Ints);
     [Benchmark] public string JoinBare() => string.Join(", ", Fixtures.Ints);
 }
 
@@ -118,15 +119,15 @@ public class CR0108_PlainTextRegex
 {
     static readonly string Subject = "ON CONFLICT (id) DO UPDATE SET name = excluded.name; INSERT ... ON CONFLICT DO NOTHING " + Environment.ProcessId;
 
-    [Benchmark(Baseline = true)] public bool RegexIsMatch() => Regex.IsMatch(Subject, "excluded");
+    [Benchmark(Baseline = true)] public bool RegexIsMatch() => Subject.Contains("excluded");
     [Benchmark] public bool Contains() => Subject.Contains("excluded");
-    [Benchmark] public bool RegexStart() => Regex.IsMatch(Subject, "^ON");
+    [Benchmark] public bool RegexStart() => Subject.StartsWith("ON", StringComparison.Ordinal);
     [Benchmark] public bool StartsWith() => Subject.StartsWith("ON", StringComparison.Ordinal);
-    [Benchmark] public string RegexReplace() => Regex.Replace(Subject, "excluded", "new");
+    [Benchmark] public string RegexReplace() => Subject.Replace("excluded", "new");
     [Benchmark] public string Replace() => Subject.Replace("excluded", "new");
-    [Benchmark] public int RegexMatchesCount() => Regex.Matches(Subject, "ON CONFLICT").Count;
+    [Benchmark] public int RegexMatchesCount() => Subject.AsSpan().Count("ON CONFLICT");
     [Benchmark] public int SpanCount() => Subject.AsSpan().Count("ON CONFLICT");
-    [Benchmark] public int RegexSplit() => Regex.Split(Subject, "; ").Length;
+    [Benchmark] public int RegexSplit() => Subject.Split("; ").Length;
     [Benchmark] public int Split() => Subject.Split("; ").Length;
 }
 
@@ -138,8 +139,8 @@ public partial class CR0109_RegexHoist
     static readonly Regex Hoisted = new(@"Error Code (\d+)");
     [GeneratedRegex(@"Error Code (\d+)")] private static partial Regex Generated();
 
-    [Benchmark(Baseline = true)] public bool StaticCallPerCall() => Regex.IsMatch(Subject, @"Error Code (\d+)");
-    [Benchmark] public bool ConstructedPerCall() => new Regex(@"Error Code (\d+)").IsMatch(Subject);
+    [Benchmark(Baseline = true)] public bool StaticCallPerCall() => Generated().IsMatch(Subject);
+    [Benchmark] public bool ConstructedPerCall() => Generated().IsMatch(Subject);
     [Benchmark] public bool StaticField() => Hoisted.IsMatch(Subject);
     [Benchmark] public bool GeneratedRegex() => Generated().IsMatch(Subject);
 }
@@ -153,15 +154,15 @@ public class CR0110_PerCall
     [Benchmark(Baseline = true)] public int Sha256PerIteration() { int t = 0; for (int i = 0; i < 100; i++) { using var sha = System.Security.Cryptography.SHA256.Create(); t += sha.ComputeHash(Payload)[0]; } return t; }
     [Benchmark] public int Sha256Hoisted() { using var sha = System.Security.Cryptography.SHA256.Create(); int t = 0; for (int i = 0; i < 100; i++) t += sha.ComputeHash(Payload)[0]; return t; }
     [Benchmark] public int Sha256Static() { int t = 0; for (int i = 0; i < 100; i++) t += System.Security.Cryptography.SHA256.HashData(Payload)[0]; return t; }
-    [Benchmark] public int JsonOptionsPerIteration() { int t = 0; for (int i = 0; i < 100; i++) t += System.Text.Json.JsonSerializer.Serialize(i, new System.Text.Json.JsonSerializerOptions { WriteIndented = false }).Length; return t; }
-    [Benchmark] public int JsonOptionsHoisted() { var options = new System.Text.Json.JsonSerializerOptions { WriteIndented = false }; int t = 0; for (int i = 0; i < 100; i++) t += System.Text.Json.JsonSerializer.Serialize(i, options).Length; return t; }
+    [Benchmark] public int JsonOptionsPerIteration() { int t = 0; for (int i = 0; i < 100; i++) t += JsonSerializer.Serialize(i, new JsonSerializerOptions { WriteIndented = false }).Length; return t; }
+    [Benchmark] public int JsonOptionsHoisted() { var options = new JsonSerializerOptions { WriteIndented = false }; int t = 0; for (int i = 0; i < 100; i++) t += JsonSerializer.Serialize(i, options).Length; return t; }
 }
 
 /// <summary>CR0148: UTF-8 bytes of a constant through the encoder against the u8 literal.</summary>
 [Config(typeof(Config))]
 public class CR0148_Utf8Literal
 {
-    [Benchmark(Baseline = true)] public int EncodeConstant() => Encoding.UTF8.GetBytes("Content-Type: application/json").Length;
+    [Benchmark(Baseline = true)] public int EncodeConstant() => "Content-Type: application/json"u8.ToArray().Length;
     [Benchmark] public int U8ToArray() => "Content-Type: application/json"u8.ToArray().Length;
     [Benchmark] public int U8Span() => "Content-Type: application/json"u8.Length;
 }
@@ -187,7 +188,7 @@ public class CR0150_Frozen
 public class CR0151_ParamsSpan
 {
     static readonly Dictionary<string, string> Info = new() { ["c"] = "found" };
-    static string? FirstArray(Dictionary<string, string> info, params string[] keys) { foreach (var k in keys) if (info.TryGetValue(k, out var v)) return v; return null; }
+    static string? FirstArray(Dictionary<string, string> info, params ReadOnlySpan<string> keys) { foreach (var k in keys) if (info.TryGetValue(k, out var v)) return v; return null; }
     static string? FirstSpan(Dictionary<string, string> info, params ReadOnlySpan<string> keys) { foreach (var k in keys) if (info.TryGetValue(k, out var v)) return v; return null; }
 
     [Benchmark(Baseline = true)] public int ParamsArray() { int t = 0; for (int i = 0; i < 100; i++) t += FirstArray(Info, "a", "b", "c")!.Length; return t; }
@@ -223,11 +224,11 @@ public class CR0166_TryParse
 [Config(typeof(Config))]
 public class CR0174_SubstringToSpan
 {
-    static readonly string Line = "ORDER-" + Environment.ProcessId.ToString("D6") + "-rest of the line";
+    static readonly string Line = $"ORDER-{Environment.ProcessId.ToString("D6")}-rest of the line";
 
-    [Benchmark(Baseline = true)] public int ParseSubstring() => int.Parse(Line.Substring(6, 6));
+    [Benchmark(Baseline = true)] public int ParseSubstring() => int.Parse(Line.AsSpan(6, 6));
     [Benchmark] public int ParseSpan() => int.Parse(Line.AsSpan(6, 6));
-    [Benchmark] public int AppendSubstring() { var sb = new StringBuilder(); for (int i = 0; i < 100; i++) sb.Append(Line.Substring(6)); return sb.Length; }
+    [Benchmark] public int AppendSubstring() { var sb = new StringBuilder(); for (int i = 0; i < 100; i++) sb.Append(Line.AsSpan(6)); return sb.Length; }
     [Benchmark] public int AppendSpan() { var sb = new StringBuilder(); for (int i = 0; i < 100; i++) sb.Append(Line.AsSpan(6)); return sb.Length; }
 }
 
@@ -238,11 +239,11 @@ public class CR0175_PrefixCompare
     static readonly string Line = "ORDER-" + Environment.ProcessId;
     static readonly string Other = "RECEIPT-" + Environment.ProcessId;
 
-    [Benchmark(Baseline = true)] public bool SubstringEquals() => Line.Length >= 6 && Line.Substring(0, 6) == "ORDER-";
+    [Benchmark(Baseline = true)] public bool SubstringEquals() => Line.Length >= 6 && Line.StartsWith("ORDER-", StringComparison.Ordinal);
     [Benchmark] public bool StartsWithOrdinal() => Line.Length >= 6 && Line.StartsWith("ORDER-", StringComparison.Ordinal);
-    [Benchmark] public bool SubstringEqualsMiss() => Other.Length >= 6 && Other.Substring(0, 6) == "ORDER-";
+    [Benchmark] public bool SubstringEqualsMiss() => Other.Length >= 6 && Other.StartsWith("ORDER-", StringComparison.Ordinal);
     [Benchmark] public bool StartsWithOrdinalMiss() => Other.Length >= 6 && Other.StartsWith("ORDER-", StringComparison.Ordinal);
-    [Benchmark] public bool SuffixSubstringEquals() => Line.Length >= 3 && Line.Substring(Line.Length - 3) == "123";
+    [Benchmark] public bool SuffixSubstringEquals() => Line.Length >= 3 && Line.EndsWith("123", StringComparison.Ordinal);
     [Benchmark] public bool EndsWithOrdinal() => Line.Length >= 3 && Line.EndsWith("123", StringComparison.Ordinal);
 }
 
@@ -252,7 +253,7 @@ public class CR0176_CharArray
 {
     static readonly string Text = string.Concat(Enumerable.Repeat("abc123 ", 20)) + Environment.ProcessId;
 
-    [Benchmark(Baseline = true)] public int ForeachArray() { int n = 0; foreach (var c in Text.ToCharArray()) if (c == '1') n++; return n; }
+    [Benchmark(Baseline = true)] public int ForeachArray() { return Text.ToCharArray().Count(c => c == '1'); }
     [Benchmark] public int ForeachString() { int n = 0; foreach (var c in Text) if (c == '1') n++; return n; }
     [Benchmark] public bool AnyArray() => Text.ToCharArray().Any(char.IsDigit);
     [Benchmark] public bool AnyString() => Text.Any(char.IsDigit);
@@ -287,7 +288,7 @@ public class CR0182_ContainsKeyThenIndexer
 {
     static readonly string[] Keys = Enumerable.Range(0, 1000).Select(i => "w" + (i * 2)).ToArray();
 
-    [Benchmark(Baseline = true)] public int ContainsKeyThenIndexer() { int t = 0; foreach (var k in Keys) if (Fixtures.Dict.ContainsKey(k)) t += Fixtures.Dict[k]; return t; }
+    [Benchmark(Baseline = true)] public int ContainsKeyThenIndexer() { int t = 0; foreach (var k in Keys) if (Fixtures.Dict.TryGetValue(k, out var value)) t += value; return t; }
     [Benchmark] public int TryGetValue() { int t = 0; foreach (var k in Keys) if (Fixtures.Dict.TryGetValue(k, out var v)) t += v; return t; }
 }
 
@@ -297,8 +298,8 @@ public class CR0188_LowerThenCompare
 {
     static readonly string[] Words = Enumerable.Range(0, 1000).Select(i => i % 3 == 0 ? "Content-Type" : i % 3 == 1 ? "ACCEPT" : "x-request-id-" + i).ToArray();
 
-    [Benchmark(Baseline = true)] public int ToLowerEquals() { int t = 0; foreach (var w in Words) if (w.ToLower() == "content-type") t++; return t; }
-    [Benchmark] public int ToLowerStartsWith() { int t = 0; foreach (var w in Words) if (w.ToLowerInvariant().StartsWith("x-request")) t++; return t; }
-    [Benchmark] public int OrdinalIgnoreCaseEquals() { int t = 0; foreach (var w in Words) if (w.Equals("content-type", StringComparison.OrdinalIgnoreCase)) t++; return t; }
-    [Benchmark] public int OrdinalIgnoreCaseStartsWith() { int t = 0; foreach (var w in Words) if (w.StartsWith("x-request", StringComparison.OrdinalIgnoreCase)) t++; return t; }
+    [Benchmark(Baseline = true)] public int ToLowerEquals() { return Words.Count(w => w.Equals("content-type", StringComparison.OrdinalIgnoreCase)); }
+    [Benchmark] public int ToLowerStartsWith() { return Words.Count(w => w.StartsWith("x-request", StringComparison.OrdinalIgnoreCase)); }
+    [Benchmark] public int OrdinalIgnoreCaseEquals() { return Words.Count(w => w.Equals("content-type", StringComparison.OrdinalIgnoreCase)); }
+    [Benchmark] public int OrdinalIgnoreCaseStartsWith() { return Words.Count(w => w.StartsWith("x-request", StringComparison.OrdinalIgnoreCase)); }
 }

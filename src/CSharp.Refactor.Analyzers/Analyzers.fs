@@ -88,6 +88,7 @@ module Context =
             // (an oracle a host lends the analyzer is asked by the rules that read
             // only syntax of its sites: RuleContext.oracleFor)
             References = None
+            ConsumerStructHostile = None
             Mentions = None
         }
 

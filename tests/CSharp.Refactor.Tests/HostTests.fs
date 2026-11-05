@@ -456,3 +456,63 @@ let ``CR0069 leaves a message a test project asserts on, exactly or inside an in
                 Mentions = Some(References.mentions solution document.Project)
             }
     )
+
+/// CR0081 on a public record of a library, with one C# project referencing it.
+let private recordStructIn (consumerSource: string) =
+    use workspace = new AdhocWorkspace()
+
+    let lib =
+        workspace
+            .AddProject("Lib", LanguageNames.CSharp)
+            .WithCompilationOptions(
+                Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            )
+            .AddMetadataReferences
+            metadataReferences
+
+    let small =
+        lib.AddDocument("Small.cs", "namespace Lib; public record Small(int X);", filePath = "C:/fake/Lib/Small.cs")
+
+    let consumer =
+        small.Project.Solution
+            .AddProject("App", "App", LanguageNames.CSharp)
+            .WithCompilationOptions(
+                Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            )
+            .AddMetadataReferences(metadataReferences)
+            .AddProjectReference(ProjectReference small.Project.Id)
+            .AddDocument("App.cs", consumerSource, filePath = "C:/fake/App/App.cs")
+
+    let solution = consumer.Project.Solution
+    let document = solution.GetDocument small.Id
+    let tree = document.GetSyntaxTreeAsync().Result
+    let model = document.GetSemanticModelAsync().Result
+
+    let ctx =
+        { Context.forTree None model.Compilation tree false with
+            ApiChanges = true
+        }
+
+    let offered (ctx: CSharp.Refactor.RuleContext) =
+        Rules.all tree model ctx
+        |> List.filter (fun s -> s.Code = "CR0081")
+        |> List.length
+
+    offered ctx,
+    offered
+        { ctx with
+            ConsumerStructHostile = Some(References.consumerStructHostile solution document.Project)
+        }
+
+[<Theory>]
+[<InlineData("class U { static T Id<T>(T x) where T : class => x; Lib.Small M() => Id(new Lib.Small(1)); }")>]
+[<InlineData("class U { static T Id<T>(T x) where T : class => x; Lib.Small M(Lib.Small s) => Id<Lib.Small>(s); }")>]
+[<InlineData("class U { static bool M(Lib.Small s) => s == null; }")>]
+[<InlineData("class U { static Lib.Small M(object o) => o as Lib.Small; }")>]
+let ``CR0081 holds a public record another project can't take as a struct`` (consumer: string) =
+    // alone, the compilation can't tell
+    Assert.Equal((1, 0), recordStructIn consumer)
+
+[<Fact>]
+let ``CR0081 offers a public record its consumers would take as a struct`` () =
+    Assert.Equal((1, 1), recordStructIn "class U { static int M(Lib.Small s) => s.X; }")

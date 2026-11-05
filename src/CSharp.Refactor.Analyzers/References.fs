@@ -15,6 +15,21 @@ open Microsoft.CodeAnalysis.FindSymbols
 open CSharp.Refactor
 
 module References =
+    /// CR0081's question about the projects referencing `project`: does one use the type in a way a struct can't take? Their
+    /// indexes are built when a candidate first asks, and once, so a project with no candidate pays nothing.
+    let consumerStructHostile (solution: Solution) (project: Project) : ITypeSymbol -> bool =
+        let names =
+            lazy
+                (solution.GetProjectDependencyGraph().GetProjectsThatTransitivelyDependOnThisProject project.Id
+                 |> Seq.map solution.GetProject
+                 |> Seq.filter (fun p -> p.Language = LanguageNames.CSharp)
+                 |> Seq.map (fun p -> p.GetCompilationAsync().GetAwaiter().GetResult())
+                 |> Seq.filter (fun c -> not (isNull c))
+                 |> Seq.map (Index.ofCompilation >> Index.structHostileNames)
+                 |> Set.unionMany)
+
+        fun t -> names.Value.Contains(t.WithNullableAnnotation(NullableAnnotation.NotAnnotated).ToDisplayString())
+
     /// The oracle for every tree of one solution: a symbol's references are
     /// searched once, whichever file asks - the analyzer run and the tool's
     /// own pass alike, on as many threads as `--jobs` - and each tree is
