@@ -767,6 +767,47 @@ let ``returns and assignments every branch performs become one conditional; the 
     Assert.Contains("""string J(bool a, bool b) { return a ? "1" : b ? "2" : "3"; }""", fixedSource)
 
 [<Fact>]
+let ``CR0173 takes no else-if links on their own after an awaiting arm`` () =
+    // F#'s twin FR0029 hoisted `return` over the elif links after an
+    // awaiting arm and broke the build (0.8.50). Here a link is never a site
+    // of its own: the chain is taken from its head, and an arm of two
+    // statements keeps the whole if
+    let source =
+        csharp
+            """
+            using System.Threading.Tasks;
+            class C
+            {
+                async Task<string> Read(int status, Task<string> body)
+                {
+                    if (status == 401) return "refused";
+                    else if (status == 200)
+                    {
+                        var text = await body;
+                        return text;
+                    }
+                    else if (status >= 500) return "unavailable";
+                    else if (status >= 300) return "redirect";
+                    else return "other";
+                }
+
+                async Task<string> Plain(int status)
+                {
+                    await Task.Yield();
+                    if (status >= 500) return "unavailable";
+                    else if (status >= 300) return "redirect";
+                    else return "other";
+                }
+            }
+            """
+
+    // only Plain's chain, whole from its head
+    let fired = suggestCode "CR0173" source |> firedText source
+    let chain = Assert.Single fired
+    Assert.StartsWith("if (status >= 500)", chain)
+    Assert.EndsWith("""else return "other";""", chain)
+
+[<Fact>]
 let ``CR0173 keeps the if when a branch's out or pattern variable would reach a namesake in the member`` () =
     let source =
         csharp
