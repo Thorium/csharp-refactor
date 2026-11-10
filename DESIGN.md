@@ -47,8 +47,9 @@ Two things change when the language is C#, and they shape everything below:
 - **Microsoft already ships hundreds of C# rules** (CAxxxx, IDExxxx, SYSLIBxxxx).
   Many F# rules exist only because those never ran on F#. On C# we do not
   duplicate a rule that has a fix and is on by default; we implement a rule
-  Microsoft has note-only or off by default, and we stand down automatically
-  when the user has turned the Microsoft rule on. See
+  Microsoft has note-only or off by default, and under
+  `csharp_refactor.skip_microsoft_duplicates = true` we stand down when the
+  user has turned the Microsoft rule on. See
   [§7](#7-relationship-to-microsoft-analyzers).
 
 Rule codes are `CR0001`… (`CR` is unused by Microsoft, StyleCop `SA`, Sonar
@@ -79,7 +80,7 @@ family for readability, later rules append.
 | Apply tool | `csharp-refactor` (dotnet tool) | `MSBuildWorkspace` host: analyses a project/solution/directory/glob, applies non-overlapping fixes bottom-up, recompiles in memory per pass, builds at the end, reports (SARIF/HTML/CSV/JSON), ratchets (`--baseline`), serves MCP (`--mcp`). Same flag contract as `fsharp-refactor`. |
 | VS Code | `csharp-refactor-vscode` | Bundles the analyzer assembly; with consent wires it machine-wide (an MSBuild user `ImportBefore` props) or per project (`PackageReference`); commands to run the tool, write reports, review notes, create config. |
 | Visual Studio 2022/2026 | `CSharp.Refactor.vsix` | Ships the analyzer as a VSIX analyzer asset, so every C# project in the IDE gets the light bulbs with no project change and no build impact; a Tools menu drives the tool. No sidecar process. |
-| MCP | `csharp-refactor --mcp` | `analyze` (target, codes/categories, parseOnly, apply) and `list_rules` over stdio; one warm workspace across calls. |
+| MCP | `csharp-refactor --mcp` | `analyze` (target, codes/categories, parseOnly, apply) and `list_rules` over stdio; the process and MSBuild stay warm, each call loads its target afresh. |
 
 One version for all of them, in `Directory.Build.props`, released in lockstep.
 
@@ -127,8 +128,9 @@ imposes, all verified by the M0 spike:
 - **Roslyn version pin.** An analyzer compiles against ONE
   `Microsoft.CodeAnalysis.CSharp` version and loads in any host with that
   version or newer, binding at runtime to the host's copy. Pin the lowest
-  version whose syntax model covers the C# we need to read (C# 13: 4.12–4.14;
-  VS 17.12+, .NET 9 SDK+). The tool hosts its own newer Roslyn (5.x from the
+  version whose syntax model covers the C# we need to read. The pin is 4.14,
+  so the hosts are VS 17.14+ and .NET SDK 9.0.300+; an older compiler warns
+  CS9057 and loads no rule. The tool hosts its own newer Roslyn (5.x from the
   .NET 10 SDK) and loads the same analyzer assembly. Syntax kinds the pinned
   version does not name (C# 14 `field`, extension members) arrive as nodes
   whose kind the rule code has no case for; every walker treats an unknown
@@ -205,12 +207,10 @@ the target framework moniker: `Random.Shared` is offered when the member
 resolves in the references, `FrozenSet<T>` when the type does, `init` when
 `IsExternalInit` does, `[GeneratedRegex]` when the attribute does, `using var`
 when `LanguageVersion >= CSharp8`. Multi-targeted projects are swept
-narrowest first; on the wider passes a capability fix is guarded with the
-SDK-defined constant (`#if NET8_0_OR_GREATER`) only in a file that already
-uses `#if`, and a plain fix elsewhere with the all-frameworks build as the
-arbiter. `--no-if-defs` turns the pairing off. Unlike the F# tool there is no
-hunt for a project-defined constant: the SDK defines `NETx_0_OR_GREATER`
-for every C# project.
+narrowest first, and a fix is plain everywhere, with the all-frameworks
+build as the arbiter. No fix is paired with `#if NET8_0_OR_GREATER`: that
+pairing is not built, and `--no-if-defs`, which the F# tool uses to turn
+its own off, is accepted and has no effect.
 
 ## 5. Safety model
 
@@ -438,10 +438,11 @@ rule only reports. Guards follow each table; a rule ships with every guard
 listed, and a guard that cannot be proven from the typed tree stands the
 rule down rather than being dropped.
 
-Totals: 125 rules — correctness 57, performance 25, idiom 37, cosmetic 6;
-119 on by default (off: CR0006, CR0016, CR0089, CR0142, CR0155, and CR0088
-as v2; CR0028 decided by measurement; the §8.I rules are on but silent
-below their language level).
+The catalog as shipped, with each rule's category and default, is
+[Rules.md](Rules.md), which the tests pin to the code; this section is the
+design it started from and lacks the rules added since. CR0088 was designed
+here and is not built. The §8.I rules are on but silent below their
+language level.
 Priority: CR0034, CR0047, CR0061, CR0062, CR0066, CR0086, CR0107, CR0120,
 CR0122, CR0123, CR0125, CR0160, CR0161, CR0162, CR0163, CR0165, CR0169,
 CR0171, CR0190, CR0191, CR0192, CR0193, CR0194.

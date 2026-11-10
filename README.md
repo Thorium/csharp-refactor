@@ -10,7 +10,9 @@ The rules care about correctness, measured performance and clear idiomatic C# �
 - a command-line tool that applies them in bulk, build-verified
 
 Suggestions are `Info` severity: they mark an opportunity, not a defect, and
-never gate your build.
+never gate your build. The priority rules, the ones that point at likely
+defects, are warnings: see [Severity](#severity) for a project that treats
+warnings as errors.
 
 ---
 
@@ -21,7 +23,8 @@ The tool is fully offline: AI has been used to make it, but it doesn't use AI.
 ## Quick start
 
 Nothing to configure — the tool reads your project, reports what it would
-change, and only edits when you tell it to:
+change, and only edits when you tell it to. The tool runs on the .NET 10
+SDK; the projects it works on can target any framework:
 
 ```bash
 dotnet tool install --global csharp-refactor
@@ -38,14 +41,14 @@ csharp-refactor Your.csproj --api-changes
 If you don't want change public methods / API, drop `--api-changes`:
 
 ```bash
-csharp-refactor Your.fsproj
+csharp-refactor Your.csproj
 ```
 
 It refuses a compilation that does not already build, recompiles in memory
 after every pass, and builds the project for real at the end, putting the
 fixes back if that fails.
 
-#### For light bulbs while you type, see [VS Code / Ionide](#vs-code) and [Visual Studio](#visual-studio-2022--2026) IDE-plugin instructions below.
+#### For light bulbs while you type, see [VS Code](#vs-code) and [Visual Studio](#visual-studio-2022--2026) IDE-plugin instructions below.
 
 <img width="1044" height="297" alt="image" src="https://github.com/user-attachments/assets/762ff17d-2c58-4c8a-ae27-569117b88d4e" />
 
@@ -77,8 +80,32 @@ extension, Rider — loads it by itself:
 <PackageReference Include="CSharp.Refactor.Analyzers" Version="*" PrivateAssets="all" />
 ```
 
-The package is a development dependency: it only produces hints and quick
-fixes, and nothing from it reaches your compiled output or your `bin`.
+The package is a development dependency with no dependencies of its own: it
+only produces hints and quick fixes, and nothing from it reaches your
+compiled output or your `bin`.
+
+The analyzers are built against Roslyn 4.14, so they need Visual Studio
+17.14 or the .NET SDK 9.0.300, or newer. An older compiler cannot load them
+and says so with warning CS9057.
+
+#### Severity
+
+Most rules are `Info`. The priority rules (the Priority column of
+[Rules.md](Rules.md)) are `Warning`, because what they find is usually a
+defect: a lock on `this`, a disposable field never disposed, an exception
+rethrown without its cause. In a project with `TreatWarningsAsErrors` a
+warning fails the build, the day the package is added. To keep them as
+warnings there:
+
+```xml
+<WarningsNotAsErrors>$(WarningsNotAsErrors);CR0047;CR0061</WarningsNotAsErrors>
+```
+
+or lower one in `.editorconfig`:
+
+```ini
+dotnet_diagnostic.CR0047.severity = suggestion
+```
 
 ### Visual Studio 2022 / 2026
 
@@ -145,8 +172,8 @@ csharp-refactor Your.csproj [--dry-run] [--codes CR0090,CR0103] [--categories co
 | `--format json` | Machine-readable stdout; progress prose moves to stderr. |
 | `--rules` | Print the rule catalog. |
 | `--create-config` | Append a commented block of every rule and key at its default to the directory's `.editorconfig`. |
-| `--mcp` | Serve `analyze` and `list_rules` as an MCP server over stdio, one warm workspace across calls. |
-| `--parse-only` | No references: syntax-only rules. Not a substitute for a real run. |
+| `--mcp` | Serve `analyze` and `list_rules` as an MCP server over stdio. The process and MSBuild stay warm across calls; each call loads its target afresh. The server works inside one directory: `csharp-refactor <directory> --mcp`, or the directory it is started in. A call's target must lie inside it (a relative target is relative to it), and an `apply` writes nothing outside it: a run whose fixes reach a file outside, such as a linked source, is put back whole and reported. `--mcp --dry-run` is a server that applies nothing; `--define` and `--jobs` hold for every call, and any other option is refused, since it would be ignored. Analysing a project still loads it through MSBuild, which runs its build logic, so the directory should be a tree you trust. |
+| `--parse-only` | For a project whose references do not resolve: only the syntax-only rules offer fixes, and the gate is the parse-error count. The project still loads through MSBuild, and the typed rules still report, without a fix. Not a substitute for a real run. |
 | `--max-passes <n>` | Fix-then-reanalyse iterations (default 5). A pass after the first re-analyses only the files the previous pass edited or held a fix in. |
 
 Projects are loaded through `MSBuildWorkspace` — SDK-style projects of any
@@ -243,9 +270,13 @@ reports a suppressed correctness finding anyway (and never auto-fixes it),
 either for one run. The run summary counts what suppressions silenced.
 
 A rule that shadows a Microsoft analyzer rule (CA2213, CA1031, CA2000 …)
-stands down for that rule's shapes wherever the Microsoft rule is enabled in
-the file's effective config, so nothing is reported twice and nothing
-oscillates. [Rules.md](Rules.md) names each rule's twins.
+reports and fixes its shapes by default: a severity line does not prove the
+Microsoft analyzer is loaded. With
+`csharp_refactor.skip_microsoft_duplicates = true` it stands down for those
+shapes wherever the Microsoft rule has a `dotnet_diagnostic.<id>.severity`
+line other than `none` in the file's effective config, so nothing is
+reported twice and nothing oscillates. [Rules.md](Rules.md) names each
+rule's twins.
 
 **Warnings as errors**: The tool uses the same settings as your CI build 
 (TreatWarningsAsErrors, WarningsAsErrors, .editorconfig severities). 
@@ -313,9 +344,10 @@ invariants the rules promise - every fix, editor-only alternatives included,
 keeps the program compiling; no rule throws on a compilation recovered from
 damaged text; applying fixes one at a time reaches a fixed point; and the
 boolean and control-flow rewrites (CR0001, CR0005, CR0007, CR0008, CR0011)
-keep the method's truth table at every step. The generators reach 121 of
-the 124 rules (CR0017 is subsumed by CR0160 wherever both read a shape;
-CR0156 and CR0158 need C# 15, which the harness cannot parse), and a
+keep the method's truth table at every step. The generators have a
+shape for most rules (of those without, CR0017 is subsumed by CR0160 wherever
+both read a shape, and CR0156 and CR0158 need C# 15, which the harness cannot
+parse), and a
 coverage test tries every shape on its own and all of them together: if a
 shape stops firing the rule it was written for, it says which. Two more
 properties dress the programs the way real files come — `#region`s around

@@ -1215,8 +1215,8 @@ A private type's `DateTime` field or auto-property written from
 `DateTime.Now`/`UtcNow` and read only through parity members becomes
 `DateTimeOffset` in one edit set — the clock keeps its offset, and
 nothing downstream re-interprets a `Kind`. Off by default: a
-serialization-shape change (`csharp_refactor.CR0089 = true` or `--codes
-CR0089`). The strict envelope of FR0134: the type is a private nested
+serialization-shape change (`dotnet_diagnostic.CR0089.severity = suggestion`
+or `--codes CR0089`). The strict envelope of FR0134: the type is a private nested
 one; every write to a slot is `System.DateTime.Now`/`UtcNow` (confirmed
 by symbol — a shadowing fake-clock type would take the rewrite, compile,
 and switch to the real clock) or another slot of the migration; at least
@@ -2053,8 +2053,8 @@ oracle, and every site it finds there must be a construction setting the
 property — never a base list or a type argument; without the oracle such
 a type stands down. Off by default: `required` is also a runtime demand on every
 deserializer of the type (System.Text.Json throws on a missing required
-member), which no build can prove absent — `csharp_refactor.CR0149 =
-true` or `--codes CR0149` turns it on for a compilation known not to be
+member), which no build can prove absent — `dotnet_diagnostic.CR0149.severity =
+suggestion` or `--codes CR0149` turns it on for a compilation known not to be
 deserialized. F# twin: FR0145 (the inverse).
 
 ### CR0150 — performance

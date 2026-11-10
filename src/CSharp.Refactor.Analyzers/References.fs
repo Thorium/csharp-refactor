@@ -24,7 +24,7 @@ module References =
                  |> Seq.map solution.GetProject
                  |> Seq.filter (fun p -> p.Language = LanguageNames.CSharp)
                  |> Seq.map (fun p -> p.GetCompilationAsync().GetAwaiter().GetResult())
-                 |> Seq.filter (fun c -> not (isNull c))
+                 |> Seq.filter (isNull >> not)
                  |> Seq.map (Index.ofCompilation >> Index.structHostileNames)
                  |> Set.unionMany)
 

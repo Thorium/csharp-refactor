@@ -39,9 +39,32 @@ function analyzersDir(context: vscode.ExtensionContext): string {
     return path.join(context.extensionPath, "analyzers");
 }
 
-/** The props file: an Analyzer item per assembly, only for C# projects, with an opt-out property. */
+// The analyzers are built against Roslyn 4.14, which ships with MSBuild
+// 17.14 (Visual Studio 17.14, .NET SDK 9.0.300). An older compiler warns
+// that it cannot load them (CS9057), in every project of the machine and
+// as an error where warnings are errors, so the props adds them only from
+// that MSBuild on.
+const MIN_MSBUILD = "17.14";
+
+/** A path as an MSBuild literal inside an XML attribute: MSBuild's own special characters as %xx, then XML's as entities. */
+function msbuildLiteral(text: string): string {
+    return text
+        .replace(/%/g, "%25")
+        .replace(/[$@';?*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+/**
+ * The props file: an Analyzer item per assembly, only for C# projects built by a compiler that can load them, with an
+ * opt-out property. The file is imported for every project of every kind, so a path in it must never break its syntax:
+ * a profile folder with a quote or an ampersand in its name is escaped, not pasted.
+ */
 function propsText(dir: string): string {
-    const item = (file: string) => `    <Analyzer Include="${path.join(dir, file)}" />`;
+    const literal = (file: string) => msbuildLiteral(path.join(dir, file));
+    const item = (file: string) => `    <Analyzer Include="${literal(file)}" />`;
     return [
         `<?xml version="1.0" encoding="utf-8"?>`,
         `<!-- Written by the CSharp.Refactor VS Code extension. It adds the CSharp.Refactor`,
@@ -49,7 +72,7 @@ function propsText(dir: string): string {
         `     (or run "CSharp.Refactor: Remove the machine-wide wiring") to undo, or set`,
         `     <CSharpRefactorDisable>true</CSharpRefactorDisable> in a project to opt it out. -->`,
         `<Project>`,
-        `  <ItemGroup Condition="'$(Language)' == 'C#' and '$(CSharpRefactorDisable)' != 'true' and Exists('${path.join(dir, "CSharp.Refactor.Analyzers.dll")}')">`,
+        `  <ItemGroup Condition="'$(Language)' == 'C#' and '$(CSharpRefactorDisable)' != 'true' and '$(MSBuildVersion)' &gt;= '${MIN_MSBUILD}' and Exists('${literal("CSharp.Refactor.Analyzers.dll")}')">`,
         item("CSharp.Refactor.Analyzers.dll"),
         item("FSharp.Core.dll"),
         `  </ItemGroup>`,
@@ -58,13 +81,14 @@ function propsText(dir: string): string {
     ].join("\n");
 }
 
+/** Current only when the file is exactly what this version writes: an older version's file is rewritten, path and conditions alike. */
 function isWired(context: vscode.ExtensionContext): "current" | "stale" | "none" {
     const p = propsPath();
     if (!fs.existsSync(p)) {
         return "none";
     }
     const text = fs.readFileSync(p, "utf8");
-    return text.includes(analyzersDir(context)) ? "current" : "stale";
+    return text === propsText(analyzersDir(context)) ? "current" : "stale";
 }
 
 function writeProps(context: vscode.ExtensionContext): string {
@@ -85,7 +109,9 @@ async function enable(context: vscode.ExtensionContext): Promise<void> {
     }
 }
 
-async function disable(): Promise<void> {
+async function disable(context: vscode.ExtensionContext): Promise<void> {
+    // an explicit Remove is a no: the next activation does not ask again
+    await context.globalState.update(DECLINED_KEY, true);
     const p = propsPath();
     if (fs.existsSync(p)) {
         fs.unlinkSync(p);
@@ -181,9 +207,28 @@ async function ensureTool(): Promise<boolean> {
     return false;
 }
 
+/**
+ * The tool reads and rewrites the files on disk: an unsaved editor is analysed as it was last saved, and saving it
+ * afterwards overwrites the fix or loses the edit. A run that writes saves everything first, asked.
+ */
+async function savedForWriting(): Promise<boolean> {
+    const dirty = vscode.workspace.textDocuments.filter((d) => d.isDirty && !d.isUntitled).length;
+    if (dirty === 0) {
+        return true;
+    }
+    const pick = await vscode.window.showWarningMessage(
+        `CSharp.Refactor rewrites files on disk, and ${dirty} open file(s) have unsaved changes.`,
+        { modal: true },
+        "Save all and run");
+    return pick === "Save all and run" && (await vscode.workspace.saveAll(false));
+}
+
 async function invoke(args: string): Promise<void> {
     const target = await pickTarget();
     if (!target || !(await ensureTool())) {
+        return;
+    }
+    if (!args.includes("--dry-run") && !(await savedForWriting())) {
         return;
     }
     const t = toolTerminal();
@@ -311,7 +356,7 @@ async function reviewNotes(): Promise<void> {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     context.subscriptions.push(
         vscode.commands.registerCommand("csharpRefactor.enable", () => enable(context)),
-        vscode.commands.registerCommand("csharpRefactor.disable", () => disable()),
+        vscode.commands.registerCommand("csharpRefactor.disable", () => disable(context)),
         vscode.commands.registerCommand("csharpRefactor.status", () => status(context)),
         vscode.commands.registerCommand("csharpRefactor.run", () => run()),
         vscode.commands.registerCommand("csharpRefactor.runApiChanges", () => runApiChanges()),

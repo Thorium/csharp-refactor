@@ -178,6 +178,15 @@ let private ownParseOptions = Dictionary<ProjectId, ParseOptions>()
 let private reports =
     Dictionary<string, ResizeArray<string>>(StringComparer.OrdinalIgnoreCase)
 
+/// A run reads its scripts from disk: nothing loaded for an earlier run of
+/// the process (an MCP server's last call) is kept, or a later run would
+/// analyse, and write back, the text of that earlier time. For a new
+/// workspace only: the ids forgotten here belong to the old one.
+let reset () =
+    loaded.Clear()
+    ownParseOptions.Clear()
+    reports.Clear()
+
 /// The `#r` directives a script's compilation could not resolve, once it
 /// has been compiled.
 let unresolvedOf (scriptPath: string) : string list =

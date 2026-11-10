@@ -304,7 +304,8 @@ module Rules =
     /// rule that throws loses its own suggestions, never the file's): a
     /// compilation full of unresolved references is a tree of error types
     /// no rule was written against.
-    let allWithFailures
+    let private collect
+        (cancellation: System.Threading.CancellationToken)
         (tree: SyntaxTree)
         (model: SemanticModel)
         (ctx: RuleContext)
@@ -319,6 +320,9 @@ module Rules =
                 typedNamed
                 |> List.filter (fun (name, _) -> runs name)
                 |> List.collect (fun (name, rule) ->
+                    // a pass the host gave up on (the file was edited again)
+                    // ends between rule modules instead of running them all
+                    cancellation.ThrowIfCancellationRequested()
                     let sw = System.Diagnostics.Stopwatch.StartNew()
                     let insideIndexBefore = Index.threadInsideTicks ()
 
@@ -347,8 +351,40 @@ module Rules =
 
         kept, List.ofSeq failures
 
+    /// Every rule's suggestions and the rules that threw, for a host that
+    /// runs the pass to its end and reports the failures itself.
+    let allWithFailures
+        (tree: SyntaxTree)
+        (model: SemanticModel)
+        (ctx: RuleContext)
+        : Suggestion list * (string * exn) list =
+        collect System.Threading.CancellationToken.None tree model ctx
+
+    /// Who hears of a rule that threw inside the analyzer, where there is
+    /// no one to return the failure to: nobody, unless a host asks. The
+    /// tool does, and counts each toward its exit code.
+    let mutable private failureObserver: string -> SyntaxTree -> exn -> unit =
+        fun _ _ _ -> ()
+
+    let observeFailures (observer: string -> SyntaxTree -> exn -> unit) = failureObserver <- observer
+
+    /// Every rule's suggestions for a host that may give the pass up:
+    /// `cancellation` is observed between rule modules.
+    let allUntil
+        (cancellation: System.Threading.CancellationToken)
+        (tree: SyntaxTree)
+        (model: SemanticModel)
+        (ctx: RuleContext)
+        : Suggestion list =
+        let suggestions, failures = collect cancellation tree model ctx
+
+        for name, ex in failures do
+            failureObserver name tree ex
+
+        suggestions
+
     let all (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
-        fst (allWithFailures tree model ctx)
+        allUntil System.Threading.CancellationToken.None tree model ctx
 
 [<DiagnosticAnalyzer(LanguageNames.CSharp)>]
 type CSharpRefactorAnalyzer() =
@@ -384,4 +420,7 @@ type CSharpRefactorAnalyzer() =
                 let ruleContext =
                     Context.forTree (Some options) ctx.SemanticModel.Compilation tree false
 
-                report ctx.ReportDiagnostic tree (Rules.all tree ctx.SemanticModel ruleContext))
+                report
+                    ctx.ReportDiagnostic
+                    tree
+                    (Rules.allUntil ctx.CancellationToken tree ctx.SemanticModel ruleContext))

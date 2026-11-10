@@ -210,6 +210,16 @@ let private reports = ResizeArray<LoadReport>()
 
 let loadReports () = List.ofSeq reports
 
+/// A run reads its projects from disk: nothing loaded for an earlier run of
+/// the process (an MCP server's last call) is kept, or a later run would
+/// analyse, and write back, the text of that earlier time. For a new
+/// workspace only: the ids forgotten here belong to the old one.
+let reset () =
+    loaded.Clear()
+    ownParseOptions.Clear()
+    loading.Clear()
+    reports.Clear()
+
 /// Load a legacy project (and, recursively, its project references) into
 /// the workspace; returns the project.
 let rec load (workspace: AdhocWorkspace) (projectPath: string) : Project =

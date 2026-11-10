@@ -84,18 +84,20 @@ OPTIONS
   --no-color            plain output, even on a colour-capable terminal.
                         NO_COLOR=1 and TERM=dumb do the same, and a piped or
                         redirected stream is never coloured either way
-  --no-if-defs          never emit #if/#else/#endif pairs for capability
-                        fixes on multi-targeted projects. The fixes stay
-                        plain, and any that break a legacy framework are
-                        simply put back by the final build check
+  --no-if-defs          accepted, as fsharp-refactor has it, and without
+                        effect here: no fix of this tool is paired with
+                        #if/#else/#endif. A fix a framework rejects is put
+                        back by the final build check
   --report <file>       write every finding to a file: .sarif (SARIF 2.1.0,
                         what CI turns into inline annotations), .html (a
                         self-contained page) or .csv. Pairs with --dry-run
-  --parse-only          no MSBuild, no references: sources come straight from
-                        the project directory and only the syntax-only rules
-                        run. NOT a substitute for a real run: the typed rules
-                        — most of the correctness and performance ones — are
-                        excluded outright
+  --parse-only          for a project whose references do not resolve: only
+                        the syntax-only rules offer fixes, and the gate is
+                        the parse-error count, not the compile. The project
+                        still loads through MSBuild, and the typed rules —
+                        most of the correctness and performance ones — still
+                        report, without a fix. NOT a substitute for a real
+                        run
   --baseline <sarif>    findings whose fingerprints appear in this earlier
                         report are neither reported nor fixed: the ratchet.
                         Triage once, then only NEW findings surface
@@ -120,7 +122,13 @@ OPTIONS
                         directory), writing one when there is none. Never
                         rewrites a line that exists
   --mcp                 serve analyze/list_rules as an MCP server over
-                        stdio, keeping the workspace warm between calls
+                        stdio. The process and MSBuild stay warm between
+                        calls; each call loads its target afresh. The server
+                        works in <what>, a directory, or in the current one:
+                        a call's target lies inside it and nothing outside
+                        it is written. With --dry-run no call applies
+                        anything. --define and --jobs hold for every call;
+                        the other options belong to a run and are refused
   --max-passes <n>      fix-then-reanalyse iterations (default 5)
   --version, -v         print the version being invoked and stop
   --help, -h, /?        this text
@@ -162,6 +170,8 @@ let rec private parseArgsLoop opts args =
         // an unrecognised code is otherwise pure silence: one digit short
         // sweeps the whole project, matches nothing, and reports clean
         match parsed |> Set.filter (RuleCatalog.known.Contains >> not) |> Set.toList with
+        // no code at all (`--codes ""`, `--codes ,`) is the same silence
+        | [] when parsed.IsEmpty -> Error "--codes names no rule code. --rules lists every code."
         | [] ->
             parseArgsLoop
                 { opts with
@@ -195,9 +205,10 @@ let rec private parseArgsLoop opts args =
     | "--no-color" :: rest -> parseArgsLoop { opts with NoColor = true } rest
     | "--api-changes" :: rest -> parseArgsLoop { opts with ApiChanges = true } rest
     | "--no-if-defs" :: rest -> parseArgsLoop { opts with NoIfDefs = true } rest
-    | "--report" :: file :: rest -> parseArgsLoop { opts with Report = Some file } rest
+    | "--report" :: file :: rest when not (file.StartsWith '-') -> parseArgsLoop { opts with Report = Some file } rest
     | "--parse-only" :: rest -> parseArgsLoop { opts with ParseOnly = true } rest
-    | "--baseline" :: file :: rest -> parseArgsLoop { opts with Baseline = Some file } rest
+    | "--baseline" :: file :: rest when not (file.StartsWith '-') ->
+        parseArgsLoop { opts with Baseline = Some file } rest
     | "--fail-on-findings" :: rest -> parseArgsLoop { opts with FailOnFindings = true } rest
     | "--honor-suppressions" :: rest -> parseArgsLoop { opts with HonorSuppressions = true } rest
     | "--notes" :: ("off" | "on" | "only" as mode) :: rest ->
@@ -224,7 +235,7 @@ let rec private parseArgsLoop opts args =
     | "--rules" :: rest -> parseArgsLoop { opts with ListRules = true } rest
     | "--create-config" :: rest -> parseArgsLoop { opts with CreateConfig = true } rest
     | "--mcp" :: rest -> parseArgsLoop { opts with Mcp = true } rest
-    | "--framework" :: tfm :: rest -> parseArgsLoop { opts with Framework = tfm } rest
+    | "--framework" :: tfm :: rest when not (tfm.StartsWith '-') -> parseArgsLoop { opts with Framework = tfm } rest
     | "--define" :: value :: rest when not (value.StartsWith '-') -> defineThen opts value rest
     | flag :: rest when
         flag.StartsWith("--define:", StringComparison.Ordinal)
@@ -242,8 +253,10 @@ let rec private parseArgsLoop opts args =
     | path :: rest when not (path.StartsWith '-') && opts.Target = "" -> parseArgsLoop { opts with Target = path } rest
     | extra :: _ when not (extra.StartsWith '-') -> Error $"'{extra}' is a second target; one target per run"
     | [ flag ] when List.contains flag valueFlags -> Error $"'{flag}' needs a value after it"
-    // `--define --dry-run`: the next token is a flag, not a symbol
-    | "--define" :: _ -> Error "'--define' needs a value after it"
+    // `--define --dry-run`, `--report --dry-run`: the next token is a flag,
+    // not a value. Taken as one, `--report --dry-run` wrote a report named
+    // `--dry-run` and applied the fixes
+    | ("--define" | "--report" | "--baseline" | "--framework" as flag) :: _ -> Error $"'{flag}' needs a value after it"
     | unknown :: _ -> Error $"Unknown argument '{unknown}'"
 
 /// One `--define` value added to the options, then the rest parsed.
@@ -301,4 +314,10 @@ let defaults =
     }
 
 let parseArgs (argv: string[]) =
-    parseArgsLoop defaults (List.ofArray argv) |> Result.map applyCategories
+    parseArgsLoop defaults (List.ofArray argv)
+    |> Result.map applyCategories
+    |> Result.bind (fun opts ->
+        // a run of no rule reports nothing, which reads as a clean tree
+        match opts.Codes with
+        | Some codes when codes.IsEmpty -> Error "--codes and --categories together leave no rule to run."
+        | _ -> Ok opts)

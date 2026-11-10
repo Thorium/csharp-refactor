@@ -69,6 +69,8 @@ jobs:
           cat > Consumer.csproj <<'XML'
           <Project Sdk="Microsoft.NET.Sdk">
             <PropertyGroup>
+              <!-- an Exe: a class library's bin never receives package dependencies -->
+              <OutputType>Exe</OutputType>
               <TargetFramework>net10.0</TargetFramework>
               <RestoreSources>$GITHUB_WORKSPACE/artifacts;https://api.nuget.org/v3/index.json</RestoreSources>
             </PropertyGroup>
@@ -78,11 +80,12 @@ jobs:
           </Project>
           XML
           sed -i "s|\$GITHUB_WORKSPACE|$GITHUB_WORKSPACE|" Consumer.csproj
-          printf 'using System;\nclass C { Guid G() => new Guid(); string S() => $"x"; }\n' > C.cs
+          printf 'using System;\nclass C { Guid G() => new Guid(); string S() => $"x"; static void Main() { } }\n' > C.cs
           dotnet build -p:ErrorLog=f.sarif
           grep -c '"ruleId": *"CR0090"' f.sarif
           grep -c '"ruleId": *"CR0103"' f.sarif
           ! ls bin/Debug/net10.0 | grep -i -E "fsharp|refactor"
+          ! grep -i -E "fsharp|refactor" bin/Debug/net10.0/Consumer.deps.json
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v7

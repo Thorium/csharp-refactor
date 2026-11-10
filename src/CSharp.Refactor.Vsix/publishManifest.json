@@ -2,7 +2,7 @@
     "$schema": "http://json.schemastore.org/vsix-publish",
     "categories": [ "coding", "other" ],
     "identity": {
-        "internalName": "CSharpRefactor"
+        "internalName": "cSharp-refactor"
     },
     "overview": "MarketplaceOverview.md",
     "priceCategory": "free",

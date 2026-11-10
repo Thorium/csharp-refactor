@@ -9,6 +9,69 @@ open System.Text.Json
 open CSharp.Refactor
 open CSharp.Refactor.Tool.Options
 
+/// What a server holds every call to, from its own command line:
+/// `csharp-refactor [directory] --mcp [--dry-run] [--define ...] [--jobs n]`.
+type Limits =
+    {
+        /// The directory the server works in: the one it was given, else
+        /// the one it was started in. A call's target lies inside it, and
+        /// so does everything a call writes. A client is an agent acting on
+        /// what it read, and a server that analyses any path it is handed
+        /// builds, and with `apply` rewrites, any tree on the machine.
+        Root: string
+        /// `--dry-run`: no call applies anything.
+        ReadOnly: bool
+        /// `--define`: symbols every call keeps (a call's `defines` adds to them).
+        Defines: string list
+        Jobs: int
+    }
+
+/// The server's limits from its command line, or why the line is refused:
+/// a root that is no directory, or a flag that belongs to a run and would
+/// be ignored here, where it reads as honoured.
+let limitsOf (opts: Options) : Result<Limits, string> =
+    let ignored =
+        [
+            "--codes", opts.ExplicitCodes.IsSome
+            "--categories", opts.Categories.IsSome
+            "--api-changes", opts.ApiChanges
+            "--report", opts.Report.IsSome
+            "--parse-only", opts.ParseOnly
+            "--baseline", opts.Baseline.IsSome
+            "--fail-on-findings", opts.FailOnFindings
+            "--honor-suppressions", opts.HonorSuppressions
+            "--notes", opts.Notes || opts.NotesOnly
+            "--format", opts.Json
+            "--framework", opts.Framework <> ""
+            "--max-passes", opts.MaxPasses <> defaults.MaxPasses
+        ]
+        |> List.filter snd
+        |> List.map fst
+
+    if not ignored.IsEmpty then
+        let listed = String.concat ", " ignored
+
+        Error
+            $"--mcp serves many runs, and {listed} would have no effect on them. The server takes a directory, --dry-run (it then applies nothing), --define and --jobs; an analyze call names its own codes, categories and parseOnly."
+    elif opts.Target <> "" && not (IO.Directory.Exists opts.Target) then
+        Error
+            $"--mcp takes the DIRECTORY the server may work in; '{opts.Target}' is not one. Without one it is the current directory."
+    else
+        Ok
+            {
+                Root =
+                    IO.Path.GetFullPath(
+                        if opts.Target = "" then
+                            IO.Directory.GetCurrentDirectory()
+                        else
+                            opts.Target
+                    )
+                // `--notes only` implies a dry run, and is refused above
+                ReadOnly = opts.DryRun
+                Defines = opts.Defines
+                Jobs = opts.Jobs
+            }
+
 let private mcpToolResult (text: string) =
     dict [ "content", box [ dict [ "type", box "text"; "text", box text ] ] ]
 
@@ -42,7 +105,7 @@ let private toolsJson =
                                 "name", box "analyze"
                                 "description",
                                 box
-                                    "Analyze a C# project, solution or directory with csharp-refactor. Dry-run by default: reports findings without editing. Set apply=true to write the fixes (build-verified). Returns findings as JSON with stable fingerprints and source snippets."
+                                    "Analyze a C# project, solution or directory with csharp-refactor, inside the directory this server was started for. Dry-run by default: reports findings without editing. Set apply=true to write the fixes (build-verified); a server started with --dry-run refuses it. Returns findings as JSON with stable fingerprints and source snippets."
                                 "inputSchema",
                                 box (
                                     dict
@@ -53,7 +116,11 @@ let private toolsJson =
                                                 dict
                                                     [
                                                         "target",
-                                                        box (prop "string" "csproj, sln, directory or glob to analyze")
+                                                        box (
+                                                            prop
+                                                                "string"
+                                                                "csproj, sln, directory or glob to analyze, inside the server's root; a relative path is relative to it"
+                                                        )
                                                         "codes",
                                                         box (prop "string" "comma-separated rule codes to restrict to")
                                                         "categories",
@@ -88,7 +155,7 @@ let private toolsJson =
             ]
     )
 
-let private handleAnalyze (args: JsonElement) =
+let private handleAnalyze (limits: Limits) (args: JsonElement) =
     let getString name =
         match args.TryGetProperty(name: string) with
         | true, v when v.ValueKind = JsonValueKind.String -> Some(v.GetString())
@@ -99,9 +166,28 @@ let private handleAnalyze (args: JsonElement) =
         | true, v -> v.ValueKind = JsonValueKind.True
         | _ -> false
 
-    match getString "target" with
+    // the target as a full path inside the root; a relative one is relative
+    // to the root, not to wherever the process stands
+    let inRoot (target: string) : Result<string, string> =
+        try
+            let full = IO.Path.GetFullPath(target, limits.Root)
+
+            if Sweep.isUnder limits.Root full then
+                Ok full
+            else
+                Error
+                    $"'{target}' is outside this server's root {limits.Root}. Start the server for the directory it may work in: csharp-refactor <directory> --mcp"
+        with
+        | :? ArgumentException
+        | :? NotSupportedException
+        | :? IO.PathTooLongException -> Error $"'{target}' is not a usable path"
+
+    match getString "target" |> Option.map inRoot with
     | None -> Error "analyze needs a 'target'"
-    | Some target ->
+    | Some(Error refusal) -> Error refusal
+    | Some(Ok _) when limits.ReadOnly && getBool "apply" ->
+        Error "this server was started with --dry-run and applies nothing; call analyze without apply"
+    | Some(Ok target) ->
         // codes and categories go through the command line's own parser: an
         // unknown code or category is an error there, never an empty, clean run
         let argv =
@@ -125,6 +211,8 @@ let private handleAnalyze (args: JsonElement) =
                 { baseOpts with
                     DryRun = not (getBool "apply")
                     ParseOnly = getBool "parseOnly"
+                    Defines = List.distinct (limits.Defines @ baseOpts.Defines)
+                    Jobs = limits.Jobs
                 }
 
             Sweep.resetRun ()
@@ -135,6 +223,8 @@ let private handleAnalyze (args: JsonElement) =
                 dict
                     [
                         "exitCode", box exitCode
+                        // why the exit code is not 0, where the run says
+                        "exitReasons", box (Sweep.runExitReasons ())
                         "applied", box (not opts.DryRun)
                         "findingCount", box findings.Length
                         "findings", box (Reports.findingsPayload findings)
@@ -152,7 +242,7 @@ let inline private (|IsNullOrWhiteSpace|_|) (input: string) =
     else
         ValueNone
 
-let run () =
+let private serve (limits: Limits) =
     let protocolOut = Console.Out
     Console.SetOut Console.Error
 
@@ -240,7 +330,7 @@ let run () =
                 | Ok("list_rules", _) -> respond idJson (serialize (mcpToolResult (serialize (rulesJson ()))))
                 | Ok("analyze", args) ->
                     try
-                        handleAnalyze args
+                        handleAnalyze limits args
                         |> Result.map (mcpToolResult >> serialize >> respond idJson)
                         |> Result.defaultWith (fun msg -> respondError idJson -32602 msg)
                     with ex ->
@@ -252,3 +342,16 @@ let run () =
             | _ -> ()
 
     0
+
+/// The server from its limits to the end of its input: every call is held
+/// to them, and the process is left as it was found, since a host that runs
+/// the server in-process (the tests) goes on after it.
+let run (limits: Limits) : int =
+    let out = Console.Out
+    Sweep.setWriteRoot (Some limits.Root)
+
+    try
+        serve limits
+    finally
+        Sweep.setWriteRoot None
+        Console.SetOut out

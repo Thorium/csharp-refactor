@@ -15,7 +15,7 @@
     <IsPackable>true</IsPackable>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <PackageId>CSharp.Refactor.Analyzers</PackageId>
-    <Description>Functional refactoring suggestions (light bulb quick fixes) for C#, built on Roslyn. Correctness, performance and idiom rules; every one is Info severity, so they never gate a build.</Description>
+    <Description>Functional refactoring suggestions (light bulb quick fixes) for C#, built on Roslyn. Correctness, performance and idiom rules. Suggestions are Info severity; the priority rules, which point at likely defects, are warnings.</Description>
     <PackageTags>csharp;roslyn;analyzers;roslyn-analyzers;refactoring;codefix;static-analysis;code-quality;linter;functional;linq;performance</PackageTags>
     <Authors>Tuomas Hietanen</Authors>
     <PackageProjectUrl>https://github.com/Thorium/csharp-refactor</PackageProjectUrl>
@@ -25,6 +25,9 @@
     <PackageIcon>icon.png</PackageIcon>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <DevelopmentDependency>true</DevelopmentDependency>
+    <!-- FSharp.Core ships inside analyzers/dotnet/cs. Declared as a package
+         dependency too, it lands in the consumer's bin and deps.json. -->
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <NoWarn>$(NoWarn);NU5128</NoWarn>
     <!-- an analyzer must not be trimmed down to a reference assembly -->
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
@@ -131,51 +134,11 @@
     <None Include="bin\$(Configuration)\netstandard2.0\CSharp.Refactor.Analyzers.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="bin\$(Configuration)\netstandard2.0\CSharp.Refactor.Analyzers.xml" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
     <None Include="bin\$(Configuration)\netstandard2.0\FSharp.Core.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <!-- The symbol package: the pdb is packed beside its dll, and NuGet
+         copies every packed pdb into the .snupkg at the same path, where the
+         symbol server matches the two. Without one the .snupkg has neither
+         content nor dependencies and the pack fails (NU5017). -->
+    <None Include="bin\$(Configuration)\netstandard2.0\CSharp.Refactor.Analyzers.pdb" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
-
-  <!-- The symbol package: NuGet puts a pdb into the .snupkg only beside build
-       output it packs itself, and IncludeBuildOutput=false packs none, so the
-       .snupkg comes out empty. After pack the analyzer's pdb is added to it at
-       the dll's path in the .nupkg, where the symbol server matches the two. -->
-  <UsingTask TaskName="AddPdbToSymbolPackage" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
-    <ParameterGroup>
-      <Archive ParameterType="System.String" Required="true" />
-      <Pdb ParameterType="System.String" Required="true" />
-      <EntryName ParameterType="System.String" Required="true" />
-    </ParameterGroup>
-    <Task>
-      <Using Namespace="System.IO" />
-      <Using Namespace="System.IO.Compression" />
-      <Code Type="Fragment" Language="cs"><![CDATA[
-        using (var zip = ZipFile.Open(Archive, ZipArchiveMode.Update))
-        {
-            var existing = zip.GetEntry(EntryName);
-            if (existing != null) existing.Delete();
-            zip.CreateEntryFromFile(Pdb, EntryName);
-
-            var types = zip.GetEntry("[Content_Types].xml");
-            if (types != null)
-            {
-                string xml;
-                using (var reader = new StreamReader(types.Open())) xml = reader.ReadToEnd();
-                if (xml.IndexOf("Extension=\"pdb\"", System.StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    xml = xml.Replace("</Types>", "<Default Extension=\"pdb\" ContentType=\"application/octet\" /></Types>");
-                    types.Delete();
-                    var rewritten = zip.CreateEntry("[Content_Types].xml");
-                    using (var writer = new StreamWriter(rewritten.Open())) writer.Write(xml);
-                }
-            }
-        }
-      ]]></Code>
-    </Task>
-  </UsingTask>
-
-  <Target Name="AnalyzerSymbolsIntoSymbolPackage" AfterTargets="Pack" Condition="'$(IncludeSymbols)' == 'true' and '$(SymbolPackageFormat)' == 'snupkg'">
-    <AddPdbToSymbolPackage
-      Archive="$([MSBuild]::EnsureTrailingSlash('$(PackageOutputPath)'))$(PackageId).$(PackageVersion).snupkg"
-      Pdb="$(MSBuildProjectDirectory)\bin\$(Configuration)\netstandard2.0\CSharp.Refactor.Analyzers.pdb"
-      EntryName="analyzers/dotnet/cs/CSharp.Refactor.Analyzers.pdb" />
-  </Target>
 
 </Project>

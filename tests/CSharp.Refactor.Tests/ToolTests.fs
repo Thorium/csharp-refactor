@@ -1464,7 +1464,8 @@ let ``the MCP server answers the handshake, lists its tools and rules, and analy
         let psi =
             Diagnostics.ProcessStartInfo(
                 "dotnet",
-                $"\"{toolDll}\" --mcp",
+                // the server works inside the directory it is started for
+                $"\"{toolDll}\" \"{dir}\" --mcp",
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

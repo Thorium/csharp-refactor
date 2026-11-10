@@ -82,23 +82,6 @@ let private targetOf (path: string) =
         None
 
 let resolveTargets (raw: string) : Result<Target list, string> =
-    let expandGlob (pattern: string) =
-        let normalized = pattern.Replace('\\', '/')
-        let starIndex = normalized.IndexOf '*'
-
-        let root =
-            let head = normalized.Substring(0, starIndex)
-            let slash = head.LastIndexOf '/'
-
-            if slash >= 0 then head.Substring(0, slash) else "."
-
-        let leaf = Path.GetFileName normalized
-
-        if Directory.Exists root then
-            FileWalk.files leaf root |> List.ofSeq
-        else
-            []
-
     let rec fromDirectory (dir: string) =
         let solutionsIn (d: string) =
             [
@@ -165,7 +148,7 @@ let resolveTargets (raw: string) : Result<Target list, string> =
             projects @ scripts
 
     if raw.Contains '*' || raw.Contains '?' then
-        match expandGlob raw |> List.choose targetOf with
+        match FileWalk.glob raw |> List.choose targetOf with
         | [] -> Error $"'{raw}' matched no .csproj or .csx files."
         | targets -> Ok targets
     elif Directory.Exists raw then

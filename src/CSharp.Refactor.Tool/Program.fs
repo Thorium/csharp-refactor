@@ -108,6 +108,24 @@ let private surviveForeignBackgroundExceptions () =
         with :? InvalidOperationException -> // a host set one first; it keeps its say
             ()
 
+/// Ctrl+C ends the run with what it wrote put back, unless its verification
+/// builds have finished (Sweep.putBackOnInterrupt), instead of leaving fixes
+/// no build has checked. Installed only when this tool IS the process, as
+/// the handler above.
+let private putBackOnCtrlC () =
+    if Reflection.Assembly.GetEntryAssembly() = Reflection.Assembly.GetExecutingAssembly() then
+        Console.CancelKeyPress.Add(fun args ->
+            // the process stays alive while the files go back
+            args.Cancel <- true
+            let restored = Sweep.putBackOnInterrupt ()
+
+            if restored > 0 then
+                eprintfn $"interrupted: the {restored} file(s) the run had changed were put back unverified"
+            else
+                eprintfn "interrupted"
+
+            exit 130)
+
 let private runMain argv =
     let parsed = parseArgs argv
 
@@ -146,7 +164,12 @@ let private runMain argv =
                 $"Wrote the csharp-refactor block into {path} — every rule at this build's default, so it changes nothing until you edit it."
 
             0
-    | Ok opts when opts.Mcp -> Mcp.run ()
+    | Ok opts when opts.Mcp ->
+        match Mcp.limitsOf opts with
+        | Ok limits -> Mcp.run limits
+        | Error message ->
+            eprintfn $"{message}"
+            2
     | Ok opts when opts.Target = "" ->
         printfn $"{helpText}"
         2
@@ -175,6 +198,7 @@ let private runMain argv =
 [<EntryPoint>]
 let main argv =
     surviveForeignBackgroundExceptions ()
+    putBackOnCtrlC ()
     let code = runMain argv
 
     // a run that went on past loaded code failing on a background thread

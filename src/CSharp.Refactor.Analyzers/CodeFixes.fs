@@ -124,10 +124,11 @@ type CSharpRefactorCodeFixProvider() =
                                         Mentions = Some(References.mentions flavor.Solution flavor)
                                     }
 
-                                Rules.all theirTree theirModel theirs)
+                                Rules.allUntil context.CancellationToken theirTree theirModel theirs)
                             |> Option.defaultValue []
 
-                        Rules.all tree model ctx |> Flavors.narrowestOnly narrower offered tree
+                        Rules.allUntil context.CancellationToken tree model ctx
+                        |> Flavors.narrowestOnly narrower offered tree
 
                 for diagnostic in context.Diagnostics do
                     let matching =

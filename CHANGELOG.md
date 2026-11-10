@@ -1,6 +1,22 @@
 # Changelog
 
-The analyzers package, the `csharp-refactor` tool and both editor extensions share one version. The NuGet packages carry the notes of the last six versions; this file keeps every one.
+The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
+
+## 0.1.25
+
+- The analyzers package declares no dependency: `FSharp.Core.dll` landed in the `bin` and `deps.json` of every application referencing it.
+- A run that fails or is interrupted (Ctrl+C) before its verification builds puts back every file it wrote. A source that cannot be written (read-only, locked) is exit 1, not a crash with the earlier fixes left on disk.
+- `--mcp` works inside one directory, the one it is given (`csharp-refactor <directory> --mcp`) or started in: a call naming a target outside it is refused, and an `apply` writes nothing outside it. A server started for one repository analysed, built and rewrote any path a client named.
+- `--mcp --dry-run` is a server that applies nothing, `--define` and `--jobs` hold for every call, and an option that belongs to a run (`--report`, `--codes`, `--api-changes` …) is a usage error with `--mcp`: all were accepted and ignored. The response carries the exit reasons.
+- `--mcp`: a script or legacy project is read from disk on every call. A second call applied its fixes to the first call's text and wrote that over edits made in between.
+- A `--baseline` that cannot be read, a `--report` into a missing directory, a value-taking flag followed by a flag (`--report --dry-run`), and filters that leave no rule are usage errors, before anything is written.
+- A glob searches the directories it names: `src/App*/*.csproj` swept every project under `src`. `*` and `?` stay in one path segment, `**` spans directories.
+- A rule or analyzer that throws fails the run (exit 1), also in a file no other rule reported in.
+- `--create-config` writes `root = true` only where no directory above has an `.editorconfig`, and keeps a file's byte-order mark.
+- The analyzer and the code fixes stop between rule modules when the host cancels the pass.
+- The package description, README and marketplace text say what the code does: the 23 priority rules are warnings. `--parse-only`, `--no-if-defs` and `--mcp` are described as they behave.
+- VS Code extension: the machine-wide props adds the analyzers only from MSBuild 17.14 on and escapes the extension path; a run that writes asks to save unsaved editors; Remove is remembered.
+- Visual Studio extension: installs into 17.14 and newer, the first whose Roslyn loads the analyzers.
 
 ## 0.1.24
 

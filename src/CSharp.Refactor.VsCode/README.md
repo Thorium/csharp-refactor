@@ -21,6 +21,17 @@ profile). Decline and nothing is written; `CSharp.Refactor: Wire analyzers`
 re-offers it any time, and `Remove the machine-wide wiring` undoes it. A
 project opts out with `<CSharpRefactorDisable>true</CSharpRefactorDisable>`.
 
+The props file adds the analyzers only for a compiler that can load them:
+MSBuild 17.14 or newer (Visual Studio 17.14, .NET SDK 9.0.300). A project
+built with an older SDK is left alone. A project that also references the
+`CSharp.Refactor.Analyzers` package at the same version sees each finding
+once.
+
+VS Code runs nothing on uninstall, and a disabled extension keeps its
+folder: run `Remove the machine-wide wiring` before disabling or
+uninstalling the extension. After an uninstall the props file is inert,
+since it names a folder that is gone, and can be deleted.
+
 After wiring, restart the C# language server (or reload the window) and open
 a C# file: suggestions appear as `CR`-prefixed hints with a light-bulb fix.
 `CSharp.Refactor: Status` reports the versions and the wiring.
@@ -31,8 +42,9 @@ install it when missing):
 - `CSharp.Refactor: Run the tool on this workspace` — the light bulbs fix
   one finding at a time; this runs the sweep. Picks a solution or project,
   then `Report only` (`--dry-run`), `Apply fixes`, or `Apply fixes with
-  --api-changes`, in the integrated terminal. Every pass is verified and
-  put back on error, as on the command line.
+  --api-changes`, in the integrated terminal. A run that writes asks to
+  save unsaved editors first: the tool works on the files on disk. Every
+  pass is verified and put back on error, as on the command line.
 - `CSharp.Refactor: Run the tool with --api-changes` — the same sweep with
   the scope gate opened: public shapes and cross-file rewrites too.
 - `CSharp.Refactor: Write a SARIF report for this workspace` — a dry run

@@ -48,6 +48,11 @@ let private printedNotes = HashSet<string>()
 let private announcedHolds = HashSet<string>(StringComparer.OrdinalIgnoreCase)
 let mutable private runAppliedCount = 0
 let mutable private runBuildFailures = 0
+/// Rules and analyzers that threw: each lost its findings for a file, so
+/// the run is not a clean one whatever its counts say. Counted from the
+/// analyzer's threads too.
+let private runRuleFailures = ref 0
+let private ruleFailuresSeen = HashSet<string>()
 let mutable private runCrossFileHeld = 0
 /// Wall-clock milliseconds of the run, by phase: what a slow sweep spent
 /// its time on, next to the per-module record in Rules.timings.
@@ -61,9 +66,23 @@ let baselineSuppressed () = baselineSuppressedCount
 let commentSuppressed () = commentSuppressedCount
 let suppressionOverridden () = suppressionOverriddenCount
 let runTotalApplied () = runAppliedCount
+/// Why the run's exit code is not 0, one line per cause.
+let runExitReasons () = List.ofSeq exitReasons
 
 let reportedSoFar () =
     lock reportedFindings (fun () -> List.ofSeq reportedFindings)
+
+/// A rule threw on a file: said once per rule and file, and counted. Heard
+/// from the tool's own pass and, for a file no other rule reported in, from
+/// the analyzer (Rules.observeFailures).
+let private noteRuleFailure (name: string) (tree: SyntaxTree) (ex: exn) =
+    let file = Path.GetFileName(defaultArg (Option.ofObj tree.FilePath) "")
+
+    if lock ruleFailuresSeen (fun () -> ruleFailuresSeen.Add $"{name}|{tree.FilePath}") then
+        Interlocked.Increment(&runRuleFailures.contents) |> ignore
+
+        Out.bad
+            $"  (rule {name} threw on {file}: {ex.GetType().Name}: {ex.Message} — its suggestions for this file are lost; the log line is the bug report)"
 
 let resetRun () =
     lock reportedFindings (fun () ->
@@ -81,6 +100,8 @@ let resetRun () =
     suppressionOverriddenCount <- 0
     runAppliedCount <- 0
     runBuildFailures <- 0
+    runRuleFailures.Value <- 0
+    lock ruleFailuresSeen ruleFailuresSeen.Clear
     runCrossFileHeld <- 0
     runCompileMs <- 0L
     runAnalysisMs <- 0L
@@ -209,6 +230,63 @@ let private encodingOf (path: string) : Text.Encoding =
     | _ when bom.Length >= 2 && bom.[0] = 0xFEuy && bom.[1] = 0xFFuy -> Text.Encoding.BigEndianUnicode
     | _ -> Text.UTF8Encoding false
 
+/// Held for every write of a source, and by an interrupt while it puts the
+/// run's files back: once interrupted, nothing more is written.
+let private writeGate = obj ()
+
+let mutable private interrupted = false
+
+/// A run in a resident host (the MCP server, the test host) starts writable.
+let clearInterrupt () =
+    lock writeGate (fun () -> interrupted <- false)
+
+/// Is `path` the directory `root` or inside it? By the paths as they are
+/// written, `..` resolved: a link inside the root that leads out of it is
+/// not followed.
+let isUnder (root: string) (path: string) =
+    let comparison =
+        if Path.DirectorySeparatorChar = '\\' then
+            StringComparison.OrdinalIgnoreCase
+        else
+            StringComparison.Ordinal
+
+    let rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath root)
+    let separator = string Path.DirectorySeparatorChar
+    // a drive root keeps its separator
+    let prefix =
+        if rootFull.EndsWith(separator, StringComparison.Ordinal) then
+            rootFull
+        else
+            rootFull + separator
+
+    let full = Path.GetFullPath path
+    full.Equals(rootFull, comparison) || full.StartsWith(prefix, comparison)
+
+/// The directory an MCP server was started for, while it serves: no source
+/// outside it is written, whatever a call's projects reach (a linked file,
+/// a referenced project). None for a command-line run, which writes where
+/// its target leads.
+let mutable private writeRoot: string option = None
+
+let setWriteRoot (root: string option) =
+    lock writeGate (fun () -> writeRoot <- root)
+
+let private writing (path: string) (write: unit -> unit) =
+    lock writeGate (fun () ->
+        if interrupted then
+            raise (OperationCanceledException "the run was interrupted; nothing more is written")
+
+        match writeRoot with
+        | Some root when not (isUnder root path) ->
+            // ends the run: what it wrote goes back (executeRun)
+            raise (
+                UnauthorizedAccessException
+                    $"{path} is outside the server's root {root}, and nothing outside it is written"
+            )
+        | _ -> ()
+
+        write ())
+
 /// Write a source text back in the encoding it was read with — Roslyn
 /// decodes a file that is not valid UTF-8 as the system code page, and a
 /// legacy file's `×` or `ä` must go back as the bytes it came in — else in
@@ -219,13 +297,61 @@ let private writeSource (path: string) (text: SourceText) =
         | null -> encodingOf path
         | e -> e
 
-    File.WriteAllText(path, text.ToString(), encoding)
+    writing path (fun () -> File.WriteAllText(path, text.ToString(), encoding))
+
+/// A source's bytes written back as they were (a put-back, or a probe's
+/// state restored), under the same gate.
+let private writeBytes (path: string) (bytes: byte[]) =
+    writing path (fun () -> File.WriteAllBytes(path, bytes))
 
 /// The originals of every file this run wrote — the bytes, so a put-back
 /// restores the file exactly, whatever its encoding. First write wins:
-/// the original is the original.
+/// the original is the original. Locked: an interrupt reads it from its
+/// own thread.
 let private runOriginals =
     Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase)
+
+/// Has the run's verification — the build of every project it changed —
+/// finished? Until then nothing it wrote is verified by a build, and a
+/// failure or an interrupt puts all of it back.
+let mutable private runVerified = false
+
+/// Put back, through `write`, every file the run wrote that no longer holds
+/// its original bytes; returns how many. A file that cannot be put back is
+/// named: it stays as the run left it.
+let private putBackRunThrough (write: string -> byte[] -> unit) =
+    let originals =
+        lock runOriginals (fun () -> runOriginals |> Seq.map (fun kv -> kv.Key, kv.Value) |> List.ofSeq)
+
+    originals
+    |> List.sumBy (fun (path, original) ->
+        try
+            if File.Exists path && File.ReadAllBytes path <> original then
+                write path original
+                1
+            else
+                0
+        with
+        | :? IOException
+        | :? UnauthorizedAccessException as e ->
+            eprintfn $"  (could not put back {path}: {e.Message})"
+            0)
+
+/// A run that ended early, before its verification: everything it wrote
+/// goes back; returns how many files. Nothing once the run is verified.
+let private putBackUnverified () =
+    if runVerified then 0 else putBackRunThrough writeBytes
+
+/// Ctrl+C: nothing more is written, and unless the verification builds
+/// have finished, every file the run wrote goes back; returns how many.
+let putBackOnInterrupt () =
+    lock writeGate (fun () ->
+        interrupted <- true
+
+        if runVerified then
+            0
+        else
+            putBackRunThrough (fun path bytes -> File.WriteAllBytes(path, bytes)))
 
 /// The rules whose fixes the run wrote into each file: what a verification
 /// build that fails on the file names when it puts the file back.
@@ -297,8 +423,9 @@ let private codesIn (file: string) =
     | _ -> "?"
 
 let private rememberOriginal (path: string) =
-    if not (runOriginals.ContainsKey path) then
-        runOriginals.[path] <- File.ReadAllBytes path
+    lock runOriginals (fun () ->
+        if not (runOriginals.ContainsKey path) then
+            runOriginals.[path] <- File.ReadAllBytes path)
 
 let private putBack (files: string seq) (why: string) =
     let mutable n = 0
@@ -306,7 +433,7 @@ let private putBack (files: string seq) (why: string) =
     for f in files do
         match runOriginals.TryGetValue f with
         | true, original ->
-            File.WriteAllBytes(f, original)
+            writeBytes f original
             n <- n + 1
         | _ -> ()
 
@@ -770,6 +897,7 @@ let private analyzeProject
         CompilationWithAnalyzersOptions(
             projectOptions,
             (fun ex analyzer _ ->
+                Interlocked.Increment(&runRuleFailures.contents) |> ignore
                 eprintfn $"  (analyzer {analyzer.GetType().Name} failed: {ex.GetType().Name}: {ex.Message})"),
             // --jobs 1 is the sequential run, the analyzer included
             concurrentAnalysis = (opts.Jobs > 1),
@@ -964,11 +1092,7 @@ let private analyzeProject
                     let options = Some(projectOptions.AnalyzerConfigOptionsProvider.GetOptions tree)
 
                     for (name, ex) in failures do
-                        let file = Path.GetFileName tree.FilePath
-                        let kind = ex.GetType().Name
-
-                        Out.bad
-                            $"  (rule {name} threw on {file}: {kind}: {ex.Message} — its suggestions for this file are lost; the log line is the bug report)"
+                        noteRuleFailure name tree ex
 
                     for d in ds do
                         let span = d.Location.SourceSpan
@@ -1811,10 +1935,22 @@ let private ensureRestored (path: string) =
 /// The legacy (non-SDK) projects of a run, read by LegacyProjects into their
 /// own workspace, and whether each builds before any fix (the arbiter's
 /// baseline; None where no MSBuild.exe answers).
-let private legacyWorkspace = lazy (new AdhocWorkspace())
+let mutable private legacyWorkspace = lazy (new AdhocWorkspace())
 
 let private legacyBaseline =
     Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase)
+
+/// A run starts with no legacy project or script loaded: what a resident
+/// host (the MCP server) read for its last call is that call's text, and
+/// an apply on it would write that text over every edit made since.
+let private forgetLegacyProjects () =
+    if legacyWorkspace.IsValueCreated then
+        legacyWorkspace.Value.Dispose()
+
+    legacyWorkspace <- lazy (new AdhocWorkspace())
+    legacyBaseline.Clear()
+    LegacyProjects.reset ()
+    Scripts.reset ()
 
 /// A project with the run's symbols (--define, csharp_refactor.defines) in
 /// its parse options: a script or legacy project loaded by an earlier run
@@ -1981,7 +2117,7 @@ let private narrowPutBack
 
             for f in tied do
                 touched.[f] <- File.ReadAllBytes f
-                File.WriteAllBytes(f, runOriginals.[f])
+                writeBytes f runOriginals.[f]
 
             let alongside =
                 tied
@@ -1998,6 +2134,21 @@ let private narrowPutBack
     let result = narrow detail []
     result, [ for kv in touched -> kv.Key, kv.Value ]
 
+/// Why a `--report` path cannot be written, when its directory is missing
+/// or the path is no path.
+let private unwritableReport (report: string) : string option =
+    try
+        let directory = Path.GetDirectoryName(Path.GetFullPath report)
+
+        if Directory.Exists directory then
+            None
+        else
+            Some $"--report: the directory {directory} does not exist"
+    with
+    | :? ArgumentException
+    | :? NotSupportedException
+    | :? PathTooLongException -> Some $"--report: '{report}' is not a usable path"
+
 /// The whole run for one Options value.
 let private executeRunCore (opts: Options) : Task<int> =
     // a source file that is not UTF-8 decodes as the system code page (Roslyn's
@@ -2007,24 +2158,34 @@ let private executeRunCore (opts: Options) : Task<int> =
     honorAllSuppressions <- opts.HonorSuppressions
     showNotes <- opts.Notes
     notesOnly <- opts.NotesOnly
-    runOriginals.Clear()
+    lock runOriginals runOriginals.Clear
+    runVerified <- false
+    clearInterrupt ()
+    forgetLegacyProjects ()
+    Rules.observeFailures noteRuleFailure
     appliedCodes.Clear()
     rejectedFixes.Clear()
     sweptFlavors.Clear()
     fileUnits.Clear()
     advisedIds.Clear()
 
-    baselineFingerprints <-
-        match opts.Baseline with
-        | Some path ->
-            match loadBaseline path with
-            | Ok prints -> prints
-            | Error message ->
-                eprintfn $"{message}"
-                Set.empty
-        | None -> Set.empty
+    // Refused before any work: a --baseline that cannot be read, since the
+    // run would then fix everything it was there to hold back, and a
+    // --report path that cannot be written, which is otherwise found out
+    // with the fixes already on disk.
+    let targets =
+        match opts.Baseline |> Option.map loadBaseline, opts.Report |> Option.bind unwritableReport with
+        | Some(Error message), _ -> Error message
+        | _, Some problem -> Error problem
+        | baseline, None ->
+            baselineFingerprints <-
+                match baseline with
+                | Some(Ok prints) -> prints
+                | _ -> Set.empty
 
-    match resolveTargets opts.Target with
+            resolveTargets opts.Target
+
+    match targets with
     | Error message ->
         eprintfn $"{message}"
         Task.FromResult 2
@@ -2064,9 +2225,23 @@ let private executeRunCore (opts: Options) : Task<int> =
 
             let ct = CancellationToken.None
 
+            // a report that cannot be written (locked, the disk full) fails
+            // the run without ending it: the verification is still to come
+            let reportFailed = ref false
+
             let writeReportNow () =
                 match opts.Report with
-                | Some path -> writeReport path opts.Target (reportedSoFar ())
+                | Some path ->
+                    try
+                        writeReport path opts.Target (reportedSoFar ())
+                        reportFailed.Value <- false
+                    with
+                    | :? IOException
+                    | :? UnauthorizedAccessException as e ->
+                        if not reportFailed.Value then
+                            eprintfn $"  (could not write the report {path}: {e.Message})"
+
+                        reportFailed.Value <- true
                 | None -> ()
 
             let changedProjects = HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -2387,12 +2562,12 @@ let private executeRunCore (opts: Options) : Task<int> =
                                 match verify project with
                                 | Some(Error _) ->
                                     for f, bytes in patched do
-                                        File.WriteAllBytes(f, bytes)
+                                        writeBytes f bytes
 
                                     // a tied file outside the folder the narrowing put back
                                     for f, bytes in touched do
                                         if not (List.exists (Workspace.samePath f) files) then
-                                            File.WriteAllBytes(f, bytes)
+                                            writeBytes f bytes
 
                                     Out.dim
                                         $"  {Path.GetFileName project} does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
@@ -2465,7 +2640,11 @@ let private executeRunCore (opts: Options) : Task<int> =
                                     seen
                                     |> Seq.exists (fun up ->
                                         changedProjects.Contains up
-                                        && f.StartsWith(Path.GetDirectoryName up, StringComparison.OrdinalIgnoreCase)))
+                                        // the project's own folder, not a sibling whose name it prefixes
+                                        && f.StartsWith(
+                                            Path.GetDirectoryName up + string Path.DirectorySeparatorChar,
+                                            StringComparison.OrdinalIgnoreCase
+                                        )))
                                 |> List.ofSeq
 
                             // the fixes come out and the dependent is built again: a dependent
@@ -2478,7 +2657,7 @@ let private executeRunCore (opts: Options) : Task<int> =
                             match buildDependent project with
                             | Some(Error _) ->
                                 for f, bytes in patched do
-                                    File.WriteAllBytes(f, bytes)
+                                    writeBytes f bytes
 
                                 Out.dim
                                     $"  {Path.GetFileName project} (a dependent) does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
@@ -2492,6 +2671,10 @@ let private executeRunCore (opts: Options) : Task<int> =
 
                                 eprintfn $"{detail}"
                                 exitReasons.Add $"{Path.GetFileName project}: a dependent's verification build failed"
+
+                // what is on disk now has been through the builds: a failure
+                // or an interrupt from here on leaves it
+                runVerified <- true
 
                 // the summary
                 let heldNotes = heldNoteCounts |> List.ofSeq
@@ -2542,6 +2725,15 @@ let private executeRunCore (opts: Options) : Task<int> =
                     printfn $"{runAppliedCount} fix(es) applied in total"
 
                 writeReportNow ()
+
+                if reportFailed.Value then
+                    exitReasons.Add "the report could not be written"
+
+                // a rule that threw lost its findings for that file: not a
+                // clean run, whatever the counts above say
+                if runRuleFailures.Value > 0 then
+                    exitReasons.Add
+                        $"{runRuleFailures.Value} rule or analyzer failure(s) (named above): those files were not fully analysed"
 
                 if runBuildFailures > 0 || exitCode <> 0 || exitReasons.Count > 0 then
                     for r in exitReasons do
@@ -2642,11 +2834,31 @@ let executeRun (opts: Options) : int =
         let run = executeRunCore opts
 
         try
-            run.Result
-        with :? AggregateException as wrapped when wrapped.InnerExceptions.Count = 1 ->
-            // a single failure is thrown as itself, its stack kept; several stay the aggregate
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(wrapped.InnerException).Throw()
-            0 // not reached: Throw does not return
+            try
+                run.Result
+            with :? AggregateException as wrapped when wrapped.InnerExceptions.Count = 1 ->
+                // a single failure is thrown as itself, its stack kept; several stay the aggregate
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(wrapped.InnerException).Throw()
+                0 // not reached: Throw does not return
+        with
+        // A run that fails before its verification builds leaves nothing it
+        // wrote verified, so all of it goes back. A source that cannot be
+        // written or read (read-only, locked) is the run's failure, said
+        // and exit 1; anything else goes on to its caller.
+        | :? IOException
+        | :? UnauthorizedAccessException as e ->
+            let restored = putBackUnverified ()
+
+            eprintfn $"{e.Message}; the {restored} file(s) the run had changed were put back unverified"
+            exitReasons.Add $"a file could not be written or read: {e.Message}"
+            1
+        | _ ->
+            let restored = putBackUnverified ()
+
+            if restored > 0 then
+                eprintfn $"the run failed; the {restored} file(s) it had changed were put back unverified"
+
+            reraise ()
     finally
         Rules.restrictTo None
 

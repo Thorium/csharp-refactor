@@ -223,12 +223,30 @@ let writeInto (directory: string) : Result<string, string> =
                     | None -> true)
                 |> String.concat "\n"
 
+            // `root = true` ends the search for settings at this file: right
+            // for a tree's first .editorconfig, and under a directory that
+            // has one it would cut off everything that file sets
+            let inherits =
+                let rec above (dir: string) =
+                    match Path.GetDirectoryName dir with
+                    | null -> false
+                    | parent -> File.Exists(Path.Combine(parent, ".editorconfig")) || above parent
+
+                above (Path.GetFullPath directory)
+
             let content =
-                if existing = "" then "root = true\n\n" + block
+                if existing = "" && inherits then block
+                elif existing = "" then "root = true\n\n" + block
                 elif existing.EndsWith "\n" then existing + "\n" + block
                 else existing + "\n\n" + block
 
-            File.WriteAllText(path, content)
+            // an existing file keeps its byte-order mark
+            let marked =
+                File.Exists path
+                && (use stream = File.OpenRead path
+                    stream.ReadByte() = 0xEF && stream.ReadByte() = 0xBB && stream.ReadByte() = 0xBF)
+
+            File.WriteAllText(path, content, Text.UTF8Encoding marked)
             Ok path
     with
     | :? IOException

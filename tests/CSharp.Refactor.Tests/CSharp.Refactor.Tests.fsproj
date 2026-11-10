@@ -47,6 +47,8 @@
     <Compile Include="RulesMdTests.fs" />
     <Compile Include="KnobTests.fs" />
     <Compile Include="ToolTests.fs" />
+    <Compile Include="ReleaseAuditToolTests.fs" />
+    <Compile Include="McpServerTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

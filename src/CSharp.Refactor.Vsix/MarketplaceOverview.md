@@ -8,8 +8,12 @@ and light bulbs with no project change and no effect on builds.
 The rules care about correctness (races, swallowed exceptions, leaked
 disposables, unobserved tasks), measured performance (allocations that need
 not happen, repeated work) and clear functional idiom — and deliberately not
-about naming, layout or conventions. Every suggestion is Info severity: it
-marks an opportunity, never gates a build.
+about naming, layout or conventions. A suggestion is Info severity: it marks
+an opportunity, and never gates a build. The priority rules, which point at
+likely defects, show as warnings.
+
+Requires Visual Studio 2022 17.14 or newer: the analyzers are built against
+its Roslyn.
 
 The same rules run in `dotnet build` through the `CSharp.Refactor.Analyzers`
 NuGet package, and the `csharp-refactor` dotnet tool applies them in bulk,
