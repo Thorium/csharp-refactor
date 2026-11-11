@@ -13,7 +13,8 @@
   </Metadata>
   <Installation>
     <!-- 17.14 is the first Visual Studio whose Roslyn (4.14) loads the
-         analyzer; an older one installs the extension and shows nothing -->
+         analyzer. An older one would run the Tools menu and show no
+         diagnostic, so it is no installation target. -->
     <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.14,19.0)">
       <ProductArchitecture>amd64</ProductArchitecture>
     </InstallationTarget>

@@ -117,12 +117,13 @@ let private putBackOnCtrlC () =
         Console.CancelKeyPress.Add(fun args ->
             // the process stays alive while the files go back
             args.Cancel <- true
-            let restored = Sweep.putBackOnInterrupt ()
 
-            if restored > 0 then
-                eprintfn $"interrupted: the {restored} file(s) the run had changed were put back unverified"
-            else
-                eprintfn "interrupted"
+            Sweep.putBackOnInterruptSaying (fun restored ->
+                if restored > 0 then
+                    eprintfn $"interrupted: the {restored} file(s) the run had changed were put back unverified"
+                else
+                    eprintfn "interrupted")
+            |> ignore
 
             exit 130)
 
@@ -199,7 +200,7 @@ let private runMain argv =
 let main argv =
     surviveForeignBackgroundExceptions ()
     putBackOnCtrlC ()
-    let code = runMain argv
+    let code = Sweep.endingOnInterrupt (fun () -> runMain argv)
 
     // a run that went on past loaded code failing on a background thread
     // analysed what it could, not everything: exit 1 says so

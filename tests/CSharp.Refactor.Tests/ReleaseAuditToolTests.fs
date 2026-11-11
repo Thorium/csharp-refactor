@@ -214,6 +214,48 @@ type EndedEarly() =
         Assert.Contains("\"edited\"", after)
 
     [<Fact>]
+    member _.``a project at a drive root still owns the files beside it``() =
+        let root = Path.GetPathRoot(Path.GetTempPath())
+        let folder = Path.Combine(root, "src", "App")
+
+        Assert.Equal(root, Sweep.folderPrefix root)
+        Assert.StartsWith(Sweep.folderPrefix root, Path.Combine(root, "Program.cs"))
+        Assert.Equal(folder + string Path.DirectorySeparatorChar, Sweep.folderPrefix folder)
+
+    [<Fact>]
+    member _.``a write refused after an interrupt ends the run with 130, not with its exception``() =
+        try
+            let said = ref -1
+
+            Sweep.putBackOnInterruptSaying (fun restored -> said.Value <- restored)
+            |> ignore
+            // said before the run can go on to its next write
+            Assert.Equal(0, said.Value)
+
+            Assert.Equal(
+                130,
+                Sweep.endingOnInterrupt (fun () -> raise (OperationCanceledException "nothing more is written"))
+            )
+
+            // out of the run's task
+            Assert.Equal(
+                130,
+                Sweep.endingOnInterrupt (fun () ->
+                    raise (AggregateException(OperationCanceledException "nothing more is written")))
+            )
+
+            Sweep.clearInterrupt ()
+            Assert.Equal(3, Sweep.endingOnInterrupt (fun () -> 3))
+
+            // a cancellation no interrupt caused is the run's own failure
+            Assert.Throws<OperationCanceledException>(fun () ->
+                Sweep.endingOnInterrupt (fun () -> raise (OperationCanceledException "a timeout"))
+                |> ignore)
+            |> ignore
+        finally
+            Sweep.clearInterrupt ()
+
+    [<Fact>]
     member _.``an interrupt after the verification builds leaves the verified fixes``() =
         let dir = tempDir ()
         let project = writeTwoFileProject dir

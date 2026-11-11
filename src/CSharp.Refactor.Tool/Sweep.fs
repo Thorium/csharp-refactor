@@ -262,6 +262,16 @@ let isUnder (root: string) (path: string) =
     let full = Path.GetFullPath path
     full.Equals(rootFull, comparison) || full.StartsWith(prefix, comparison)
 
+/// `directory` as the prefix of the paths inside it, and of no sibling's
+/// whose name it starts. A drive root ends in its separator already.
+let folderPrefix (directory: string) =
+    let separator = string Path.DirectorySeparatorChar
+
+    if directory.EndsWith(separator, StringComparison.Ordinal) then
+        directory
+    else
+        directory + separator
+
 /// The directory an MCP server was started for, while it serves: no source
 /// outside it is written, whatever a call's projects reach (a linked file,
 /// a referenced project). None for a command-line run, which writes where
@@ -344,14 +354,39 @@ let private putBackUnverified () =
 
 /// Ctrl+C: nothing more is written, and unless the verification builds
 /// have finished, every file the run wrote goes back; returns how many.
-let putBackOnInterrupt () =
+/// `say` hears the count while the gate is held: the run's next write, and
+/// the end it brings (endingOnInterrupt), wait for it.
+let putBackOnInterruptSaying (say: int -> unit) =
     lock writeGate (fun () ->
         interrupted <- true
 
-        if runVerified then
-            0
-        else
-            putBackRunThrough (fun path bytes -> File.WriteAllBytes(path, bytes)))
+        let restored =
+            if runVerified then
+                0
+            else
+                putBackRunThrough (fun path bytes -> File.WriteAllBytes(path, bytes))
+
+        say restored
+        restored)
+
+let putBackOnInterrupt () = putBackOnInterruptSaying ignore
+
+/// The run's exit code, and 130 when the write an interrupt refused ended
+/// it: the files are back and said so by then, and the exception is no
+/// failure to report.
+let endingOnInterrupt (run: unit -> int) : int =
+    let refusedWrite (e: exn) =
+        match e with
+        | :? OperationCanceledException -> true
+        | :? AggregateException as several ->
+            several.Flatten().InnerExceptions
+            |> Seq.forall (fun inner -> inner :? OperationCanceledException)
+        | _ -> false
+
+    try
+        run ()
+    with e when refusedWrite e && lock writeGate (fun () -> interrupted) ->
+        130
 
 /// The rules whose fixes the run wrote into each file: what a verification
 /// build that fails on the file names when it puts the file back.
@@ -2523,7 +2558,7 @@ let private executeRunCore (opts: Options) : Task<int> =
                         | Some(Ok()) -> printfn $"  {Path.GetFileName project}: still builds"
                         | Some(Error detail) ->
                             // the project's own folder, not a sibling whose name it prefixes
-                            let folder = Path.GetDirectoryName project + string Path.DirectorySeparatorChar
+                            let folder = folderPrefix (Path.GetDirectoryName project)
 
                             let files =
                                 runOriginals.Keys
@@ -2642,7 +2677,7 @@ let private executeRunCore (opts: Options) : Task<int> =
                                         changedProjects.Contains up
                                         // the project's own folder, not a sibling whose name it prefixes
                                         && f.StartsWith(
-                                            Path.GetDirectoryName up + string Path.DirectorySeparatorChar,
+                                            folderPrefix (Path.GetDirectoryName up),
                                             StringComparison.OrdinalIgnoreCase
                                         )))
                                 |> List.ofSeq

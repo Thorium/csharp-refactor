@@ -2,6 +2,12 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
+## 0.1.26
+
+- Ctrl+C exits 130 once the files are back: the run's next write could end it first, with a stack trace.
+- A dependent's failed build puts back the files of a project at a drive root (`C:\App.csproj`) too.
+- A glob ignores case on macOS, as on Windows.
+
 ## 0.1.25
 
 - The analyzers package declares no dependency: `FSharp.Core.dll` landed in the `bin` and `deps.json` of every application referencing it.
