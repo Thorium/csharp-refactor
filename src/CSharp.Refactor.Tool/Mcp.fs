@@ -34,6 +34,7 @@ let limitsOf (opts: Options) : Result<Limits, string> =
         [
             "--codes", opts.ExplicitCodes.IsSome
             "--categories", opts.Categories.IsSome
+            "--exclude-codes", not opts.ExcludedCodes.IsEmpty
             "--api-changes", opts.ApiChanges
             "--report", opts.Report.IsSome
             "--parse-only", opts.ParseOnly
@@ -52,7 +53,7 @@ let limitsOf (opts: Options) : Result<Limits, string> =
         let listed = String.concat ", " ignored
 
         Error
-            $"--mcp serves many runs, and {listed} would have no effect on them. The server takes a directory, --dry-run (it then applies nothing), --define and --jobs; an analyze call names its own codes, categories and parseOnly."
+            $"--mcp serves many runs, and {listed} would have no effect on them. The server takes a directory, --dry-run (it then applies nothing), --define and --jobs; an analyze call names its own codes, excludeCodes, categories and parseOnly."
     elif opts.Target <> "" && not (IO.Directory.Exists opts.Target) then
         Error
             $"--mcp takes the DIRECTORY the server may work in; '{opts.Target}' is not one. Without one it is the current directory."
@@ -123,6 +124,12 @@ let private toolsJson =
                                                         )
                                                         "codes",
                                                         box (prop "string" "comma-separated rule codes to restrict to")
+                                                        "excludeCodes",
+                                                        box (
+                                                            prop
+                                                                "string"
+                                                                "comma-separated rule codes to leave out; wins over codes and categories"
+                                                        )
                                                         "categories",
                                                         box (
                                                             prop
@@ -188,13 +195,17 @@ let private handleAnalyze (limits: Limits) (args: JsonElement) =
     | Some(Ok _) when limits.ReadOnly && getBool "apply" ->
         Error "this server was started with --dry-run and applies nothing; call analyze without apply"
     | Some(Ok target) ->
-        // codes and categories go through the command line's own parser: an
-        // unknown code or category is an error there, never an empty, clean run
+        // codes, excludeCodes and categories go through the command line's
+        // own parser: an unknown code or category is an error there, never
+        // an empty, clean run
         let argv =
             [|
                 target
                 match getString "codes" with
                 | Some codes -> yield! [ "--codes"; codes ]
+                | None -> ()
+                match getString "excludeCodes" with
+                | Some codes -> yield! [ "--exclude-codes"; codes ]
                 | None -> ()
                 match getString "categories" with
                 | Some categories -> yield! [ "--categories"; categories ]

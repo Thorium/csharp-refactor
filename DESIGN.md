@@ -1565,8 +1565,8 @@ solution or directory walk-up; only that file is edited), `X.sln`/`X.slnx`,
 `src/`, `"src/**/*.csproj"`, and a workspace directory of checkouts (each
 analysed on its own into one report, paths relative to the workspace).
 
-**Flags** — `--dry-run`, `--codes`, `--categories`, `--jobs`, `--framework`,
-`--max-passes`, `--api-changes`, `--no-if-defs`, `--report <sarif|json|html|csv>`,
+**Flags** — `--dry-run`, `--codes`, `--categories`, `--exclude-codes`, `--jobs`,
+`--framework`, `--max-passes`, `--api-changes`, `--no-if-defs`, `--report <sarif|json|html|csv>`,
 `--baseline`, `--fail-on-findings`, `--notes [on|off|only]`, `--format json`,
 `--rules`, `--create-config`, `--mcp`, `--parse-only`, `--honor-suppressions`,
 `--help`. Exit codes 0 clean, 1 failure, 2 usage, 3 findings (with

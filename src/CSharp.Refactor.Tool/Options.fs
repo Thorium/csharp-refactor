@@ -17,6 +17,9 @@ type Options =
         /// ask, a category is merely a filter.
         ExplicitCodes: Set<string> option
         Categories: Set<RuleCatalog.Category> option
+        /// `--exclude-codes`: rules left out of the run, after --codes and
+        /// --categories, ahead of .editorconfig and of naming them in --codes.
+        ExcludedCodes: Set<string>
         DryRun: bool
         NoColor: bool
         ApiChanges: bool
@@ -64,6 +67,10 @@ OPTIONS
                         further. For a repository you do not maintain,
                         "correctness,performance" is the set worth a pull
                         request; nobody welcomes a stranger's punctuation
+  --exclude-codes CR0103,CR0047
+                        leave these rules out: their analyzers do not run.
+                        Applied after --codes and --categories, and wins over
+                        both and over .editorconfig
   --jobs <n>            files analysed at once (default 4, clamped to 2-4 by
                         core count). --jobs 1 is the sequential run
   --framework <tfm>     analyse only this target framework. By default a
@@ -151,6 +158,7 @@ let private valueFlags =
         "--jobs"
         "--max-passes"
         "--codes"
+        "--exclude-codes"
         "--categories"
         "--define"
     ]
@@ -177,6 +185,24 @@ let rec private parseArgsLoop opts args =
                 { opts with
                     Codes = Some parsed
                     ExplicitCodes = Some parsed
+                }
+                rest
+        | unknown ->
+            let listed = String.concat ", " unknown
+            Error $"not a rule code: {listed}. --rules lists every code."
+    | "--exclude-codes" :: codes :: rest ->
+        let parsed =
+            codes.Split ','
+            |> Array.map (fun c -> c.Trim().ToUpperInvariant())
+            |> Array.filter (fun c -> c <> "")
+            |> Set.ofArray
+
+        match parsed |> Set.filter (RuleCatalog.known.Contains >> not) |> Set.toList with
+        | [] when parsed.IsEmpty -> Error "--exclude-codes names no rule code. --rules lists every code."
+        | [] ->
+            parseArgsLoop
+                { opts with
+                    ExcludedCodes = Set.union opts.ExcludedCodes parsed
                 }
                 rest
         | unknown ->
@@ -284,6 +310,19 @@ let applyCategories (opts: Options) =
 
         { opts with Codes = Some combined }
 
+/// Take `--exclude-codes` out of both code filters, last, so an excluded
+/// rule's analyzer never runs whatever --codes, --categories or the config say.
+let applyExclusions (opts: Options) =
+    if opts.ExcludedCodes.IsEmpty then
+        opts
+    else
+        { opts with
+            Codes = Some(Set.difference (opts.Codes |> Option.defaultValue RuleCatalog.known) opts.ExcludedCodes)
+            ExplicitCodes =
+                opts.ExplicitCodes
+                |> Option.map (fun codes -> Set.difference codes opts.ExcludedCodes)
+        }
+
 let defaults =
     {
         Target = ""
@@ -292,6 +331,7 @@ let defaults =
         Codes = None
         ExplicitCodes = None
         Categories = None
+        ExcludedCodes = Set.empty
         DryRun = false
         NoColor = false
         ApiChanges = false
@@ -315,9 +355,10 @@ let defaults =
 
 let parseArgs (argv: string[]) =
     parseArgsLoop defaults (List.ofArray argv)
-    |> Result.map applyCategories
+    |> Result.map (applyCategories >> applyExclusions)
     |> Result.bind (fun opts ->
         // a run of no rule reports nothing, which reads as a clean tree
         match opts.Codes with
-        | Some codes when codes.IsEmpty -> Error "--codes and --categories together leave no rule to run."
+        | Some codes when codes.IsEmpty ->
+            Error "--codes, --categories and --exclude-codes together leave no rule to run."
         | _ -> Ok opts)

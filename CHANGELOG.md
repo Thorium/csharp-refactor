@@ -2,6 +2,10 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
+## 0.1.27
+
+- `--exclude-codes CR0103,CR0047` leaves rules out of a run, after `--codes` and `--categories` and ahead of `.editorconfig`; the MCP `analyze` call takes `excludeCodes`.
+
 ## 0.1.26
 
 - Ctrl+C exits 130 once the files are back: the run's next write could end it first, with a stack trace.

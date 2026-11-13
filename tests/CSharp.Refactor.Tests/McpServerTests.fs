@@ -91,6 +91,7 @@ let ``a flag the server would ignore, or a root that is no directory, is a usage
 
     Assert.Contains("--report", refusal [ root; "--mcp"; "--report"; Path.Combine(root, "x.sarif") ])
     Assert.Contains("--api-changes", refusal [ root; "--mcp"; "--api-changes" ])
+    Assert.Contains("--exclude-codes", refusal [ root; "--mcp"; "--exclude-codes"; "CR0090" ])
     Assert.Contains("DIRECTORY", refusal [ file; "--mcp" ])
 
     let served = limits [ root; "--mcp"; "--dry-run"; "--define"; "LOCAL" ]
@@ -215,3 +216,46 @@ type Served() =
 
         Assert.Equal(source "Lib", File.ReadAllText outside)
         Assert.Equal(source "Own", File.ReadAllText own)
+
+    [<Fact>]
+    member _.``an analyze call's excludeCodes goes through the command line's parser``() =
+        let root = tempDir ()
+        let script = Path.Combine(root, "build.csx")
+        File.WriteAllText(script, fixable)
+
+        let excluding (id: int) (excludeCodes: string) =
+            JsonSerializer.Serialize(
+                dict
+                    [
+                        "jsonrpc", box "2.0"
+                        "id", box id
+                        "method", box "tools/call"
+                        "params",
+                        box (
+                            dict
+                                [
+                                    "name", box "analyze"
+                                    "arguments",
+                                    box (
+                                        dict
+                                            [
+                                                "target", box script
+                                                "codes", box "CR0090"
+                                                "excludeCodes", box excludeCodes
+                                            ]
+                                    )
+                                ]
+                        )
+                    ]
+            )
+
+        match
+            serve (limits [ root; "--mcp" ]) [ excluding 1 "CR009"; excluding 2 "cr0090" ]
+            |> List.map read
+        with
+        | [ Error unknown; Error empty ] ->
+            Assert.Contains("not a rule code: CR009.", unknown)
+            Assert.Contains("leave no rule to run", empty)
+        | other -> failwithf "answered %A" other
+
+        Assert.Equal(fixable, File.ReadAllText script)

@@ -60,6 +60,39 @@ let ``filters that leave no rule to run are refused`` () =
     | Ok opts -> Assert.Equal<Set<string>>(set [ "CR0090" ], opts.Codes.Value)
     | Error e -> failwith e
 
+[<Fact>]
+let ``--exclude-codes leaves rules out after --codes and --categories, and refuses what --codes refuses`` () =
+    Assert.Contains("not a rule code: CR009.", refused [ "src"; "--exclude-codes"; "CR0103,cr009" ])
+    Assert.Contains("--exclude-codes names no rule code", refused [ "src"; "--exclude-codes"; " , " ])
+    Assert.Equal("'--exclude-codes' needs a value after it", refused [ "src"; "--exclude-codes" ])
+    // exclusion wins over naming the same code in --codes
+    Assert.Contains("leave no rule to run", refused [ "src"; "--exclude-codes"; "cr0090"; "--codes"; "CR0090" ])
+
+    match parseArgs [| "src"; "--exclude-codes"; "cr0103"; "--exclude-codes"; "CR0047" |] with
+    | Ok opts ->
+        Assert.Equal<Set<string>>(set [ "CR0047"; "CR0103" ], opts.ExcludedCodes)
+
+        Assert.Equal<Set<string>>(
+            Set.difference CSharp.Refactor.RuleCatalog.known (set [ "CR0047"; "CR0103" ]),
+            opts.Codes.Value
+        )
+
+        Assert.True(opts.ExplicitCodes.IsNone)
+    | Error e -> failwith e
+
+    match parseArgs [| "src"; "--codes"; "CR0090,CR0103"; "--exclude-codes"; "CR0103" |] with
+    | Ok opts ->
+        Assert.Equal<Set<string>>(set [ "CR0090" ], opts.Codes.Value)
+        Assert.Equal<Set<string>>(set [ "CR0090" ], opts.ExplicitCodes.Value)
+    | Error e -> failwith e
+
+    let correctness =
+        CSharp.Refactor.RuleCatalog.codesIn (set [ CSharp.Refactor.RuleCatalog.Category.Correctness ])
+
+    match parseArgs [| "src"; "--exclude-codes"; "CR0090"; "--categories"; "correctness" |] with
+    | Ok opts -> Assert.Equal<Set<string>>(correctness.Remove "CR0090", opts.Codes.Value)
+    | Error e -> failwith e
+
 // ---- globs ----
 
 [<Fact>]

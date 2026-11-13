@@ -401,6 +401,27 @@ type EndToEnd() =
         Assert.Matches(@"re-analysing 1 of \d+ file\(s\)", output)
 
     [<Fact>]
+    member _.``--exclude-codes leaves a rule out while its neighbours still report``() =
+        let dir = tempDir ()
+        let project = writeProject dir
+
+        let codes (args: string[]) =
+            Sweep.resetRun ()
+
+            let code =
+                match parseArgs (Array.append [| project; "--dry-run" |] args) with
+                | Ok opts -> Sweep.executeRun opts
+                | Error e -> failwith e
+
+            Assert.Equal(0, code)
+            Sweep.reportedSoFar () |> List.map (fun f -> f.Code) |> List.sort
+
+        Assert.Equal<string list>([ "CR0090" ], codes [| "--exclude-codes"; "cr0103" |])
+        // exclusion wins over naming the code in --codes
+        Assert.Equal<string list>([ "CR0103" ], codes [| "--codes"; "CR0090,CR0103"; "--exclude-codes"; "CR0090" |])
+        Assert.Equal(sampleSource, File.ReadAllText(Path.Combine(dir, "Program.cs")))
+
+    [<Fact>]
     member _.``a csx script is its own compilation: #r and #load resolve, fixes apply, the run is verified in memory``
         ()
         =
