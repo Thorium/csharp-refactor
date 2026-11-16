@@ -987,3 +987,134 @@ let ``a solution that maps an old-format project to Any CPU keeps the projects' 
         )
     finally
         Directory.Delete(dir, true)
+
+// ---- CR0152 ----
+
+[<Fact>]
+let ``CR0152 converts a gate declared in one part of a partial type and locked only in another`` () =
+    // v2rayN: V2rayRuntime.cs declares _speedtestGate, V2rayRuntime.Profiles.cs locks it
+    let declaring =
+        csharp
+            """
+            partial class C
+            {
+                private readonly object _gate = new();
+            }
+
+            """
+
+    let locking = "partial class C { void F() { lock (_gate) { } } }"
+
+    let monitoring =
+        csharp
+            """
+            using System.Threading;
+            partial class C { void F() { Monitor.Enter(_gate); Monitor.Exit(_gate); } }
+            """
+
+    let unused = "partial class C { void F() { } }"
+
+    Assert.Equal(1, (suggestInProject false false "CR0152" [ "A.cs", declaring; "B.cs", locking ]).Length)
+    Assert.Empty(suggestInProject false false "CR0152" [ "A.cs", declaring; "B.cs", monitoring ])
+    Assert.Empty(suggestInProject false false "CR0152" [ "A.cs", declaring; "B.cs", unused ])
+
+// ---- CR0165 / CR0189: the appended argument ----
+
+let private leadOf (marker: string) (source: string) =
+    let line = source.Split('\n') |> Array.find (fun l -> l.Contains marker)
+    line.Substring(0, line.Length - line.TrimStart().Length)
+
+[<Fact>]
+let ``CR0165 puts the inner exception on a line of its own when the arguments span lines`` () =
+    // PowerShell's TraceListenerCommandBase: `provider.FullName), ex);` broke StyleCop SA1117
+    let source =
+        csharp
+            """
+            using System;
+            class C
+            {
+                void A(string path, string name)
+                {
+                    try { Work(); }
+                    catch (InvalidOperationException)
+                    {
+                        throw
+                            new NotSupportedException(
+                                string.Format("{0} {1}",
+                                    path,
+                                    name));
+                    }
+                    try { Work(); }
+                    catch (ArgumentException) { throw new NotSupportedException(string.Format("{0}", path)); }
+                }
+                void Work() { }
+            }
+            """
+
+    let fixedSource = (fixAll "CR0165" source).Replace("\r\n", "\n")
+    let lead = leadOf "string.Format(\"{0} {1}\"," fixedSource
+    Assert.Contains("name),\n" + lead + "ex);", fixedSource)
+    Assert.Contains("""throw new NotSupportedException(string.Format("{0}", path), ex); }""", fixedSource)
+
+[<Fact>]
+let ``CR0189 puts the token on a line of its own when the arguments span lines`` () =
+    let source =
+        csharp
+            """
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                Task<int> FetchAsync(string key, int retries) => Task.FromResult(1);
+                Task<int> FetchAsync(string key, int retries, CancellationToken token) => Task.FromResult(1);
+                Task<int> RunAsync(System.Func<Task<int>> work) => work();
+                Task<int> RunAsync(System.Func<Task<int>> work, CancellationToken token) => work();
+                async Task<int> Lambda(CancellationToken ct)
+                {
+                    return await RunAsync(async () =>
+                    {
+                        return await Task.FromResult(8);
+                    });
+                }
+                async Task<int> Lines(CancellationToken ct)
+                {
+                    return await FetchAsync(
+                        "lines",
+                        3);
+                }
+                async Task<int> Paren(CancellationToken ct)
+                {
+                    return await FetchAsync(
+                        "paren",
+                        4
+                    );
+                }
+                async Task<int> Single(CancellationToken ct) => await FetchAsync("single", 1);
+                async Task<int> Directive(CancellationToken ct)
+                {
+                    return await FetchAsync("directive", 7
+            #if NEVER
+                        , 9
+            #endif
+                        );
+                }
+                async Task<int> Below(CancellationToken ct)
+                {
+                    return await FetchAsync(
+                        "below", 2);
+                }
+            }
+            """
+
+    let fixedSource = (fixAll "CR0189" source).Replace("\r\n", "\n")
+    let lead = leadOf "\"lines\"," fixedSource
+    Assert.Contains("3,\n" + lead + "ct);", fixedSource)
+    Assert.Contains("4,\n" + leadOf "\"paren\"," fixedSource + "ct\n", fixedSource)
+    Assert.Contains("""await FetchAsync("single", 1, ct);""", fixedSource)
+    // the arguments together on the line below the call stay together
+    Assert.Contains(""""below", 2, ct);""", fixedSource)
+    // a lambda starting on the `(` line keeps the idiom (v2rayN's `_mutations.RunAsync`)
+    Assert.Contains("}, ct);", fixedSource)
+    // a directive before the `)`: the token goes after it, so an argument under `#if` stays in place
+    Assert.DoesNotContain("7, ct", fixedSource)
+    Assert.Contains("#endif\n" + leadOf ", 9" fixedSource + ", ct);", fixedSource)

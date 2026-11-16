@@ -703,14 +703,18 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                         | :? LockStatementSyntax as l -> l.Expression.Span = e.Span
                         | _ -> false
 
-                    // the other parts of a partial type see the field too
+                    // the other parts of a partial type see the field too: the uses
+                    // may all be there, none in the declaring file
                     let onlyLocked =
-                        not uses.IsEmpty
-                        && uses |> List.forall lockOperand
-                        && (field.ContainingType.DeclaringSyntaxReferences.Length <= 1
-                            || (match usesElsewhere tree model ctx field with
-                                | ValueSome elsewhere -> elsewhere |> List.forall (fun (pid, _) -> lockOperand pid)
-                                | ValueNone -> false))
+                        uses |> List.forall lockOperand
+                        && (if field.ContainingType.DeclaringSyntaxReferences.Length <= 1 then
+                                not uses.IsEmpty
+                            else
+                                match usesElsewhere tree model ctx field with
+                                | ValueSome elsewhere ->
+                                    not (uses.IsEmpty && elsewhere.IsEmpty)
+                                    && elsewhere |> List.forall (fun (pid, _) -> lockOperand pid)
+                                | ValueNone -> false)
 
                     if not onlyLocked then
                         None

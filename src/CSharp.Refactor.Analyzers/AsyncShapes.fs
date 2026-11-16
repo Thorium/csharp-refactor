@@ -1708,8 +1708,20 @@ let private omittedTokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion
 
                     match insertion with
                     | Some(argument, target) when bindsTo argument target ->
+                        // after the last argument, on a line of its own when the
+                        // arguments already span lines; before the `)` when a
+                        // directive stands there (an argument under `#if` stays last)
+                        let closeParen = inv.ArgumentList.CloseParenToken
+
                         let edit =
-                            Suggestion.insert inv.ArgumentList.CloseParenToken.SpanStart (separator + argument)
+                            if args.Count = 0 then
+                                Suggestion.insert closeParen.SpanStart argument
+                            elif closeParen.LeadingTrivia |> Seq.exists (fun t -> t.IsDirective) then
+                                Suggestion.insert closeParen.SpanStart (separator + argument)
+                            else
+                                Suggestion.insert
+                                    args.[args.Count - 1].Span.End
+                                    (Text.appendedArgument (tree.GetText()) inv.ArgumentList argument)
 
                         if Guards.speculativeCheck model [ edit ] then
                             Some

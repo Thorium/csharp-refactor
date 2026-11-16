@@ -718,7 +718,13 @@ let private innerExceptions (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                                 match named with
                                 | Some _ when headerValues -> []
                                 | Some(name, nameEdits) ->
-                                    let edits = nameEdits @ [ Suggestion.insert (List.last args).Span.End $", {name}" ]
+                                    let edits =
+                                        nameEdits
+                                        @ [
+                                            Suggestion.insert
+                                                (List.last args).Span.End
+                                                (Text.appendedArgument (tree.GetText()) c.ArgumentList name)
+                                        ]
 
                                     [
                                         Suggestion.fix

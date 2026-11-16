@@ -2,6 +2,11 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
+## 0.1.29
+
+- CR0152 converts a gate declared in one part of a partial type and locked only in the others: it counted the declaring file's uses alone, found none and stood down (v2rayN's `_speedtestGate`).
+- CR0165 and CR0189 put the argument they add on a line of its own, indented like the last one, when the arguments already span lines: `provider.FullName), ex);` broke StyleCop SA1117 in PowerShell. CR0189 adds it after the last argument, not before a `)` on its own line.
+
 ## 0.1.28
 
 - CR0015 leaves a `List<T>` loop whose body writes through the indexer (`xs[next] = xs[i]`): under `foreach` the next `MoveNext` threw. The element name drops a field prefix and a capital (`_contexts` → `context`).
