@@ -178,7 +178,7 @@ let private xamlBound (model: SemanticModel) (t: INamedTypeSymbol) =
     |> Seq.exists (fun r -> r.SyntaxTree.FilePath.EndsWith(".xaml.cs", System.StringComparison.OrdinalIgnoreCase))
     || (t.DeclaredAccessibility = Accessibility.Public
         && xamlRoots
-           |> List.exists (fun name -> not (isNull (model.Compilation.GetTypeByMetadataName name))))
+           |> List.exists (model.Compilation.GetTypeByMetadataName >> isNull >> not))
 
 /// Is the type an Entity Framework entity: a `DbSet<T>` of it anywhere?
 let private isEntity (model: SemanticModel) (t: INamedTypeSymbol) =

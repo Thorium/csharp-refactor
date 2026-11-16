@@ -71,7 +71,7 @@ let holdsSecret (name: string) =
     if lower = "authorization" || lower.Contains "idempotency" then
         false
     else
-        secretWords |> List.exists (fun (word: string) -> lower.Contains word)
+        secretWords |> List.exists lower.Contains
         || lower.Split('-', '_') |> Array.contains "key"
 
 /// Are these the headers of something that sends a request? A response's go nowhere.
