@@ -259,6 +259,45 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                                 isList || not (a.RefKindKeyword.IsKind SyntaxKind.None)
                             | _ -> false)
 
+                    // a list's indexer setter bumps its version: `xs[next] = item` under
+                    // a `foreach` throws on the next MoveNext (an array's does not)
+                    let rec written (e: ExpressionSyntax) =
+                        match e.Parent with
+                        // `xs[j]!` and `(xs[j])` are the element still
+                        | :? PostfixUnaryExpressionSyntax as u when
+                            u.IsKind SyntaxKind.SuppressNullableWarningExpression
+                            ->
+                            written u
+                        | :? ParenthesizedExpressionSyntax as p -> written p
+                        | :? AssignmentExpressionSyntax as a -> a.Left.Span = e.Span
+                        | :? PrefixUnaryExpressionSyntax as u ->
+                            u.IsKind SyntaxKind.PreIncrementExpression
+                            || u.IsKind SyntaxKind.PreDecrementExpression
+                            || u.IsKind SyntaxKind.AddressOfExpression
+                        | :? PostfixUnaryExpressionSyntax -> true
+                        | :? RefExpressionSyntax -> true
+                        // `(xs[0], xs[^1]) = (…)`: a deconstruction target, nested tuples too
+                        | :? ArgumentSyntax as a when (a.Parent :? TupleExpressionSyntax) ->
+                            not (a.RefKindKeyword.IsKind SyntaxKind.None)
+                            || written (a.Parent :?> TupleExpressionSyntax)
+                        | :? ArgumentSyntax as a -> not (a.RefKindKeyword.IsKind SyntaxKind.None)
+                        | _ -> false
+
+                    let listElementWritten =
+                        isList
+                        && body.DescendantNodes()
+                           |> Seq.exists (fun n ->
+                               match n with
+                               // by symbol: `this._items[n++] = …` writes the `_items` the loop reads
+                               | :? ElementAccessExpressionSyntax as e when
+                                   Guards.sameReference model e.Expression xs
+                                   || (match model.GetSymbolInfo(e.Expression).Symbol with
+                                       | null -> false
+                                       | s -> SymbolEqualityComparer.Default.Equals(s, model.GetSymbolInfo(xs).Symbol))
+                                   ->
+                                   written e
+                               | _ -> false)
+
                     // a list in a field may be reached from any method the body calls —
                     // `Visit(_pending[i])` appending to `_pending` is a growing worklist
                     // the `for` walks to its end and a `foreach` throws on: every call in
@@ -276,6 +315,7 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                     if
                         uses.IsEmpty
                         || reachable
+                        || listElementWritten
                         || reads.Length <> uses.Length
                         || not (reads |> List.forall isReadOnlyUse)
                         || Text.assignsTo xsText body
@@ -314,12 +354,26 @@ let private indexedLoop (tree: SyntaxTree) (model: SemanticModel) : Suggestion l
                             match alias with
                             | Some(n, _) -> [ n ]
                             | None ->
-                                // `pages` → `page`, `entries` → `entry`; else `item`
+                                // `pages` → `page`, `entries` → `entry`; else `item`. A field's
+                                // prefix stays off a local (`_contexts` → `context`, `m_items` →
+                                // `item`) and a property's capital too (`Items` → `item`)
                                 let collectionName =
-                                    match xs with
-                                    | :? IdentifierNameSyntax as i -> i.Identifier.ValueText
-                                    | :? MemberAccessExpressionSyntax as m -> m.Name.Identifier.ValueText
-                                    | _ -> ""
+                                    let raw =
+                                        match xs with
+                                        | :? IdentifierNameSyntax as i -> i.Identifier.ValueText
+                                        | :? MemberAccessExpressionSyntax as m -> m.Name.Identifier.ValueText
+                                        | _ -> ""
+
+                                    let unprefixed =
+                                        if raw.StartsWith "m_" || raw.StartsWith "s_" || raw.StartsWith "t_" then
+                                            raw.Substring 2
+                                        else
+                                            raw.TrimStart '_'
+
+                                    if unprefixed.Length > 0 && System.Char.IsUpper unprefixed.[0] then
+                                        string (System.Char.ToLowerInvariant unprefixed.[0]) + unprefixed.Substring 1
+                                    else
+                                        unprefixed
 
                                 let singular =
                                     if collectionName.EndsWith "ies" && collectionName.Length > 4 then

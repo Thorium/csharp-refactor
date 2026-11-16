@@ -18,6 +18,10 @@
 /// `Push`/`Insert`, an indexer set, a static), or disposed/closed by hand
 /// anywhere in scope (`x.Dispose()`, `x.Close()`, `((IDisposable)x).Dispose()`).
 ///
+/// A "BCL" callee is one in a `System` namespace AND an assembly signed with
+/// a runtime key: PowerShell's `System.Management.Automation.Cmdlet.WriteObject`
+/// hands the object down the pipeline.
+///
 /// NOTE ONLY, naming the destination, when a mention could move the value
 /// somewhere whose ownership is unknown: handed to a method by name (a
 /// same-file method is read one hop — a parameter it disposes is a
@@ -34,7 +38,9 @@
 /// reads them back after the send); `MemoryStream`,
 /// `StringReader`, `StringWriter` (own nothing); a wrapper over a foreign
 /// resource (`new StreamReader(parameter)`, or over a local that itself
-/// escapes); a value already under `using`; an `IAsyncDisposable`-only
+/// escapes); an object built with a `null!`/`default!` argument (its
+/// `Dispose` may dereference it); a value already under `using` (also
+/// `await using (x.ConfigureAwait(false))`); an `IAsyncDisposable`-only
 /// type (v2: `await using`). Under `Main` or top-level statements only a
 /// flush-sensitive type (a writer, a stream, a transaction) is lost work
 /// — .NET runs no finalizers at exit — and only those are reported there.
@@ -237,7 +243,7 @@ let private readsOnly (callee: IMethodSymbol) =
     || ns.StartsWith "FluentAssertions"
     || ns.StartsWith "Shouldly"
     || ns.StartsWith "Microsoft.VisualStudio.TestTools"
-    || (ns.StartsWith "System" && plainValue callee.ReturnType)
+    || (Guards.isBcl callee && plainValue callee.ReturnType)
 
 /// A BCL call whose result carries the argument (`Task.FromResult(x)`,
 /// `Tuple.Create(x, …)`): the result is the value in a wrapper.
@@ -245,7 +251,7 @@ let private wraps (model: SemanticModel) (callee: IMethodSymbol) (argType: IType
     match argType with
     | null -> false
     | argType ->
-        callee.ContainingNamespace.ToDisplayString().StartsWith "System"
+        Guards.isBcl callee
         && (match callee.ReturnType with
             | :? INamedTypeSymbol as r when r.IsGenericType ->
                 r.TypeArguments
@@ -377,7 +383,25 @@ and private fateOf
             | :? InvocationExpressionSyntax as inv ->
                 let name = m.Name.Identifier.ValueText
 
-                if name = "Dispose" || name = "Close" || name = "DisposeAsync" then
+                // `await using (x.ConfigureAwait(false)) { … }` and
+                // `await using var c = x.ConfigureAwait(false);` dispose x
+                let disposedThroughConfigureAwait =
+                    name = "ConfigureAwait"
+                    && (match inv.Parent with
+                        | :? UsingStatementSyntax -> true
+                        | :? EqualsValueClauseSyntax as ev ->
+                            match ev.Parent.Parent.Parent with
+                            | :? LocalDeclarationStatementSyntax as d -> d.UsingKeyword.IsKind SyntaxKind.UsingKeyword
+                            | :? UsingStatementSyntax -> true
+                            | _ -> false
+                        | _ -> false)
+
+                if
+                    name = "Dispose"
+                    || name = "Close"
+                    || name = "DisposeAsync"
+                    || disposedThroughConfigureAwait
+                then
                     Transfer
                 elif shownWindow model id name then
                     // a window shown non-modally outlives the scope: it closes, and
@@ -433,8 +457,7 @@ and private fateOf
                                 match arg.Parent.Parent with
                                 | :? InvocationExpressionSyntax as inv when (inv.Parent :? AwaitExpressionSyntax) ->
                                     match model.GetSymbolInfo(inv).Symbol with
-                                    | :? IMethodSymbol as callee ->
-                                        callee.ContainingNamespace.ToDisplayString().StartsWith "System"
+                                    | :? IMethodSymbol as callee -> Guards.isBcl callee
                                     | _ -> false
                                 | _ -> false
                             | _ -> false
@@ -489,10 +512,7 @@ and private fateOf
                             Transfer
                         elif readsOnly callee then
                             Stays
-                        elif
-                            callee.ContainingNamespace.ToDisplayString().StartsWith "System"
-                            && awaitedHere inv
-                        then
+                        elif Guards.isBcl callee && awaitedHere inv then
                             Stays // a BCL call, done with it once awaited here
                         elif wraps model callee (model.GetTypeInfo(arg.Expression).Type) then
                             resultFate model tree scope $"wrapped by '{name}', it" Stays Transfer inv
@@ -624,6 +644,21 @@ let private construction (model: SemanticModel) (init: ExpressionSyntax) : IType
         | t -> Some t
     | _ -> None
 
+/// An object built half-way on purpose: a `null!` or `default!` argument (a
+/// test constructing only what it exercises). Its `Dispose` may dereference
+/// what it was never given.
+let private partlyBuilt (init: ExpressionSyntax) =
+    match init with
+    | :? BaseObjectCreationExpressionSyntax as c when not (isNull c.ArgumentList) ->
+        c.ArgumentList.Arguments
+        |> Seq.exists (fun a ->
+            match a.Expression with
+            | :? PostfixUnaryExpressionSyntax as u when u.IsKind SyntaxKind.SuppressNullableWarningExpression ->
+                u.Operand.IsKind SyntaxKind.NullLiteralExpression
+                || u.Operand.IsKind SyntaxKind.DefaultLiteralExpression
+            | _ -> false)
+    | _ -> false
+
 /// A wrapper over a resource the scope did not create: a parameter, a
 /// field, a property read or a captured local as the first argument.
 let private wrapsForeign (model: SemanticModel) (init: ExpressionSyntax) =
@@ -676,6 +711,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
             | None -> None
             | Some t when noOwnership.Contains(t.OriginalDefinition.ToDisplayString()) -> None
             | Some t when wrapsForeign model init -> None
+            | Some _ when partlyBuilt init -> None
             | Some t ->
                 let block = d.Parent :?> BlockSyntax
                 let name = v.Identifier.ValueText

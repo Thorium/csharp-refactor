@@ -477,12 +477,149 @@ let private putBack (files: string seq) (why: string) =
 
 // ---- MSBuild ----
 
+/// The platform a solution without "Any CPU" builds for (Files.slnx lists
+/// only arm64, x64 and x86, and its app sets `RuntimeIdentifier` to
+/// `win-$(Platform)`): x64 where listed, else the first. None for a
+/// solution that has Any CPU, or a target that is not a solution.
+let solutionPlatform (target: string) : string option =
+    let solution =
+        if Directory.Exists target then
+            match
+                Directory.GetFiles(target, "*.sln")
+                |> Array.append (Directory.GetFiles(target, "*.slnx"))
+            with
+            | [| one |] -> Some one
+            | _ -> None
+        elif
+            File.Exists target
+            && (target.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
+                || target.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase))
+        then
+            Some target
+        else
+            None
+
+    solution
+    |> Option.bind (fun path ->
+        let text = File.ReadAllText path
+
+        let platforms =
+            if path.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase) then
+                Text.RegularExpressions.Regex.Matches(text, @"<Platform\s+Name=""([^""]+)""")
+                |> Seq.map (fun m -> m.Groups.[1].Value)
+                |> List.ofSeq
+            else
+                // SolutionConfigurationPlatforms: `Debug|x64 = Debug|x64`
+                let section = text.IndexOf "SolutionConfigurationPlatforms"
+
+                if section < 0 then
+                    []
+                else
+                    let close = text.IndexOf("EndGlobalSection", section)
+
+                    Text.RegularExpressions.Regex.Matches(
+                        text.Substring(section, (if close > section then close else text.Length) - section),
+                        @"\|([^=\r\n]+?)\s*="
+                    )
+                    |> Seq.map (fun m -> m.Groups.[1].Value.Trim())
+                    |> Seq.distinct
+                    |> List.ofSeq
+
+        let named (name: string) (p: string) =
+            p.Replace(" ", "").Equals(name, StringComparison.OrdinalIgnoreCase)
+
+        // "Mixed Platforms" is the solution's own aggregate, never a project's platform
+        let platforms = platforms |> List.filter (named "MixedPlatforms" >> not)
+
+        // a project in the old format that the solution maps to Any CPU under
+        // the platform has no property groups for it ("OutputPath is not set"):
+        // such a solution keeps its projects' own defaults
+        let legacyOnAnyCpu (platform: string) =
+            let directory = Path.GetDirectoryName(Path.GetFullPath path)
+            let wanted = platform.Replace(" ", "")
+
+            let matches (pattern: string) (input: string) =
+                Text.RegularExpressions.Regex.Matches(input, pattern)
+
+            let legacy (relative: string) =
+                let file =
+                    Path.Combine(directory, relative.Replace('\\', Path.DirectorySeparatorChar))
+
+                File.Exists file && not ((File.ReadAllText file).Contains "Sdk=")
+
+            try
+                if path.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase) then
+                    Text.RegularExpressions.Regex.Matches(
+                        text,
+                        @"<Project\s+Path=""([^""]+)""[^>]*>(.*?)</Project>",
+                        Text.RegularExpressions.RegexOptions.Singleline
+                    )
+                    |> Seq.exists (fun project ->
+                        matches @"<Platform\b([^>]*)>" project.Groups.[2].Value
+                        |> Seq.exists (fun mapping ->
+                            let attributes = mapping.Groups.[1].Value
+
+                            let target =
+                                Text.RegularExpressions.Regex.Match(attributes, @"Project=""([^""]+)""")
+
+                            let from =
+                                Text.RegularExpressions.Regex.Match(attributes, @"Solution=""[^""|]*\|([^""]+)""")
+
+                            target.Success
+                            && named "AnyCPU" target.Groups.[1].Value
+                            && (not from.Success
+                                || from.Groups.[1].Value = "*"
+                                || named wanted from.Groups.[1].Value))
+                        && legacy project.Groups.[1].Value)
+                else
+                    // `Project("{type}") = "Name", "src\Name.csproj", "{GUID}"`
+                    let paths =
+                        matches @"Project\(""[^""]*""\)\s*=\s*""[^""]*"",\s*""([^""]+)"",\s*""(\{[^""]+\})""" text
+                        |> Seq.map (fun m -> m.Groups.[2].Value.ToUpperInvariant(), m.Groups.[1].Value)
+                        |> Seq.distinctBy fst
+                        |> dict
+
+                    // `{GUID}.Debug|x64.ActiveCfg = Debug|Any CPU`
+                    matches @"(\{[^}]+\})\.[^|\r\n]+\|([^|.=\r\n]+)\.ActiveCfg\s*=\s*[^|\r\n]+\|([^\r\n]+)" text
+                    |> Seq.exists (fun m ->
+                        named wanted (m.Groups.[2].Value.Trim())
+                        && named "AnyCPU" (m.Groups.[3].Value.Trim())
+                        && (match paths.TryGetValue(m.Groups.[1].Value.ToUpperInvariant()) with
+                            | true, relative -> legacy relative
+                            | _ -> false))
+            with _ ->
+                false
+
+        if platforms.IsEmpty || platforms |> List.exists (named "AnyCPU") then
+            None
+        else
+            platforms
+            |> List.tryFind (named "x64")
+            |> Option.orElse (List.tryHead platforms)
+            |> Option.filter (legacyOnAnyCpu >> not))
+
+/// This run's `solutionPlatform`, passed to the workspace, every restore and
+/// every verification build.
+let mutable private runPlatform: string option = None
+
+let private platformArgument () =
+    match runPlatform with
+    | Some p -> $" \"-p:Platform={p}\""
+    | None -> ""
+
+/// Set when the global.json's SDK is missing and another one loads the projects:
+/// every child `dotnet restore` answers to the global.json and fails, so none is run.
+let mutable private globalJsonSdkMissing = false
+
+/// The major version of the SDK whose MSBuild loads the projects (0 until one does).
+let mutable private loadedSdkMajor = 0
+
 let private msbuildRegistered =
     lazy
         (if not MSBuildLocator.IsRegistered then
              // the SDK `dotnet` would pick in this directory (global.json honoured)
              try
-                 MSBuildLocator.RegisterDefaults() |> ignore
+                 loadedSdkMajor <- MSBuildLocator.RegisterDefaults().Version.Major
              with :? InvalidOperationException as ex ->
                  // a global.json asking for an SDK that is not installed: the newest
                  // installed one loads the projects, and the run says so — the final
@@ -501,40 +638,15 @@ let private msbuildRegistered =
                  match newest with
                  | Some instance ->
                      Out.bad
-                         $"  (the SDK this directory's global.json asks for is not installed — {ex.Message.Split('\n').[0].Trim()}; loading with SDK {instance.Version} instead. Install the SDK or adjust global.json, or the verification build cannot run)"
+                         $"  (the SDK this directory's global.json asks for is not installed — {ex.Message.Split('\n').[0].Trim()}; loading with SDK {instance.Version} instead. Install the SDK or adjust global.json: until then no restore and no verification build can run, and only projects already restored load)"
 
+                     globalJsonSdkMissing <- true
+                     loadedSdkMajor <- instance.Version.Major
                      MSBuildLocator.RegisterInstance instance
                  | None -> reraise ())
 
-let private tfmRank (tfm: string) =
-    let t = (tfm.ToLowerInvariant().Split '-').[0]
-    let digits = String(t |> Seq.filter Char.IsDigit |> Seq.toArray)
-
-    let version =
-        match Int32.TryParse digits with
-        | true, v -> v
-        | false, _ -> 0
-
-    if t.StartsWith "netstandard" then 0, version
-    elif t.StartsWith "netcoreapp" then 2, version
-    elif t.StartsWith "net" && t.Contains '.' then 3, version
-    else 1, version
-
-/// The framework a workspace project's name carries — MSBuildWorkspace
-/// names a multi-targeted project's flavors `Name(net8.0)`.
-let private frameworkOf (project: Project) =
-    let name =
-        if isNull project || isNull project.Name then
-            ""
-        else
-            project.Name
-
-    let i = name.LastIndexOf '('
-
-    if i > 0 && name.EndsWith ')' then
-        name.Substring(i + 1, name.Length - i - 2)
-    else
-        ""
+/// The framework a workspace project's name carries, trimmed (Flavors.frameworkOf).
+let private frameworkOf (project: Project) = Flavors.frameworkOf project
 
 // ---- one compilation ----
 
@@ -679,10 +791,39 @@ let private shadowAnalyzers (solution: Solution) : Solution =
                 s.WithProjectAnalyzerReferences(p.Id, after))
         solution
 
-/// A loaded solution as the sweep works on it: the run's defines added,
-/// in-tree analyzers shadow-copied.
+/// The newest C# the loading SDK's compiler speaks: SDK 8 → C# 12 … SDK 11 →
+/// C# 15. The tool's own Roslyn may be newer, and `LangVersion latest` or
+/// `default` would then read as a version the real build rejects — and a
+/// ladder rule would offer its syntax. An explicit `preview` stays: the SDK's
+/// compiler builds its preview features, and the cap would refuse them.
+let private languageCap () : LanguageVersion option =
+    if loadedSdkMajor < 8 then
+        None
+    else
+        match LanguageVersionFacts.TryParse(string (loadedSdkMajor + 4)) with
+        | true, v -> Some v
+        | _ -> None
+
+let private capLanguage (solution: Solution) : Solution =
+    match languageCap () with
+    | None -> solution
+    | Some cap ->
+        solution.Projects
+        |> Seq.fold
+            (fun (s: Solution) (p: Project) ->
+                match p.ParseOptions with
+                | :? CSharpParseOptions as o when
+                    o.SpecifiedLanguageVersion <> LanguageVersion.Preview
+                    && LanguageVersionFacts.MapSpecifiedToEffectiveVersion o.SpecifiedLanguageVersion > cap
+                    ->
+                    s.WithProjectParseOptions(p.Id, o.WithLanguageVersion cap)
+                | _ -> s)
+            solution
+
+/// A loaded solution as the sweep works on it: the language capped (above),
+/// the run's defines added, in-tree analyzers shadow-copied.
 let private prepareSolution (solution: Solution) : Solution =
-    let prepared = shadowAnalyzers (RunDefines.addToSolution solution)
+    let prepared = shadowAnalyzers (RunDefines.addToSolution (capLanguage solution))
 
     // the projects behind the assembly names the run compiles (errorsOf)
     for p in prepared.Projects do
@@ -1474,6 +1615,10 @@ let private runPassWith
             for f, _, _ in items do
                 match f.Suggestion |> Option.bind primaryFix with
                 | Some fix when List.contains fix chosen -> Out.good (printFinding "  " f)
+                | Some fix when List.contains fix candidates && losesTrivia tree treeOf fix ->
+                    // no later pass takes it either: the file need not be read again for it
+                    let line = printFinding "  " f
+                    printfn $"{line} (not applied: the fix would drop a comment)"
                 | _ ->
                     let line = printFinding "  " f
                     printfn $"{line} (held to the next pass)"
@@ -1593,6 +1738,15 @@ let private runPassWith
                 |> Seq.distinct
                 |> List.ofSeq
 
+            // a project whose compilation does not even resolve `object` (its
+            // references never loaded: a XAML app in a design-time load) reports
+            // every new expression as CS0518 - no judge of a fix
+            let arbiter (pid: ProjectId) : Task<bool> =
+                task {
+                    let! c = solution.GetProject(pid).GetCompilationAsync ct
+                    return c.GetSpecialType(SpecialType.System_Object).TypeKind <> TypeKind.Error
+                }
+
             // every other project holds its count: asked one at a time, in order,
             // and no further than the first that does not
             let othersHold (s: Solution) : Task<bool> =
@@ -1601,9 +1755,13 @@ let private runPassWith
                     let mutable rest = otherProjects
 
                     while holds && not rest.IsEmpty do
-                        let! now = errorsIn s rest.Head
-                        let! before = errorsIn solution rest.Head
-                        holds <- now.Length <= before.Length
+                        let! judge = arbiter rest.Head
+
+                        if judge then
+                            let! now = errorsIn s rest.Head
+                            let! before = errorsIn solution rest.Head
+                            holds <- now.Length <= before.Length
+
                         rest <- rest.Tail
 
                     return holds
@@ -1622,8 +1780,14 @@ let private runPassWith
                     let risen = ResizeArray()
 
                     for other in otherProjects do
-                        let! now = errorsIn s other
-                        let! before = errorsIn solution other
+                        let! judge = arbiter other
+                        let! now = if judge then errorsIn s other else Task.FromResult []
+
+                        let! before =
+                            if judge then
+                                errorsIn solution other
+                            else
+                                Task.FromResult []
 
                         if now.Length > before.Length then
                             risen.Add(
@@ -1947,25 +2111,56 @@ let private ensurePaketRestored (projectDir: string) =
             Out.dim "failed"
     | _ -> ()
 
-let private ensureRestored (path: string) =
-    let assets = Path.Combine(Path.GetDirectoryName path, "obj", "project.assets.json")
+/// Has the project been restored: `obj/project.assets.json` beside it, or —
+/// under `UseArtifactsOutput` — `artifacts/obj/<project>/project.assets.json`
+/// in a directory above it.
+let private restored (path: string) =
+    let name = Path.GetFileNameWithoutExtension path
 
-    if not (File.Exists assets) then
+    // up to the repository's root and no further: an outer checkout's project of
+    // the same name is not this one (a submodule, a vendored copy)
+    let rec artifactsAbove (dir: string) =
+        not (String.IsNullOrEmpty dir)
+        && (File.Exists(Path.Combine(dir, "artifacts", "obj", name, "project.assets.json"))
+            || (not (
+                    Directory.Exists(Path.Combine(dir, ".git"))
+                    || File.Exists(Path.Combine(dir, ".git"))
+                )
+                && artifactsAbove (Path.GetDirectoryName dir)))
+
+    File.Exists(Path.Combine(Path.GetDirectoryName path, "obj", "project.assets.json"))
+    || artifactsAbove (Path.GetDirectoryName path)
+
+let private ensureRestored (path: string) =
+    if not (restored path || globalJsonSdkMissing) then
         ensurePaketRestored (Path.GetDirectoryName path)
         Out.dimPart $"  restoring {Path.GetFileName path}... "
 
-        let code, _, err =
+        let code, out, err =
             Processes.runProcessIn
                 (Some(Path.GetDirectoryName path))
                 Processes.processTimeout
                 "dotnet"
-                $"restore \"{path}\" -nologo -v q"
+                $"restore \"{path}\" -nologo -v q{platformArgument ()}"
 
         if code = 0 then
             Out.dim "done"
         else
             Out.dim "failed"
-            eprintfn $"{err.Trim()}"
+
+            // MSBuild writes its errors to stdout; stderr is mostly empty
+            let reason =
+                if String.IsNullOrWhiteSpace err then
+                    out.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+                    |> Array.filter (fun l -> l.Contains ": error " || l.Contains ": warning NU")
+                    |> Array.distinct
+                    |> Array.truncate 5
+                    |> String.concat Environment.NewLine
+                else
+                    err.Trim()
+
+            if not (String.IsNullOrWhiteSpace reason) then
+                eprintfn $"{reason}"
 
 /// The legacy (non-SDK) projects of a run, read by LegacyProjects into their
 /// own workspace, and whether each builds before any fix (the arbiter's
@@ -2082,7 +2277,7 @@ let private loadProject
                 workspace :> Workspace,
                 (prepareSolution workspace.CurrentSolution).Projects
                 |> Seq.filter (fun p -> not (isNull p.FilePath) && Workspace.samePath p.FilePath path)
-                |> Seq.sortBy (frameworkOf >> tfmRank)
+                |> Seq.sortBy (fun p -> Flavors.rank (frameworkOf p), frameworkOf p)
                 |> List.ofSeq
     }
 
@@ -2092,7 +2287,7 @@ let private buildVerify (project: string) =
             (Some(Path.GetDirectoryName project))
             Processes.processTimeout
             "dotnet"
-            $"build \"{project}\" -nologo -v q -clp:NoSummary"
+            $"build \"{project}\" -nologo -v q -clp:NoSummary{platformArgument ()}"
 
     if code = 0 then
         Ok()
@@ -2102,9 +2297,53 @@ let private buildVerify (project: string) =
             |> Array.map (fun l -> l.Trim())
             |> Array.filter (fun l -> l.Contains "error" || l.StartsWith Processes.TimeCapMark)
             |> Array.distinct
-            |> Array.truncate 12
+            // every line: `addedErrors` compares the two builds' whole sets, and a cut
+            // at twelve made a thirteenth error look new once a fix removed an earlier one
+            |> Array.truncate 2000
 
         Error(String.concat "\n" lines)
+
+/// A build's error lines for the console: the first twelve, and how many more.
+let private firstErrors (detail: string) =
+    let lines = detail.Split '\n'
+
+    if lines.Length <= 12 then
+        detail
+    else
+        String.concat "\n" (Array.truncate 12 lines)
+        + $"\n  (and {lines.Length - 12} more error lines)"
+
+let private addedErrorsRegex =
+    Text.RegularExpressions.Regex @"\(\d+,\d+(?:,\d+,\d+)?\)"
+
+/// The error lines a build with the fixes has and the build without them lacks:
+/// when neither builds, these are the fixes' own (Files: an `init` setter the XAML
+/// compiler's generated code assigns, CS8852), and they come out.
+/// An error is its file, code and text, never its position: a fix that moves
+/// an error already there by a line or a column did not add it.
+let addedErrors (withFixes: string) (without: string) =
+    let position = addedErrorsRegex
+
+    let counted (s: string) =
+        s.Split '\n'
+        |> Array.map (fun l -> l.Trim())
+        |> Array.filter (fun l -> l.Contains ": error ")
+        |> Array.map (fun l -> position.Replace(l, ""), l)
+        |> Array.groupBy fst
+        |> Array.map (fun (key, lines) -> key, lines |> Array.map snd)
+        |> Map.ofArray
+
+    let before = counted without
+
+    counted withFixes
+    |> Map.toList
+    |> List.collect (fun (key, lines) ->
+        let had =
+            match before.TryFind key with
+            | Some old -> old.Length
+            | None -> 0
+
+        lines |> Array.skip (min had lines.Length) |> List.ofArray)
 
 let private errorSiteRegex =
     Text.RegularExpressions.Regex(
@@ -2232,6 +2471,14 @@ let private executeRunCore (opts: Options) : Task<int> =
 
             if opts.Framework <> "" then
                 properties.["TargetFramework"] <- opts.Framework
+
+            runPlatform <- solutionPlatform opts.Target
+
+            match runPlatform with
+            | Some platform ->
+                properties.["Platform"] <- platform
+                Out.dim $"  (the solution has no Any CPU platform: loading and building for {platform})"
+            | None -> ()
 
             use workspace = MSBuildWorkspace.Create properties
             workspace.SkipUnrecognizedProjects <- true
@@ -2595,6 +2842,16 @@ let private executeRunCore (opts: Options) : Task<int> =
                                 putBack files "checking the project builds without them"
 
                                 match verify project with
+                                | Some(Error without) when not (addedErrors detail without).IsEmpty ->
+                                    runBuildFailures <- runBuildFailures + 1
+
+                                    Out.bad
+                                        $"  {Path.GetFileName project} does not build without the fixes either, but they add errors; putting them back:"
+
+                                    for line in List.truncate 12 (addedErrors detail without) do
+                                        eprintfn $"{line}"
+
+                                    exitReasons.Add $"{Path.GetFileName project}: the fixes added build errors"
                                 | Some(Error _) ->
                                     for f, bytes in patched do
                                         writeBytes f bytes
@@ -2607,14 +2864,14 @@ let private executeRunCore (opts: Options) : Task<int> =
                                     Out.dim
                                         $"  {Path.GetFileName project} does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
 
-                                    eprintfn $"{detail}"
+                                    eprintfn $"{firstErrors detail}"
                                 | _ ->
                                     runBuildFailures <- runBuildFailures + 1
 
                                     Out.bad
                                         $"  {Path.GetFileName project} does not build with the fixes; putting them back:"
 
-                                    eprintfn $"{detail}"
+                                    eprintfn $"{firstErrors detail}"
                                     exitReasons.Add $"{Path.GetFileName project}: verification build failed"
                     // a project that references a changed one sees its public shape: it
                     // must build too, and a failure puts back what it references
@@ -2690,6 +2947,17 @@ let private executeRunCore (opts: Options) : Task<int> =
                             putBack files "checking the dependent builds without them"
 
                             match buildDependent project with
+                            | Some(Error without) when not (addedErrors detail without).IsEmpty ->
+                                runBuildFailures <- runBuildFailures + 1
+
+                                Out.bad
+                                    $"  {Path.GetFileName project} (a dependent) does not build without the fixes either, but they add errors; putting back what it references:"
+
+                                for line in List.truncate 12 (addedErrors detail without) do
+                                    eprintfn $"{line}"
+
+                                exitReasons.Add
+                                    $"{Path.GetFileName project}: the fixes added errors to a dependent's build"
                             | Some(Error _) ->
                                 for f, bytes in patched do
                                     writeBytes f bytes
@@ -2697,14 +2965,14 @@ let private executeRunCore (opts: Options) : Task<int> =
                                 Out.dim
                                     $"  {Path.GetFileName project} (a dependent) does not build with or without the fixes — no verdict on them; they stand, verified in memory only:"
 
-                                eprintfn $"{detail}"
+                                eprintfn $"{firstErrors detail}"
                             | _ ->
                                 runBuildFailures <- runBuildFailures + 1
 
                                 Out.bad
                                     $"  {Path.GetFileName project} (a dependent) does not build with the fixes; putting back what it references:"
 
-                                eprintfn $"{detail}"
+                                eprintfn $"{firstErrors detail}"
                                 exitReasons.Add $"{Path.GetFileName project}: a dependent's verification build failed"
 
                 // what is on disk now has been through the builds: a failure

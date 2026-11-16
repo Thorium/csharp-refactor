@@ -43,7 +43,9 @@
 /// catch `ex`. Guards: the throw is a statement under the catch (through
 /// blocks and `if`s only); the arguments do not mention the caught
 /// exception; a constructor with the same parameters plus a trailing
-/// `System.Exception` is accessible. Yields to CA2200.
+/// `System.Exception` is accessible. A try that adds to `HttpHeaders` keeps
+/// it a note: the header exception quotes the value (a key, a token) that
+/// the wrapper's message left out. Yields to CA2200.
 ///
 /// CR0170 (correctness, fix): a method, lambda or local function takes a
 /// `CancellationToken` and holds a loop that awaits, sleeps or blocks on a task, without
@@ -257,16 +259,43 @@ let private releases (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
                                                 unit + line)
                                         |> String.concat "\n"
 
+                                    // the guarded run is one braced block of the author's own
+                                    // (`Enter(); { … } Exit();`): its braces are the try's
+                                    let ownBlock =
+                                        match
+                                            block.Statements
+                                            |> Seq.filter (fun x ->
+                                                x.SpanStart > s.Span.End && x.Span.End <= release.SpanStart)
+                                            |> List.ofSeq
+                                        with
+                                        | [ :? BlockSyntax as b ] ->
+                                            let line = text.Lines.GetLineFromPosition b.SpanStart
+                                            let closing = text.Lines.GetLineFromPosition b.Span.End
+
+                                            line.Start = region.Start
+                                            && closing.EndIncludingLineBreak = region.End
+                                            && text.ToString(TextSpan.FromBounds(line.Start, b.SpanStart)).Trim() = ""
+                                        | _ -> false
+
+                                    let releaseSpan =
+                                        TextSpan.FromBounds(releaseLine.Start, releaseLine.EndIncludingLineBreak)
+
+                                    let finallyText =
+                                        $"{indent}finally{nl}{indent}{{{nl}{indent}{unit}{release.ToString().Trim()}{nl}{indent}}}{nl}"
+
                                     let edits =
-                                        [
-                                            Suggestion.replace region ($"{indent}try{nl}{indent}{{{nl}" + reindented)
-                                            Suggestion.replace
-                                                (TextSpan.FromBounds(
-                                                    releaseLine.Start,
-                                                    releaseLine.EndIncludingLineBreak
-                                                ))
-                                                $"{indent}}}{nl}{indent}finally{nl}{indent}{{{nl}{indent}{unit}{release.ToString().Trim()}{nl}{indent}}}{nl}"
-                                        ]
+                                        if ownBlock then
+                                            [
+                                                Suggestion.insert region.Start $"{indent}try{nl}"
+                                                Suggestion.replace releaseSpan finallyText
+                                            ]
+                                        else
+                                            [
+                                                Suggestion.replace
+                                                    region
+                                                    ($"{indent}try{nl}{indent}{{{nl}" + reindented)
+                                                Suggestion.replace releaseSpan ($"{indent}}}{nl}" + finallyText)
+                                            ]
 
                                     Some(
                                         {
@@ -646,8 +675,48 @@ let private innerExceptions (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                                         else
                                             fresh, [ Suggestion.insert cc.Declaration.Type.Span.End $" {fresh}" ])
 
+                            // the try adds to HTTP headers: their FormatException quotes the
+                            // value ("The format of value '…' is invalid"), often a key or a
+                            // token, which a message naming only the header left out
+                            let headerValues =
+                                match cc.Parent with
+                                | :? TryStatementSyntax as ts ->
+                                    ts.Block.DescendantNodes()
+                                    |> Seq.exists (fun x ->
+                                        match x with
+                                        // the calls that take a header's value; a read
+                                        // (`GetValues`, `Contains`) or a `Remove` quotes none
+                                        | :? InvocationExpressionSyntax as inv ->
+                                            match symbolOf model inv with
+                                            | :? IMethodSymbol as m when
+                                                m.Name = "Add"
+                                                || m.Name = "TryAddWithoutValidation"
+                                                || m.Name = "Parse"
+                                                || m.Name = "ParseAdd"
+                                                ->
+                                                let rec headers (t: ITypeSymbol) =
+                                                    not (isNull t)
+                                                    && ((not (isNull t.ContainingNamespace)
+                                                         && t.ContainingNamespace.ToDisplayString() =
+                                                             "System.Net.Http.Headers")
+                                                        || headers t.BaseType)
+
+                                                headers m.ContainingType
+                                            | _ -> false
+                                        // `new AuthenticationHeaderValue(key)`
+                                        | :? ObjectCreationExpressionSyntax as created ->
+                                            match model.GetTypeInfo(created).Type with
+                                            | null -> false
+                                            | t ->
+                                                t.Name.EndsWith "HeaderValue"
+                                                && not (isNull t.ContainingNamespace)
+                                                && t.ContainingNamespace.ToDisplayString() = "System.Net.Http.Headers"
+                                        | _ -> false)
+                                | _ -> false
+
                             let fixes =
                                 match named with
+                                | Some _ when headerValues -> []
                                 | Some(name, nameEdits) ->
                                     let edits = nameEdits @ [ Suggestion.insert (List.last args).Span.End $", {name}" ]
 
@@ -663,7 +732,10 @@ let private innerExceptions (tree: SyntaxTree) (model: SemanticModel) : Suggesti
                                 {
                                     Code = InnerExceptionCode
                                     Message =
-                                        $"The new {c.Type} drops the caught exception: its type, message and stack are gone — pass it as the inner exception"
+                                        if headerValues then
+                                            $"The new {c.Type} drops the caught exception: the try adds HTTP headers, and their exception quotes the value, which may be a secret — pass it as the inner exception only if that value may be logged"
+                                        else
+                                            $"The new {c.Type} drops the caught exception: its type, message and stack are gone — pass it as the inner exception"
                                     Span = t.Span
                                     Fixes = fixes
                                 }

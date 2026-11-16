@@ -47,8 +47,8 @@
   <ItemGroup>
     <PackageReference Update="FSharp.Core" Version="9.0.303" />
     <PackageReference Include="Microsoft.Build.Locator" Version="1.9.1" />
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.0.0" />
-    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.0.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.12.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" Version="5.12.0" />
     <ProjectReference Include="..\CSharp.Refactor.Analyzers\CSharp.Refactor.Analyzers.fsproj" />
   </ItemGroup>
 

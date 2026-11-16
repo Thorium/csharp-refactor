@@ -466,6 +466,6 @@ let build (projectPath: string) : Result<unit, string> option =
                 |> Array.map (fun l -> l.Trim())
                 |> Array.filter (fun l -> l.Contains "error" || l.StartsWith Processes.TimeCapMark)
                 |> Array.distinct
-                |> Array.truncate 12
+                |> Array.truncate 2000
 
             Error(String.concat "\n" lines))

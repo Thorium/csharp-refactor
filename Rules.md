@@ -237,7 +237,9 @@ per read, and the `for` read it per iteration) typed as an array, `string`,
 a span, or a type implementing `IList<T>`/`IReadOnlyList<T>`; every use of
 `i` in the body is `xs[i]` (an index used as a value wants
 `Select((x, i) => …)` and stays the author's call); no `xs[i]` is written,
-incremented, taken by `ref` or passed `ref`/`out`; a mutable struct element
+incremented, taken by `ref` or passed `ref`/`out`, and no element of a list is
+written at any index (`xs[next] = xs[i]`: a list's setter bumps its version and
+the `foreach` throws; an array's does not); a mutable struct element
 is never dereferenced (`ps[i].Bump()` mutates the array's element, a copy
 after the rewrite); `xs` is not assigned or mutated through a known
 mutator, and a list is not passed to any method in the body (`foreach`
@@ -246,7 +248,8 @@ a body whose every call is to a core member and which constructs nothing
 (`for (…; i < _pending.Count; …) Visit(_pending[i]);` with `Visit`
 appending to `_pending` is a worklist the `for` walks to its end); the alias binder is dropped only when
 never reassigned, else it stays a copy; the element name is the
-collection's singular (`pages` → `page`, `entries` → `entry`), else `item`,
+collection's singular (`pages` → `page`, `entries` → `entry`, a field's
+`_contexts` → `context`), else `item`,
 `item2`…, unused in the enclosing member. `break`/`continue` stay. Measured:
 `foreach` over an array or `List<T>` compiles to the same loop. F# twin:
 FR0101.
@@ -649,7 +652,15 @@ or writer settings opted in with `Async = true`), nor a LINQ twin over
 `IQueryable<T>` (EF's `ToListAsync`/`FirstAsync`/…: only a provider that
 implements the async query interface runs it, and an in-memory
 `AsQueryable()` source — a test fake — throws at the call); `Thread.Sleep(0)` and
-`Sleep(1)` are thread yields and stay. F# twin: FR0119. Yields to CA1849.
+`Sleep(1)` are thread yields and stay; nor a `MemoryStream`/`StringWriter`/
+`StringReader` or `Console.Out`/`Console.Error` receiver (nothing behind the
+twin), EF Core's `Add`/`AddRange` (async only for database value generators,
+EF's documentation says), nor a call inside a member named for its synchronous
+I/O (`WriteTokenSyncReadingAsync`; `Sync` as a noun, `RunDataSyncJobAsync`, is not
+that). The inserted `await` carries
+`.ConfigureAwait(false)` where the enclosing method's own awaits all use it, or,
+in a method with no other await, where CA2007 is configured; never beside a bare
+await (a UI handler stays on its context) nor in a test file (xUnit1030). F# twin: FR0119. Yields to CA1849.
 
 ### CR0043 — correctness
 
@@ -857,7 +868,9 @@ and is refused with the rest; a `Lazy` factory takes no token parameter, so a
 call in it has none in scope); never where a comment on the statement names the
 choice (`None`, "cancel") or the call is the sole statement of a `try` whose
 `catch` swallows — a best-effort cleanup that a client disconnect must not
-cancel. F# twin: FR0118. Yields to CA2016.
+cancel; never on a callee named for cleanup (`Stop…`, `Rollback…`, `Close…`,
+`Dispose…`, `Release…`, `Abort…`, `Cancel…` and the like), whose explicit `None`
+keeps it running after the caller's token has fired. F# twin: FR0118. Yields to CA2016.
 
 ### CR0060 — correctness
 
@@ -893,8 +906,14 @@ would stop it on the way out); the no-ownership types (`HttpClient`,
 and a test's handler mock reads them back after the send —
 `MemoryStream`, `StringReader`/`StringWriter`, `SemaphoreSlim`); a wrapper
 over a foreign resource (`new StreamReader(parameter)`, a field, a
-property); a value already under `using`; an `IAsyncDisposable`-only type
-(`await using` is v2). Under `Main` or top-level statements only a
+property); an object built with a `null!`/`default!` argument (a test
+constructing only what it exercises: its `Dispose` may dereference what it
+was never given); a value already under `using`, `await using
+(x.ConfigureAwait(false))` included; an `IAsyncDisposable`-only type
+(`await using` is v2). A "BCL" call that only reads its argument is one in a
+`System` namespace AND an assembly signed with a runtime key: PowerShell's
+`System.Management.Automation.Cmdlet.WriteObject` hands the object down the
+pipeline. Under `Main` or top-level statements only a
 flush-sensitive type (a writer, a stream, a transaction, a connection) is
 lost work — .NET runs no finalizers at exit — and only those are reported
 there. Only a declaration directly in a block is rewritten (a `switch`
@@ -1057,7 +1076,9 @@ auto-property, a `readonly` field or a constructor assigning them — a data
 holder, no methods and no accessor bodies (a type with behaviour is a
 service or a domain object; a getter that lazily fills a static or computes
 a value is behaviour) — is a `record`: value equality and `with` for free. The fix changes `class` to
-`record` and nothing else (C# 9). Guards: no mutable instance state (a
+`record` and nothing else (C# 9). Guards: the compilation has `Type ==` (a
+record's `Equals` compares `EqualityContract`s with it; net20 and net35 lack it,
+CS0656); no mutable instance state (a
 `readonly` field and a get-only property cannot be assigned outside
 construction, so no method can); no events; no base class other than
 `object` (a record cannot derive from a class) and nothing deriving from
@@ -1165,6 +1186,11 @@ where a host has none (the compiler, an editor without a solution) such a
 member is left as it is. Another project writing the property outside an object
 initializer or a `with` keeps the setter (`filter.Currency = x` is CS8852 on
 an `init` one).
+
+A type XAML may set keeps its setters: a public type where WinUI, UWP, WPF,
+MAUI or Avalonia is referenced, and any type declared in a `.xaml.cs` file.
+The XAML compiler's generated code (WinUI's `XamlTypeInfo.g.cs`) assigns them,
+and it is built at compile time, outside what the analyzer sees.
 
 ### CR0084 — correctness
 
@@ -1536,7 +1562,9 @@ trailing array literal is the params array spelled out; one trailing
 array-typed argument may be the params array passed whole — its count is
 invisible, so no arity claim; a hole-free `$"…"` compiles to a constant
 and is not the interpolation defect; placeholder syntax `{@Name}`,
-`{$Name}`, `{Name:format}`, `{Name,align}`, `{{` literal. Note. F# twin:
+`{$Name}`, `{Name:format}`, `{Name,align}`, positional `{0}` (Serilog counts a
+repeat once; Microsoft.Extensions.Logging hands every hole the next argument),
+`{{` literal. Note. F# twin:
 FR0124. Yields to CA2017, CA2254.
 
 ### CR0115 — correctness
@@ -2312,7 +2340,11 @@ or parameter of the member). Guards: the throw is a statement under the
 catch, through blocks and `if`s only; the constructor's arguments do not
 mention the caught exception in any way (`ex.Message` in the message is
 the author's choice); the constructor with the trailing `Exception` is
-accessible from the throw site. `throw ex;` itself is CA2200's
+accessible from the throw site. A `try` that adds an HTTP header or builds a header value (`Add`,
+`TryAddWithoutValidation`, `Parse`, `ParseAdd`, `new AuthenticationHeaderValue(key)`;
+not a read like `GetValues`) keeps it a
+note: the header exception quotes the value (a key, a token) that the
+wrapper's message left out. `throw ex;` itself is CA2200's
 business, and this rule yields to it.
 
 ### CR0166 — performance
@@ -2476,7 +2508,9 @@ assignment, a compound assignment, `++`/`--`, a `ref`/`out`/`in`
 argument, `&`, a `ref` local or return, a deconstruction target; a `var`
 is replaced by the constant's type; `using`, `ref`, `scoped` and
 already-`const` declarations, and one holding a comment or directive,
-are left alone; the speculative re-bind settles the rest.
+are left alone, and so is a name code behind an inactive `#if` mentions
+(another target framework compiles that code and may write it); the
+speculative re-bind settles the rest.
 
 ### CR0173 — idiom
 
@@ -2714,8 +2748,16 @@ A `static` field nothing in the compilation writes — no assignment,
 `++`, `ref`/`out` argument, deconstruction (nested ones too), store
 through parentheses, `ref` alias or `&` — is
 `static readonly`: `public static string Prefix = "v";` becomes
-`public static readonly string Prefix = "v";`, and a literal-initialised
-one goes on to CR0172's `const`. An array field whose elements are
+`public static readonly string Prefix = "v";`, and a public literal-initialised
+one goes on to CR0172's `const`. A private or internal one initialised
+with a constant of a type `const` takes becomes `const` straight away
+(`private static string Host = "h";` → `private const string Host = "h";`,
+CA1802's answer) unless an earlier static initializer of the type runs code that
+could read it first (`static int A = Compute();` above it). A flag (`bool`), an
+initializer under `#if`, and a field whose const would fold where it is read into a
+warning or an error the field never raised (an unreachable branch, CS0162; an
+overflow beside another constant, CS0220) stay `static readonly`. A name written in
+code an inactive `#if` leaves out keeps its field: another framework compiles it. An array field whose elements are
 written still qualifies: the elements are not the field. Guards: one
 declarator; not `volatile`, no attribute (`[ThreadStatic]`…); no comment
 around it speaking of folding, inlining or optimising (`// not readonly:

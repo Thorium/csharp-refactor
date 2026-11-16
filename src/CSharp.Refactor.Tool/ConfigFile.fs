@@ -194,6 +194,8 @@ let definesFrom (directory: string) : (string * string list * string list) optio
     | :? PathTooLongException
     | :? NotSupportedException -> None
 
+let private writeIntoRegex = Regex @"^\s*([A-Za-z0-9_.]+)\s*="
+
 /// Write or append the block. Keys the existing file already sets are
 /// left as they are and their lines dropped from the block.
 let writeInto (directory: string) : Result<string, string> =
@@ -206,7 +208,7 @@ let writeInto (directory: string) : Result<string, string> =
             Error $"{path} already carries a csharp-refactor block — edit it, or delete the block to regenerate it."
         else
             let keyOf (l: string) =
-                let m = Regex.Match(l, @"^\s*([A-Za-z0-9_.]+)\s*=")
+                let m = writeIntoRegex.Match l
 
                 if m.Success then
                     Some(m.Groups.[1].Value.ToLowerInvariant())
@@ -216,7 +218,7 @@ let writeInto (directory: string) : Result<string, string> =
             let present = existing.Split('\n') |> Array.choose keyOf |> Set.ofArray
 
             let block =
-                (defaultConfigText ()).Split('\n')
+                (defaultConfigText ()).Split '\n'
                 |> Array.filter (fun l ->
                     match keyOf l with
                     | Some k -> not (present.Contains k)
@@ -237,8 +239,8 @@ let writeInto (directory: string) : Result<string, string> =
             let content =
                 if existing = "" && inherits then block
                 elif existing = "" then "root = true\n\n" + block
-                elif existing.EndsWith "\n" then existing + "\n" + block
-                else existing + "\n\n" + block
+                elif existing.EndsWith "\n" then $"{existing}\n{block}"
+                else $"{existing}\n\n{block}"
 
             // an existing file keeps its byte-order mark
             let marked =

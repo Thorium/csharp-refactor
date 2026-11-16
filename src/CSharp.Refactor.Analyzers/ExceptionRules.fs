@@ -615,7 +615,7 @@ let private filters (tree: SyntaxTree) (model: SemanticModel) : Suggestion list 
                         | :? PostfixUnaryExpressionSyntax -> false
                         | :? InvocationExpressionSyntax as inv ->
                             match model.GetSymbolInfo(inv).Symbol with
-                            | :? IMethodSymbol as ms -> ms.ContainingNamespace.ToDisplayString().StartsWith "System"
+                            | :? IMethodSymbol as ms -> Guards.isBcl ms
                             | _ -> false
                         | :? IdentifierNameSyntax as id when
                             not (

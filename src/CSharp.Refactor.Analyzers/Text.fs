@@ -135,6 +135,39 @@ let mentionsName (name: string) (node: SyntaxNode) : bool =
     && node.DescendantTokens()
        |> Seq.exists (fun t -> t.IsKind SyntaxKind.IdentifierToken && t.ValueText = name)
 
+/// Does code an `#if` leaves out of this compilation write the name? Another
+/// target framework compiles it: a local `#if HAVE_X` assigns stays invisible
+/// here (Newtonsoft.Json's `hasIgnoreDataMemberAttribute`), and "nothing writes
+/// it" holds for this flavor only. Disabled text is not parsed, so the shapes
+/// are read off the text: `name =`, `name += …` and the other compound
+/// assignments, `name++`, `--name`, `ref name`, `out name`. A read there
+/// (`Use(name)`) is no write.
+let writtenInDisabledCode (name: string) (node: SyntaxNode) : bool =
+    not (isNull node)
+    && node.ContainsDirectives
+    && (let n = System.Text.RegularExpressions.Regex.Escape name
+
+        let write =
+            System.Text.RegularExpressions.Regex(
+                // not after `:` or a quote: `xmlns:json="…"` inside a string literal of
+                // the disabled text, a named argument `json: …`
+                @"(?<![\w.:""'])(?:this\.)?"
+                + n
+                + @"\s*(?:(?:[-+*/%&|^]|<<|>>|\?\?)?=(?!=)|\+\+|--)|(?:\+\+|--)\s*"
+                + n
+                + @"\b|\b(?:ref|out)\s+"
+                + n
+                + @"\b"
+            )
+
+        // inside the node: its leading trivia is the code before it (a whole
+        // disabled method above, with locals of its own)
+        node.DescendantTrivia()
+        |> Seq.exists (fun t ->
+            t.IsKind SyntaxKind.DisabledTextTrivia
+            && node.Span.Contains t.Span
+            && write.IsMatch(t.ToString())))
+
 /// Does an identifier token in the scope, outside the span, spell the name?
 /// A variable whose scope a fix widens to the scope clashes with, or
 /// captures, any such mention.

@@ -40,7 +40,7 @@ open Microsoft.CodeAnalysis.Text
 let Code = "CR0172"
 
 /// A type a `const` may be declared as: the primitives, `string`, an enum.
-let private constable (t: ITypeSymbol) =
+let constable (t: ITypeSymbol) =
     not (isNull t)
     && (t.SpecialType = SpecialType.System_String
         || t.TypeKind = TypeKind.Enum
@@ -121,7 +121,7 @@ let private locals (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                         && (let c = model.GetConstantValue v.Initializer.Value
                             c.HasValue && not (isNull c.Value))
                         && (match scope with
-                            | Some s -> not (written model l s)
+                            | Some s -> not (written model l s || Text.writtenInDisabledCode l.Name s)
                             | None -> false)
                         ->
                         Some l
@@ -214,6 +214,11 @@ let private fields (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) 
                             c.HasValue && not (isNull c.Value))
                         && shapeOpen ctx f
                         && (Index.writesOf (Index.ofCompilation model.Compilation) f).IsEmpty
+                        // a write behind an `#if` another framework takes
+                        && not (
+                            f.ContainingType.DeclaringSyntaxReferences
+                            |> Seq.exists (fun r -> Text.writtenInDisabledCode f.Name (r.SyntaxTree.GetRoot()))
+                        )
                         ->
                         Some f
                     | _ -> None)

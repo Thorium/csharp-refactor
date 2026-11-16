@@ -625,7 +625,12 @@ let rec private mutatesSelf (model: SemanticModel) (visited: Set<string>) (m: IM
                 |> Seq.exists (fun n ->
                     match n with
                     | :? AssignmentExpressionSyntax as a -> ownMember a.Left
-                    | :? PostfixUnaryExpressionSyntax as u -> ownMember u.Operand
+                    // `x++`/`x--` write; `x!` (null-forgiving) only reads
+                    | :? PostfixUnaryExpressionSyntax as u when
+                        u.IsKind SyntaxKind.PostIncrementExpression
+                        || u.IsKind SyntaxKind.PostDecrementExpression
+                        ->
+                        ownMember u.Operand
                     | :? PrefixUnaryExpressionSyntax as u when
                         u.IsKind SyntaxKind.PreIncrementExpression
                         || u.IsKind SyntaxKind.PreDecrementExpression

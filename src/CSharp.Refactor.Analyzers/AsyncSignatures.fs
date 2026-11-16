@@ -519,7 +519,7 @@ let private taskify (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext)
                                     Suggestion.replace m.ReturnType.Span ("async " + returnTypeText m model)
                                     if newName <> m.Identifier.ValueText then
                                         Suggestion.replace m.Identifier.Span newName
-                                    yield! own |> List.map AsyncShapes.awaitEdit
+                                    yield! own |> List.map (AsyncShapes.awaitEditAt tree model)
                                     yield! callEdits None callers
                                     for site, inv in elsewhere do
                                         yield! callEdits (Some site.Tree.FilePath) [ inv ]
@@ -784,7 +784,7 @@ let private testTasks (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                 Suggestion.replace
                                     m.ReturnType.Span
                                     ("async " + (if returnsVoid then "Task" else m.ReturnType.ToString()))
-                                yield! ownDrains |> List.map AsyncShapes.awaitEdit
+                                yield! ownDrains |> List.map (AsyncShapes.awaitEditAt tree model)
                                 for (inv, body, task) in throwsAsserts do
                                     let head = inv.Expression.ToString().Replace("Assert.Throws", "Assert.ThrowsAsync")
                                     Suggestion.replace inv.Span ($"await {head}(() => {task})")

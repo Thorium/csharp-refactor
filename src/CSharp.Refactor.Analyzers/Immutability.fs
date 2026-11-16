@@ -9,7 +9,10 @@
 /// a different contract); no attribute on the property or the type from a
 /// serializer or ORM (`[JsonProperty]`, `[Column]`, `[BsonElement]`…) and
 /// no Entity Framework entity (`DbSet<T>` of the type anywhere) — those
-/// set properties by reflection after construction — except
+/// set properties by reflection after construction — nor a type XAML may
+/// set (a public type where WinUI/UWP/WPF/MAUI/Avalonia is referenced, or one
+/// declared in a `.xaml.cs` file: the XAML compiler's setter calls are built
+/// at compile time, outside what the analyzer sees) — except
 /// System.Text.Json's property attributes (`[JsonPropertyName]`,
 /// `[JsonIgnore]`…) on a property with no initializer that no constructor
 /// sets (the source generator fills an `init` DTO by an object initializer:
@@ -22,7 +25,8 @@
 /// CR0080 (idiom, fix, API): a `class` whose every instance member is a
 /// get-only or `init` property, a `readonly` field, or a constructor
 /// assigning them — a data holder, no methods — is a `record` — value equality and `with` for free. The
-/// fix changes `class` to `record` and nothing else. Guards: no mutable
+/// fix changes `class` to `record` and nothing else. Guards: `Type ==`
+/// exists (records need it; net20/net35 lack it); no mutable
 /// instance state (every field `readonly`, every property get-only or
 /// `init`, no method or property assigns `this` state); no base class
 /// other than `object` (a record cannot derive from a class); no
@@ -39,8 +43,10 @@
 /// CR0180 (idiom, fix, API): a `static` field nothing in the compilation
 /// writes - no assignment, `++`, `ref`/`out` argument, deconstruction
 /// (nested too), store through parentheses, `ref` alias or `&` - is
-/// `static readonly`; a literal-initialised one
-/// then goes on to CR0172's `const`. Guards: one declarator, not `volatile`
+/// `static readonly`; a private or internal one initialised with a constant
+/// of a type `const` takes is `const` straight away (CA1802; a public one
+/// stays `static readonly` and goes on to CR0172 under `--api-changes`, a
+/// consumer inlining a const). Guards: one declarator, not `volatile`
 /// or `const`, no attribute (`[ThreadStatic]`…); not a mutable struct (a
 /// `readonly` field copies it before each call, so a mutating method would
 /// change the copy - primitives, enums and `readonly struct`s are fine);
@@ -151,6 +157,28 @@ let private reflectiveAttribute (compilation: Compilation) (s: ISymbol) =
                    | :? PropertyDeclarationSyntax as pd -> isNull pd.Initializer
                    | _ -> false)
         ))
+
+/// The root object type of each XAML UI framework: WinUI 3, UWP, WPF, MAUI, Avalonia.
+let private xamlRoots =
+    [
+        "Microsoft.UI.Xaml.DependencyObject"
+        "Windows.UI.Xaml.DependencyObject"
+        "System.Windows.DependencyObject"
+        "Microsoft.Maui.Controls.BindableObject"
+        "Avalonia.AvaloniaObject"
+    ]
+
+/// May XAML set the type's properties? A XAML compiler emits setter calls
+/// at build time (WinUI's `XamlTypeInfo.g.cs`, WPF's BAML loader) for the
+/// public types its markup names, and none of that code is in the
+/// compilation an analyzer sees: a public type where a XAML framework is
+/// referenced, or any type declared in a `.xaml.cs` code-behind file.
+let private xamlBound (model: SemanticModel) (t: INamedTypeSymbol) =
+    t.DeclaringSyntaxReferences
+    |> Seq.exists (fun r -> r.SyntaxTree.FilePath.EndsWith(".xaml.cs", System.StringComparison.OrdinalIgnoreCase))
+    || (t.DeclaredAccessibility = Accessibility.Public
+        && xamlRoots
+           |> List.exists (fun name -> not (isNull (model.Compilation.GetTypeByMetadataName name))))
 
 /// Is the type an Entity Framework entity: a `DbSet<T>` of it anywhere?
 let private isEntity (model: SemanticModel) (t: INamedTypeSymbol) =
@@ -322,6 +350,7 @@ let private initOnly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext
                     && (property.ContainingType.TypeKind <> TypeKind.Interface)
                     && shapeOpen ctx property
                     && not (isEntity model property.ContainingType)
+                    && not (xamlBound model property.ContainingType)
                     && writesAreConstruction model property
                     // and in the projects that see it: `filter.Currency = x` in another
                     // project is CS8852 on an `init` setter
@@ -390,8 +419,18 @@ let private overridesIdentity (t: TypeDeclarationSyntax) =
 let private identityUsed (model: SemanticModel) (t: INamedTypeSymbol) =
     Index.identityUsed (Index.ofCompilation model.Compilation) t
 
+/// A record's `Equals` compares `EqualityContract`s with `Type ==`, an
+/// operator .NET Framework gained in 4.0: on net20/net35 a record is CS0656.
+let private recordEqualityAvailable (model: SemanticModel) =
+    match model.Compilation.GetTypeByMetadataName "System.Type" with
+    | null -> false
+    | t -> not (t.GetMembers("op_Equality").IsEmpty)
+
 let private records (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
-    if ctx.LanguageVersion < LanguageVersion.CSharp9 then
+    if
+        ctx.LanguageVersion < LanguageVersion.CSharp9
+        || not (recordEqualityAvailable model)
+    then
         []
     else
         tree.GetRoot().DescendantNodes()
@@ -574,6 +613,14 @@ let private copiedWhenReadonly (t: ITypeSymbol) =
 let private staticReadonly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     let index = lazy (Index.ofCompilation model.Compilation)
 
+    // the file's warnings and errors, counted once, for the const candidates
+    let problems (m: SemanticModel) =
+        m.GetDiagnostics()
+        |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Warning || d.Severity = DiagnosticSeverity.Error)
+        |> Seq.length
+
+    let problemsBefore = lazy (problems model)
+
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
         match n with
@@ -624,6 +671,11 @@ let private staticReadonly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleC
                 && not (Index.mentionedAsString index.Value field.Name)
                 && not ((referenced model.Compilation).Contains field)
                 && not (writesFieldsByReflection model.Compilation)
+                // a write behind an `#if` another framework takes
+                && not (
+                    field.ContainingType.DeclaringSyntaxReferences
+                    |> Seq.exists (fun r -> Text.writtenInDisabledCode field.Name (r.SyntaxTree.GetRoot()))
+                )
                 // no write in the projects that see it either
                 && (match consumerSites ctx tree field with
                     | Some sites -> sites |> List.forall (fun site -> (siteWrite site).IsNone)
@@ -632,16 +684,170 @@ let private staticReadonly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleC
                 let staticToken =
                     f.Modifiers |> Seq.find (fun m -> m.IsKind SyntaxKind.StaticKeyword)
 
-                let edit = Suggestion.insert staticToken.Span.End " readonly"
+                // a constant of a type `const` takes is a const (CA1802 says so, and a
+                // `static readonly` there fails a build that turns CA1802 into an error);
+                // not a public or protected one: a consumer inlines a const's value
+                // static initializers run in text order, and one that runs code before
+                // this field's (`static int A = Compute(); static int B = 5;` with
+                // `Compute() => B`) reads 0 from a field but 5 from a const: only where
+                // every earlier initializer is itself constant (a partial type's other
+                // parts count as earlier, their order unknown)
+                let runsCodeFirst () =
+                    let constantIn (tree: SyntaxTree) (e: ExpressionSyntax) =
+                        model.Compilation.ContainsSyntaxTree tree
+                        && (let m =
+                                if obj.ReferenceEquals(tree, model.SyntaxTree) then
+                                    model
+                                else
+                                    model.Compilation.GetSemanticModel tree
 
-                if Guards.speculativeCheck model [ edit ] then
+                            m.GetConstantValue(e).HasValue)
+
+                    field.ContainingType.DeclaringSyntaxReferences
+                    |> Seq.exists (fun r ->
+                        match r.GetSyntax() with
+                        | :? TypeDeclarationSyntax as td ->
+                            let own = td.Span.Contains f.Span
+
+                            td.Members
+                            |> Seq.exists (fun m ->
+                                let isStatic (mods: SyntaxTokenList) =
+                                    mods |> Seq.exists (fun t -> t.IsKind SyntaxKind.StaticKeyword)
+
+                                let earlier = not own || m.SpanStart < f.SpanStart
+
+                                match m with
+                                | :? FieldDeclarationSyntax as other when
+                                    earlier
+                                    && isStatic other.Modifiers
+                                    && not (
+                                        other.Modifiers |> Seq.exists (fun t -> t.IsKind SyntaxKind.ConstKeyword)
+                                    )
+                                    ->
+                                    other.Declaration.Variables
+                                    |> Seq.exists (fun v ->
+                                        not (isNull v.Initializer)
+                                        && not (constantIn td.SyntaxTree v.Initializer.Value))
+                                | :? PropertyDeclarationSyntax as p when
+                                    earlier && isStatic p.Modifiers && not (isNull p.Initializer)
+                                    ->
+                                    not (constantIn td.SyntaxTree p.Initializer.Value)
+                                | _ -> false)
+                        | _ -> true)
+
+                // a const folds where it is read: beside another constant the compiler
+                // works the expression out, and what a field never raised appears - an
+                // unreachable branch (CS0162), an overflow (CS0220), a cast that does not
+                // fit (CS0221), a pattern that always matches. In this file the compiler
+                // is asked (`addsDiagnostics`); read off the syntax are a use in another
+                // file, and one beside a static field that may turn const in the same pass
+                let foldsWhereRead () =
+                    Index.usesOf index.Value field
+                    |> List.exists (fun u ->
+                        let rec top (x: ExpressionSyntax) : ExpressionSyntax =
+                            match x.Parent with
+                            | :? MemberAccessExpressionSyntax as ma when obj.ReferenceEquals(ma.Name, x) -> top ma
+                            | :? ParenthesizedExpressionSyntax as p -> top p
+                            | _ -> x
+
+                        let read = top u.Id
+                        let elsewhere = not (obj.ReferenceEquals(u.Tree, tree))
+
+                        // another static field whose initializer is a constant today
+                        let constCandidate (e: ExpressionSyntax) =
+                            match u.Model.GetSymbolInfo(e).Symbol with
+                            | :? IFieldSymbol as other when
+                                other.IsStatic
+                                && not other.IsConst
+                                && (other.DeclaredAccessibility = Accessibility.Private
+                                    || other.DeclaredAccessibility = Accessibility.Internal)
+                                ->
+                                other.DeclaringSyntaxReferences
+                                |> Seq.exists (fun r ->
+                                    match r.GetSyntax() with
+                                    | :? VariableDeclaratorSyntax as v when not (isNull v.Initializer) ->
+                                        not (obj.ReferenceEquals(v.SyntaxTree, u.Tree))
+                                        || u.Model.GetConstantValue(v.Initializer.Value).HasValue
+                                    | _ -> false)
+                            | _ -> false
+
+                        match read.Parent with
+                        | :? BinaryExpressionSyntax as b ->
+                            let other =
+                                if obj.ReferenceEquals(b.Left, read) then
+                                    b.Right
+                                else
+                                    b.Left
+
+                            // strings joined fold to a string, and that is all
+                            not (
+                                b.IsKind SyntaxKind.AddExpression
+                                && field.Type.SpecialType = SpecialType.System_String
+                            )
+                            && (constCandidate other || (elsewhere && u.Model.GetConstantValue(other).HasValue))
+                        | :? CastExpressionSyntax
+                        | :? PrefixUnaryExpressionSyntax
+                        | :? CheckedExpressionSyntax
+                        | :? IsPatternExpressionSyntax
+                        | :? SwitchStatementSyntax
+                        | :? SwitchExpressionSyntax -> elsewhere
+                        | :? ConditionalExpressionSyntax as c -> elsewhere && obj.ReferenceEquals(c.Condition, read)
+                        | _ -> false)
+
+                // does the file compile with a warning or an error more once the edit is in?
+                let addsDiagnostics (edit: TextEdit) =
+                    let patched =
+                        tree.WithChangedText(tree.GetText().WithChanges [ TextChange(edit.Span, edit.Replacement) ])
+
+                    let after =
+                        model.Compilation.ReplaceSyntaxTree(tree, patched).GetSemanticModel(patched, false)
+
+                    problems after > problemsBefore.Value
+
+                let constant =
+                    f.Declaration.Variables.Count = 1
+                    && (field.DeclaredAccessibility = Accessibility.Private
+                        || field.DeclaredAccessibility = Accessibility.Internal)
+                    && not (isNull f.Declaration.Variables.[0].Initializer)
+                    && ConstLocal.constable field.Type
+                    // a flag is read as a condition: const, the branch it guards is CS0162
+                    && field.Type.SpecialType <> SpecialType.System_Boolean
+                    // an initializer under `#if` is another expression in another framework
+                    && not (f.Declaration.DescendantTrivia() |> Seq.exists (fun t -> t.IsDirective))
+                    && (let c = model.GetConstantValue f.Declaration.Variables.[0].Initializer.Value
+                        c.HasValue && not (isNull c.Value))
+                    && not (runsCodeFirst ())
+                    && not (foldsWhereRead ())
+                    && Guards.speculativeCheck model [ Suggestion.replace staticToken.Span "const" ]
+                    && not (addsDiagnostics (Suggestion.replace staticToken.Span "const"))
+
+                let edit =
+                    if constant then
+                        Suggestion.replace staticToken.Span "const"
+                    else
+                        Suggestion.insert staticToken.Span.End " readonly"
+
+                // a const that fails the check falls back to readonly, checked on its own
+                if constant || Guards.speculativeCheck model [ edit ] then
                     Some
                         {
                             Code = StaticReadonlyCode
                             Message =
-                                "Nothing writes this static field after its initializer: readonly says so, and the runtime can fold it"
+                                if constant then
+                                    "Nothing writes this static field after its initializer, a constant: const says so, and every use folds it"
+                                else
+                                    "Nothing writes this static field after its initializer: readonly says so, and the runtime can fold it"
                             Span = f.Declaration.Variables.[0].Identifier.Span
-                            Fixes = [ Suggestion.fix "Make it static readonly" StaticReadonlyCode [ edit ] ]
+                            Fixes =
+                                [
+                                    Suggestion.fix
+                                        (if constant then
+                                             "Make it const"
+                                         else
+                                             "Make it static readonly")
+                                        StaticReadonlyCode
+                                        [ edit ]
+                                ]
                         }
                 else
                     None

@@ -255,8 +255,16 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                 | _ -> None
                             | _ -> None
 
+                        // an interface (`ICollection<T>`) may stand for a collection that
+                        // tolerates the change (a HashSet or Dictionary from .NET 5 on)
+                        let consequence =
+                            if sourceType.TypeKind = TypeKind.Interface then
+                                "the next MoveNext throws InvalidOperationException unless the collection behind it tolerates the change"
+                            else
+                                "the next MoveNext throws InvalidOperationException"
+
                         let message =
-                            $"'{rootText}' is changed ({name}) while its own foreach enumerates it: the next MoveNext throws InvalidOperationException — enumerate a snapshot ({sourceText}.ToList()) and change the original, or collect the changes and apply them after the loop"
+                            $"'{rootText}' is changed ({name}) while its own foreach enumerates it: {consequence} — enumerate a snapshot ({sourceText}.ToList()) and change the original, or collect the changes and apply them after the loop"
 
                         match filter with
                         | Some replacement ->

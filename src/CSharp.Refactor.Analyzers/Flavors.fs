@@ -28,25 +28,65 @@ module Flavors =
 
         let i = name.LastIndexOf '('
 
+        // a TargetFrameworks property spread over lines leaves its whitespace in the name
         if i > 0 && name.EndsWith ")" then
-            name.Substring(i + 1, name.Length - i - 2)
+            name.Substring(i + 1, name.Length - i - 2).Trim()
         else
             ""
 
-    /// Narrowest surface first: netstandard, .NET Framework, .NET Core, .NET.
-    let rank (tfm: string) =
-        let t = (tfm.ToLowerInvariant().Split '-').[0]
-        let digits = String(t |> Seq.filter Char.IsDigit |> Seq.toArray)
+    /// The API surface of a target framework on one scale, smallest first.
+    /// .NET Framework is its version (`net462` 4.62, `net47` 4.70, `net481`
+    /// 4.81); `netstandard` sits where the frameworks implementing it start
+    /// (1.0-1.2 just below net45, 1.3 below net46, 1.4-2.0 between net46 and
+    /// net461, 2.1 just below
+    /// `netcoreapp3.0`); `netcoreapp` above every .NET Framework, `net5.0`+
+    /// above that. An unknown name ranks last.
+    let rank (tfm: string) : float =
+        let t = (tfm.Trim().ToLowerInvariant().Split '-').[0]
 
-        let version =
-            match Int32.TryParse digits with
-            | true, v -> v
-            | false, _ -> 0
+        let parse (s: string) =
+            match Double.TryParse(s, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+            | true, v -> Some v
+            | _ -> None
 
-        if t.StartsWith "netstandard" then 0, version
-        elif t.StartsWith "netcoreapp" then 2, version
-        elif t.StartsWith "net" && t.Contains "." then 3, version
-        else 1, version
+        if t.StartsWith "netstandard" then
+            // just below the first .NET Framework implementing it, so no tie with it,
+            // and in version order among themselves
+            match parse (t.Substring "netstandard".Length) with
+            | Some v when v < 1.3 -> 4.49 + v / 1000.0
+            | Some v when v < 1.4 -> 4.59 + v / 1000.0
+            | Some v when v < 2.1 -> 4.6 + v / 1000.0
+            | Some v -> 5.29 + (v - 2.1) / 1000.0
+            | None -> 100.0
+        elif t.StartsWith "netcoreapp" then
+            match parse (t.Substring "netcoreapp".Length) with
+            | Some v -> 5.0 + v / 10.0
+            | None -> 100.0
+        // `net4.8`, `net4.7.2`: a .NET Framework version spelled with dots
+        elif
+            t.StartsWith "net"
+            && t.Contains "."
+            && not (t.Length > 4 && t.[3] >= '1' && t.[3] <= '4' && t.[4] = '.')
+        then
+            match parse (t.Substring 3) with
+            | Some v -> 6.0 + v
+            | None -> 100.0
+        elif t.StartsWith "net" then
+            // net20, net35, net403, net462, net481: digits are major, minor, patch
+            let digits = (t.Substring 3).Replace(".", "")
+
+            if digits.Length >= 2 && digits |> Seq.forall Char.IsDigit then
+                let d (k: int) =
+                    if k < digits.Length then
+                        float (int digits.[k] - int '0')
+                    else
+                        0.0
+
+                d 0 + d 1 / 10.0 + d 2 / 100.0
+            else
+                100.0
+        else
+            100.0
 
     /// The other flavors of the project's file with a narrower framework.
     let narrowerOf (project: Project) : Project list =
@@ -60,7 +100,11 @@ module Flavors =
                 p.Id <> project.Id
                 && String.Equals(p.FilePath, project.FilePath, StringComparison.OrdinalIgnoreCase)
                 && frameworkOf p <> ""
-                && rank (frameworkOf p) < own)
+                && (let theirs = rank (frameworkOf p)
+                    // equal ranks (`net8.0` beside `net8.0-windows`) break by name, so
+                    // exactly one of the two is the narrower
+                    theirs < own
+                    || (theirs = own && String.CompareOrdinal(frameworkOf p, frameworkOf project) < 0)))
             |> List.ofSeq
 
     let private holds (project: Project) (path: string) =

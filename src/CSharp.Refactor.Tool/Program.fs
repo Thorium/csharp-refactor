@@ -198,6 +198,28 @@ let private runMain argv =
 
 [<EntryPoint>]
 let main argv =
+    // a redirected stream gets the OEM code page on Windows, which prints the
+    // messages' `…` and `—` as `.` and `-`: a file, a pipe or an MCP client reads
+    // UTF-8. Each redirected stream gets its own writer: `Console.OutputEncoding`
+    // would change the code page of the console the caller goes on using
+    // only the console's own writer, which speaks the console's code page: a
+    // writer a host process set (a test's StringWriter) stays
+    let consolePage =
+        try
+            Console.OutputEncoding.CodePage
+        with _ ->
+            -1
+
+    let ownWriter (writer: IO.TextWriter) =
+        consolePage <> Text.Encoding.UTF8.CodePage
+        && writer.Encoding.CodePage = consolePage
+
+    if Console.IsOutputRedirected && ownWriter Console.Out then
+        Console.SetOut(new IO.StreamWriter(Console.OpenStandardOutput(), Text.UTF8Encoding false, AutoFlush = true))
+
+    if Console.IsErrorRedirected && ownWriter Console.Error then
+        Console.SetError(new IO.StreamWriter(Console.OpenStandardError(), Text.UTF8Encoding false, AutoFlush = true))
+
     surviveForeignBackgroundExceptions ()
     putBackOnCtrlC ()
     let code = Sweep.endingOnInterrupt (fun () -> runMain argv)

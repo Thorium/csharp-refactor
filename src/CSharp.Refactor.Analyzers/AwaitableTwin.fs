@@ -22,7 +22,14 @@
 /// `IQueryable<T>` (EF's `ToListAsync`, `FirstAsync`: only a provider that
 /// implements the async query interface runs it — an in-memory
 /// `AsQueryable()` source, a test fake, throws at the call); `Thread.Sleep(0)` and
-/// `Sleep(1)` are thread yields and stay. Yields to CA1849.
+/// `Sleep(1)` are thread yields and stay; never a `MemoryStream`/`StringWriter`/
+/// `StringReader` receiver or `Console.Out`/`Console.Error` (nothing behind
+/// the twin), EF Core's `Add`/`AddRange` (async only for database value
+/// generators, EF's documentation says), nor inside a member named for its
+/// synchronous work (`WriteTokenSyncReadingAsync`). The inserted `await`
+/// carries `.ConfigureAwait(false)` where the method's own awaits all use it,
+/// or, in a method with no other await, where CA2007 is configured
+/// (`AsyncShapes.configureAwaitSuffix`). Yields to CA1849.
 module CSharp.Refactor.AwaitableTwin
 
 open Microsoft.CodeAnalysis
@@ -119,6 +126,75 @@ let private twinOf
             && wraps m.ReturnType t.ReturnType
             && not queryableTwin)
 
+/// A member named for its synchronous work (`WriteTokenSyncReadingAsync`):
+/// the sync call inside is the point.
+let private syncOnPurpose (node: SyntaxNode) =
+    let name =
+        match node with
+        | :? MethodDeclarationSyntax as m -> m.Identifier.ValueText
+        | :? LocalFunctionStatementSyntax as l -> l.Identifier.ValueText
+        | _ -> ""
+
+    // `Sync` as an inner word before the I/O it does (`WriteToken|Sync|Reading`): not
+    // the verb in `SyncContactsAsync`/`DoSyncAsync`, nor `Resync`, `Synchronize`, nor
+    // the noun in `RunDataSyncJobAsync`/`HandleSyncRequestAsync`
+    let stem =
+        if name.EndsWith "Async" then
+            name.Substring(0, name.Length - 5)
+        else
+            name
+
+    System.Text.RegularExpressions.Regex.IsMatch(
+        stem,
+        "[a-z]Sync(Reading|Writing|Flushing|Copying|Loading|Saving|Sending|Receiving|Waiting|Blocking)(?![a-z])"
+    )
+
+let private memoryTypes =
+    set
+        [
+            "System.IO.MemoryStream"
+            "System.IO.StringWriter"
+            "System.IO.StringReader"
+            "System.IO.UnmanagedMemoryStream"
+        ]
+
+/// Twins with nothing behind them, or advised against: an in-memory stream,
+/// reader or writer and the console's writers complete synchronously anyway;
+/// EF Core's `Add`/`AddRange` are async only for value generators that reach
+/// the database (SQL Server HiLo), and EF's documentation says to use the
+/// synchronous ones otherwise.
+let private inMemory (model: SemanticModel) (inv: InvocationExpressionSyntax) (m: IMethodSymbol) =
+    let receiver =
+        match inv.Expression with
+        | :? MemberAccessExpressionSyntax as ma -> Some ma.Expression
+        | _ -> None
+
+    let rec within (names: Set<string>) (t: ITypeSymbol) =
+        not (isNull t)
+        && (names.Contains(t.OriginalDefinition.ToDisplayString())
+            || within names t.BaseType)
+
+    let receiverType =
+        match receiver with
+        | Some r -> model.GetTypeInfo(r).Type
+        | None -> m.ContainingType :> ITypeSymbol
+
+    let consoleWriter =
+        match receiver with
+        | Some r ->
+            let text = r.ToString().Replace("System.", "")
+            text = "Console.Out" || text = "Console.Error"
+        | None -> false
+
+    let rec efType (t: ITypeSymbol) =
+        not (isNull t)
+        && (t.ContainingNamespace.ToDisplayString().StartsWith "Microsoft.EntityFrameworkCore"
+            || efType t.BaseType)
+
+    consoleWriter
+    || within memoryTypes receiverType
+    || ((m.Name = "Add" || m.Name = "AddRange") && efType m.ContainingType)
+
 /// A statement, a local's initializer, or an assignment's right side.
 let private bindablePosition (inv: InvocationExpressionSyntax) =
     match inv.Parent with
@@ -164,7 +240,11 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
 
                     if sleep then
                         let edit =
-                            Suggestion.replace inv.Span ("await Task.Delay" + inv.ArgumentList.ToString())
+                            Suggestion.replace
+                                inv.Span
+                                ("await Task.Delay"
+                                 + inv.ArgumentList.ToString()
+                                 + (AsyncShapes.configureAwaitSuffix tree model inv))
 
                         if Guards.speculativeCheck model [ edit ] then
                             Some
@@ -186,6 +266,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                 | _ -> null
 
                             match twinOf model inv.SpanStart receiverType m with
+                            | Some _ when syncOnPurpose f.Node || inMemory model inv m -> None
                             | Some twin ->
                                 let nameToken =
                                     match inv.Expression with
@@ -196,10 +277,14 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                                 match nameToken with
                                 | None -> None
                                 | Some token ->
+                                    let suffix = AsyncShapes.configureAwaitSuffix tree model inv
+
                                     let edits =
                                         [
                                             Suggestion.insert inv.SpanStart "await "
                                             Suggestion.replace token.Span twin.Name
+                                            if suffix <> "" then
+                                                Suggestion.insert inv.Span.End suffix
                                         ]
 
                                     if Guards.speculativeCheck model edits then

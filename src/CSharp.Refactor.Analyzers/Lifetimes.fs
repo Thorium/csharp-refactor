@@ -118,9 +118,33 @@ let private usingOutlivedByTask (tree: SyntaxTree) (model: SemanticModel) : Sugg
                         m.Body.Statements.Count > 0
                         && obj.ReferenceEquals(m.Body.Statements.[m.Body.Statements.Count - 1], r)
 
+                    let suffix = AsyncShapes.configureAwaitSuffix tree model m.Body
+
+                    // `await e`, with `.ConfigureAwait(false)` where the file wants it; an
+                    // expression that is not primary is parenthesised first
+                    let awaitedText (e: ExpressionSyntax) =
+                        if suffix = "" then
+                            "await " + e.ToString()
+                        else
+                            match e with
+                            | :? InvocationExpressionSyntax
+                            | :? MemberAccessExpressionSyntax
+                            | :? IdentifierNameSyntax
+                            | :? ElementAccessExpressionSyntax
+                            | :? ParenthesizedExpressionSyntax -> "await " + e.ToString() + suffix
+                            | _ -> "await (" + e.ToString() + ")" + suffix
+
+                    // an insert where there is no suffix: the expression's own text (a
+                    // comment, an `#if`) is not rewritten
+                    let awaitEdit (e: ExpressionSyntax) =
+                        if suffix = "" then
+                            Suggestion.insert e.SpanStart "await "
+                        else
+                            Suggestion.replace e.Span (awaitedText e)
+
                     // a `Task` method cannot `return await t;`: it awaits, then returns
                     let awaitThenReturn (r: ReturnStatementSyntax) =
-                        let awaited = "await " + r.Expression.ToString() + ";"
+                        let awaited = awaitedText r.Expression + ";"
 
                         if lastOfBody r then
                             Suggestion.replace r.Span awaited
@@ -145,7 +169,7 @@ let private usingOutlivedByTask (tree: SyntaxTree) (model: SemanticModel) : Sugg
                                 Suggestion.replace
                                     r.Expression.Span
                                     (inv.ArgumentList.Arguments.[0].Expression.ToString())
-                            | _ -> Suggestion.insert r.Expression.SpanStart "await "
+                            | _ -> awaitEdit r.Expression
 
                     let edits =
                         Suggestion.insert m.ReturnType.SpanStart "async "
@@ -154,7 +178,7 @@ let private usingOutlivedByTask (tree: SyntaxTree) (model: SemanticModel) : Sugg
                                 if returnsVoidTask then
                                     awaitThenReturn r
                                 else
-                                    Suggestion.insert r.Expression.SpanStart "await "))
+                                    awaitEdit r.Expression))
                         @ (otherReturns |> List.map rebind)
 
                     if Guards.speculativeCheck model edits then

@@ -97,7 +97,8 @@ let ``a drain behind a completion test in the same condition, or a WhenAny winne
     Assert.Contains("!t.IsCompleted ? 0 : t.Result;", fixedSource)
     Assert.Contains("!t.IsCompleted || t.Result > 0 ? 1 : 2;", fixedSource)
     // a negated test proves nothing in its then-branch, a reassigned winner
-    // nothing, and `!=` nothing in the right operand of `&&`
+    // nothing, and `!=` nothing in the right operand of `&&`; B's
+    // ConfigureAwait(false) is B's: the methods fixed here await bare or not at all
     Assert.Contains("if (!t.IsCompleted) { return await t; }", fixedSource)
 
     Assert.Contains(

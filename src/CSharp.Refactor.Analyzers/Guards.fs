@@ -312,6 +312,31 @@ let private isStatementLike (node: SyntaxNode) =
         s.Contents |> Seq.exists (fun c -> c :? InterpolationSyntax)
     | _ -> false
 
+/// The .NET runtime's own signing keys (ECMA, the shared framework,
+/// CoreLib, the newer runtime key). A `System.*` namespace alone is no
+/// proof of the base class library: PowerShell's `System.Management.Automation`
+/// (its `Cmdlet.WriteObject` hands the object down the pipeline) lives under it.
+let private frameworkKeys =
+    set
+        [
+            "b77a5c561934e089"
+            "b03f5f7f11d50a3a"
+            "7cec85d7bea7798e"
+            "cc7b13ffcd2ddd51"
+        ]
+
+/// A method of the base class library: a `System` namespace in an assembly
+/// signed with a runtime key.
+let isBcl (callee: IMethodSymbol) =
+    callee.ContainingNamespace.ToDisplayString().StartsWith "System"
+    && (match callee.ContainingAssembly with
+        | null -> false
+        | a ->
+            let token = a.Identity.PublicKeyToken
+
+            not token.IsDefaultOrEmpty
+            && frameworkKeys.Contains(token |> Seq.map (fun b -> b.ToString "x2") |> String.concat ""))
+
 /// Does every CALL inside this expression resolve to a member known to
 /// compute and nothing else — a pure type's method or property, a
 /// lambda of the same, a tuple or record construction — with no

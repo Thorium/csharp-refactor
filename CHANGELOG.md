@@ -2,6 +2,31 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
+## 0.1.28
+
+- CR0015 leaves a `List<T>` loop whose body writes through the indexer (`xs[next] = xs[i]`): under `foreach` the next `MoveNext` threw. The element name drops a field prefix and a capital (`_contexts` → `context`).
+- CR0040, CR0041, CR0042 and CR0051 add `.ConfigureAwait(false)` to the `await` they insert (CR0041 in the method it converts; the awaits it adds at call sites stay bare) where the enclosing method's own awaits all use it, or, in a method with no other await, CA2007 is configured (never in test files, nor beside a bare await: a UI handler stays on its context). A bare `await` failed CA2007 builds (Newtonsoft.Json, jellyfin).
+- CR0042 skips `MemoryStream`/`StringWriter`/`StringReader` and `Console.Out`/`Console.Error` receivers, EF Core's `Add`/`AddRange`, and members named for their synchronous I/O (`WriteTokenSyncReadingAsync`; `Sync` as a noun, `RunDataSyncJobAsync`, is not that).
+- CR0060 counts `await using (x.ConfigureAwait(false))` as the dispose (it added a second one), leaves an object built with a `null!`/`default!` argument (its `Dispose` threw in jellyfin's tests), and treats a `System.*` method outside the runtime's own assemblies as one that may keep the object (PowerShell's `WriteObject`; two cmdlets emitted disposed objects).
+- CR0083 leaves a public type's setters where a XAML framework (WinUI, UWP, WPF, MAUI, Avalonia) is referenced, and any type in a `.xaml.cs` file: the XAML compiler's generated code assigns them (CS8852 in Files).
+- CR0080 needs `Type ==` in the compilation: a record failed net20 and net35 with CS0656.
+- CR0172 and CR0180 leave a local or field that code behind an inactive `#if` writes: another target framework compiles that code (Newtonsoft.Json's `hasIgnoreDataMemberAttribute`).
+- CR0055 leaves the explicit `CancellationToken.None` of a call named for cleanup (`StopCoreAndConfirmAsync`, `RollbackAsync`, `CloseAsync`): v2rayN's cleanup after a failed start took the caller's token.
+- CR0161 reads `x!` as a read: `Name!.Length` was a write to the struct, a false warning.
+- CR0114 counts positional placeholders (`{0}`): they counted as none. Serilog reads a repeated `{0}` once; Microsoft.Extensions.Logging hands every hole the next argument.
+- CR0165 stays a note where the `try` adds an HTTP header or builds a header value (`Add`, `ParseAdd`, `new AuthenticationHeaderValue(key)`; not a read like `GetValues`): the exception quotes the value, which may be a secret.
+- CR0180 makes a private or internal field initialised with a constant `const`, not `static readonly` (CA1802), unless an earlier static initializer runs code that could read it. A flag (`bool`), an initializer under `#if`, and a field whose const would fold into a new warning or error where it is read (CS0162, CS0220) stay `static readonly`.
+- CR0163 makes the author's own `{ … }` block the `try` body instead of nesting it.
+- CR0171 says the change may be tolerated when the collection is declared as an interface.
+- Multi-targeted projects are swept narrowest API first by version: .NET Framework below 4.6.1 before `netstandard2.0`, `net462` before `net47`; a framework name spread over lines is trimmed.
+- The tool compiles with Roslyn 5.12 (C# 15), capped at the C# version of the SDK that loads the projects (an explicit `preview` stays): OpenTelemetry's collection-expression arguments were errors and its core projects were skipped.
+- A solution without an Any CPU platform loads, restores and builds for x64 (or its first platform, never "Mixed Platforms"): Files.App did not load. A solution that maps an old-format project to Any CPU under that platform keeps its projects' own.
+- When neither build works, fixes that add errors to the build are put back; they stood. The two builds' whole error sets are compared (the console shows the first twelve lines).
+- A project whose compilation does not resolve `object` (a XAML app in a design-time load) no longer judges a fix in a file it shares: every new expression was CS0518 there, and valid fixes were refused as "a defect of this tool".
+- A failed restore prints MSBuild's error lines (they are on stdout); a missing global.json SDK runs no restores instead of failing each one; a project under `UseArtifactsOutput` is not restored again on every run.
+- A fix refused because it would drop a comment says so, instead of "held to the next pass".
+- Redirected output is UTF-8: `…` and `—` printed as `.` and `-`.
+
 ## 0.1.27
 
 - `--exclude-codes CR0103,CR0047` leaves rules out of a run, after `--codes` and `--categories` and ahead of `.editorconfig`; the MCP `analyze` call takes `excludeCodes`.

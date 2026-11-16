@@ -606,7 +606,7 @@ type EndToEnd() =
         run [ write plain; "--codes"; "CR0180" ]
         let plainText = File.ReadAllText(Path.Combine(plain, "Knobs.cs"))
         Assert.Contains("public static int Limit = 10;", plainText)
-        Assert.Contains("private static readonly int Mine = 2;", plainText)
+        Assert.Contains("private const int Mine = 2;", plainText)
 
         // with it: the public field too, though its fix edits no other file
         let opened = tempDir ()
@@ -832,7 +832,7 @@ type EndToEnd() =
         run project
         let knobs = File.ReadAllText(Path.Combine(dir, "Lib", "Knobs.cs"))
         Assert.Contains("public static int Limit = 10;", knobs)
-        Assert.Contains("private static readonly int Mine = 2;", knobs)
+        Assert.Contains("private const int Mine = 2;", knobs)
 
     [<Fact>]
     member _.``a fix that raises an analyzer warning the project treats as an error is held, the others stand``() =

@@ -91,7 +91,20 @@ let private build (compilation: Compilation) : CompilationIndex =
                         && f.Modifiers |> Seq.exists (fun k -> k.IsKind SyntaxKind.PublicKeyword)
                     | _ -> false
 
-                if candidateType d.Type || isPublicStatic then
+                // a static field CR0180 may turn const: where it is read decides
+                let isInitializedStatic =
+                    match d.Parent with
+                    | :? FieldDeclarationSyntax as f ->
+                        f.Modifiers |> Seq.exists (fun k -> k.IsKind SyntaxKind.StaticKeyword)
+                        && not (
+                            f.Modifiers
+                            |> Seq.exists (fun k ->
+                                k.IsKind SyntaxKind.ReadOnlyKeyword || k.IsKind SyntaxKind.ConstKeyword)
+                        )
+                        && d.Variables |> Seq.exists (fun v -> not (isNull v.Initializer))
+                    | _ -> false
+
+                if candidateType d.Type || isPublicStatic || isInitializedStatic then
                     for v in d.Variables do
                         candidateNames.Add v.Identifier.ValueText |> ignore
             | :? ParameterSyntax as p when candidateType p.Type -> candidateNames.Add p.Identifier.ValueText |> ignore
@@ -200,13 +213,7 @@ let private build (compilation: Compilation) : CompilationIndex =
                         || t.OriginalDefinition.ToDisplayString().StartsWith "System.Tuple<")
 
                 match m.GetSymbolInfo(id).Symbol with
-                | :? IFieldSymbol as f when
-                    interesting f.Type
-                    || (f.IsStatic
-                        && f.DeclaredAccessibility = Accessibility.Public
-                        && not f.IsReadOnly
-                        && not f.IsConst)
-                    ->
+                | :? IFieldSymbol as f when interesting f.Type || (f.IsStatic && not f.IsReadOnly && not f.IsConst) ->
                     addUse f { Tree = tree; Model = m; Id = id }
                 | :? IPropertySymbol as p when interesting p.Type -> addUse p { Tree = tree; Model = m; Id = id }
                 | :? ILocalSymbol as l when interesting l.Type -> addUse l { Tree = tree; Model = m; Id = id }

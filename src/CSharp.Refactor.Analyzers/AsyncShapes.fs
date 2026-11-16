@@ -610,15 +610,126 @@ let drainSite (drain: Drain) : SyntaxNode * ExpressionSyntax option =
     | WaitAll(s, _) -> s :> SyntaxNode, None
     | RunDrain(s, r) -> s :> SyntaxNode, Some r
 
-/// The edit that awaits a drain.
-let awaitEdit (drain: Drain) : TextEdit =
+/// What an `await` inserted at `site` appends: `.ConfigureAwait(false)` where
+/// the enclosing method's own awaits all use it, or, in a method with no other
+/// await, where CA2007 is configured for the file (`.editorconfig`, a global
+/// config such as `AnalysisMode`, a ruleset or `WarningsAsErrors`); otherwise
+/// nothing. A bare `await` among `ConfigureAwait(false)` ones captures the
+/// context the method refuses - a deadlock for a caller that blocks - and fails
+/// a build that turns CA2007 into an error; one added to a method whose awaits
+/// are bare (a UI handler) would move the code after it off the UI thread.
+/// Never in a test file (xUnit1030).
+let configureAwaitSuffix (tree: SyntaxTree) (model: SemanticModel) (site: SyntaxNode) : string =
+    let configuredExpression (e: ExpressionSyntax) =
+        match e with
+        | :? InvocationExpressionSyntax as i ->
+            match i.Expression with
+            | :? MemberAccessExpressionSyntax as m ->
+                m.Name.Identifier.ValueText = "ConfigureAwait"
+                && i.ArgumentList.Arguments.Count = 1
+                && i.ArgumentList.Arguments.[0].Expression.IsKind SyntaxKind.FalseLiteralExpression
+            | _ -> false
+        | _ -> false
+
+    // what each await of the method awaits: `await e`, `await foreach (… in e)`,
+    // `await using (e)`, `await using var x = e;`
+    let awaited (n: SyntaxNode) : ExpressionSyntax option =
+        match n with
+        | :? AwaitExpressionSyntax as a -> Some a.Expression
+        // `foreach (var x in e)` and `foreach (var (a, b) in e)`
+        | :? CommonForEachStatementSyntax as f when f.AwaitKeyword.IsKind SyntaxKind.AwaitKeyword -> Some f.Expression
+        | :? UsingStatementSyntax as u when u.AwaitKeyword.IsKind SyntaxKind.AwaitKeyword ->
+            if not (isNull u.Expression) then
+                Some u.Expression
+            elif
+                not (isNull u.Declaration)
+                && u.Declaration.Variables.Count > 0
+                && not (isNull u.Declaration.Variables.[0].Initializer)
+            then
+                Some u.Declaration.Variables.[0].Initializer.Value
+            else
+                None
+        | :? LocalDeclarationStatementSyntax as d when
+            d.AwaitKeyword.IsKind SyntaxKind.AwaitKeyword
+            && d.Declaration.Variables.Count > 0
+            && not (isNull d.Declaration.Variables.[0].Initializer)
+            ->
+            Some d.Declaration.Variables.[0].Initializer.Value
+        | _ -> None
+
+    // the method's own awaits, not those of a lambda inside it
+    let configured, bare =
+        match enclosingFunction site with
+        | None -> 0, 0
+        | Some f ->
+            let own =
+                f.Body.DescendantNodes()
+                |> Seq.choose (fun n ->
+                    match awaited n with
+                    | Some e when
+                        (match enclosingFunction n with
+                         | Some g -> obj.ReferenceEquals(g.Node, f.Node)
+                         | None -> false)
+                        ->
+                        Some e
+                    | _ -> None)
+                |> List.ofSeq
+
+            let c = own |> List.filter configuredExpression |> List.length
+            c, own.Length - c
+
+    let on (r: ReportDiagnostic) =
+        r = ReportDiagnostic.Error
+        || r = ReportDiagnostic.Warn
+        || r = ReportDiagnostic.Info
+
+    // the file's own severity (an `.editorconfig` section) wins over a global
+    // config, which wins over the compilation's options
+    let ca2007 () =
+        let options = model.Compilation.Options
+        let none = System.Threading.CancellationToken.None
+        let mutable severity = ReportDiagnostic.Default
+
+        let provider = options.SyntaxTreeOptionsProvider
+
+        if
+            not (isNull provider)
+            && provider.TryGetDiagnosticValue(tree, "CA2007", none, &severity)
+        then
+            on severity
+        elif
+            not (isNull provider)
+            && provider.TryGetGlobalDiagnosticValue("CA2007", none, &severity)
+        then
+            on severity
+        else
+            match options.SpecificDiagnosticOptions.TryGetValue "CA2007" with
+            | true, r -> on r
+            | _ -> false
+
+    // by the compilation's global usings too: the xunit template's `UnitTest1.cs`
+    // has no `using Xunit;` of its own
+    if Text.isTestFileIn model.Compilation tree || bare > 0 then
+        ""
+    elif configured > 0 || ca2007 () then
+        ".ConfigureAwait(false)"
+    else
+        ""
+
+/// The edit that awaits a drain; `suffix` is `configureAwaitSuffix`'s answer.
+let awaitEditWith (suffix: string) (drain: Drain) : TextEdit =
     match drain with
     | Value(s, r) ->
-        let awaited = "await " + r.ToString()
+        let awaited = "await " + r.ToString() + suffix
         Suggestion.replace s.Span (if needsParens s then $"({awaited})" else awaited)
-    | Wait(s, r) -> Suggestion.replace s.Expression.Span ("await " + r.ToString())
-    | WaitAll(s, inv) -> Suggestion.replace s.Expression.Span ("await Task.WhenAll" + inv.ArgumentList.ToString())
+    | Wait(s, r) -> Suggestion.replace s.Expression.Span ("await " + r.ToString() + suffix)
+    | WaitAll(s, inv) ->
+        Suggestion.replace s.Expression.Span ("await Task.WhenAll" + inv.ArgumentList.ToString() + suffix)
     | RunDrain(s, r) -> Suggestion.replace s.Span (r.ToString())
+
+/// The edit that awaits a drain where the drain sits.
+let awaitEditAt (tree: SyntaxTree) (model: SemanticModel) (drain: Drain) : TextEdit =
+    awaitEditWith (configureAwaitSuffix tree model (fst (drainSite drain))) drain
 
 /// Can a drain in this function be awaited at all: not in a no-bind zone,
 /// not under an AggregateException handler, not known complete, not in a
@@ -768,7 +879,7 @@ let private blocking (syncSwap: bool) (tree: SyntaxTree) (model: SemanticModel) 
                         site.Span
                 )
             else
-                let edit = awaitEdit drain
+                let edit = awaitEditAt tree model drain
 
                 if Guards.speculativeCheck model [ edit ] then
                     Some
@@ -1251,8 +1362,27 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                             names || bestEffort
                         | None -> false
 
+                    // a callee named for cleanup (`StopCoreAsync`, `RollbackAsync`): its
+                    // explicit `None` keeps it running after the caller's token has fired
+                    let cleanup =
+                        match model.GetSymbolInfo(inv).Symbol with
+                        | :? IMethodSymbol as m ->
+                            System.Text.RegularExpressions.Regex.IsMatch(
+                                m.Name,
+                                "^(Stop|Clean|Dispose|Close|Shut[Dd]own|Roll[Bb]ack|Abort|Kill|Release|Undo|Revert|Cancel|Terminate|Unlock|Unregister|Unsubscribe|Disconnect)(?![a-z])"
+                            )
+                        | _ -> false
+
                     match enclosingFunction arg with
-                    | Some f when not (scheduling || deliberate || inCatchOrFinally f arg || isSharedFactory f) ->
+                    | Some f when
+                        not (
+                            scheduling
+                            || deliberate
+                            || cleanup
+                            || inCatchOrFinally f arg
+                            || isSharedFactory f
+                        )
+                        ->
                         let tokenParams =
                             f.Parameters
                             |> List.filter (fun p ->

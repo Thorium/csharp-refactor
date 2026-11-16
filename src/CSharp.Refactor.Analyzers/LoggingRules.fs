@@ -11,7 +11,9 @@
 /// identifier argument may be the params array passed whole — its count
 /// is invisible, so no arity claim there; a hole-free `$"…"` compiles to
 /// a constant and is not the interpolation defect. Placeholder syntax:
-/// `{@Name}`, `{$Name}`, `{Name:format}`, `{Name,align}`, `{{` literal.
+/// `{@Name}`, `{$Name}`, `{Name:format}`, `{Name,align}`, positional `{0}`
+/// (Serilog counts it once however often it repeats; Microsoft.Extensions.Logging
+/// gives every hole the next argument), `{{` literal.
 /// Yields to CA2017 and CA2254.
 ///
 /// CR0115 (correctness, fix): `catch (Exception ex) { _log.LogError("sync
@@ -82,7 +84,7 @@ let private loggingCall (model: SemanticModel) (inv: InvocationExpressionSyntax)
 // ---- CR0114 ----
 
 let private placeholderPattern =
-    Regex(@"\{([@$]?)([A-Za-z_][A-Za-z0-9_]*)(?:[,:][^}]*)?\}", RegexOptions.Compiled)
+    Regex(@"\{([@$]?)([A-Za-z_][A-Za-z0-9_]*|[0-9]+)(?:[,:][^}]*)?\}", RegexOptions.Compiled)
 
 /// The literal text of a template: a literal, or a `+` chain of literals.
 let rec private templateText (e: ExpressionSyntax) : string option =
@@ -137,8 +139,25 @@ let private templates (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                 |> Seq.map (fun mt -> mt.Groups.[2].Value)
                                 |> List.ofSeq
 
+                            // Serilog reads `{0}` by position: `"{0} and {0}"` reads one argument
+                            // twice, so a repeat is no defect and the arity is the distinct count.
+                            // Microsoft.Extensions.Logging hands every hole the next argument,
+                            // positional or named: there a repeat is the duplicate defect
+                            let serilog = m.ContainingNamespace.ToDisplayString().StartsWith "Serilog"
+                            let positional (h: string) = h.Length > 0 && Char.IsDigit h.[0]
+
                             let duplicate =
-                                holes |> List.countBy id |> List.tryFind (fun (_, c) -> c > 1) |> Option.map fst
+                                holes
+                                |> List.filter (fun h -> not (serilog && positional h))
+                                |> List.countBy id
+                                |> List.tryFind (fun (_, c) -> c > 1)
+                                |> Option.map fst
+
+                            let holes =
+                                if serilog && holes |> List.exists positional then
+                                    List.distinct holes
+                                else
+                                    holes
 
                             // the arguments after the template
                             let after =

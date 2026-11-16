@@ -48,6 +48,7 @@
     <Compile Include="KnobTests.fs" />
     <Compile Include="ToolTests.fs" />
     <Compile Include="ReleaseAuditToolTests.fs" />
+    <Compile Include="CorpusSweepTests.fs" />
     <Compile Include="McpServerTests.fs" />
   </ItemGroup>
 
@@ -58,7 +59,7 @@
     <!-- the test host drives the real analyzer and fix provider through a
          workspace, so it needs the same Roslyn the analyzer was built
          against (or newer) -->
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.0.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.12.0" />
   </ItemGroup>
 
   <ItemGroup>
