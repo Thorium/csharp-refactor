@@ -2,6 +2,10 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
+## Unreleased
+
+- CR0170 reads a local built from a token carrier as carrying the token only where it is another name for it, a token holder (`var token = linked.Token;`) or a lambda reading it: `var xs = Compute(ct); var ys = xs.Where(…).ToList();` is data, and a loop over `ys` that never reads the token is reported again.
+
 ## 0.1.31
 
 - CR0042 never awaits a twin that is a method the call sits in (also around a lambda or local function) or one it overrides: `return Execute(s);` inside `ExecuteAsync(s)` became `return await ExecuteAsync(s);` (ShareX, infinite recursion).

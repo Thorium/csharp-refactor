@@ -330,6 +330,45 @@ let ``CR0170 leaves a loop reading the token through a local, a catch rollback a
     Assert.Equal(2, count "CancellationToken.None" fixedSource)
 
 [<Fact>]
+let ``CR0170 keeps a loop over data derived from a value computed with the token`` () =
+    // `ys` is data; a token read off a linked source carries it
+    let source =
+        csharp
+            """
+            using System;
+            using System.Collections.Generic;
+            using System.Linq;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                static List<int> Compute(CancellationToken ct) => new List<int>();
+                async Task Derived(Func<int, Task> work, CancellationToken ct)
+                {
+                    var xs = Compute(ct);
+                    var ys = xs.Where(x => x > 0).ToList();
+                    foreach (var y in ys)
+                    {
+                        await work(y);
+                    }
+                }
+                async Task Linked(List<int> xs, Func<int, CancellationToken, Task> work, CancellationToken ct)
+                {
+                    using var source = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var token = source.Token;
+                    foreach (var x in xs)
+                    {
+                        await work(x, token);
+                    }
+                }
+            }
+            """
+
+    let fired = fixed' (suggestCode "CR0170" source)
+    Assert.Single fired |> ignore
+    Assert.True(fired.Head.Span.Start < source.IndexOf "async Task Linked")
+
+[<Fact>]
 let ``CR0055 keeps the None of a compensation before a throw`` () =
     let source =
         csharp

@@ -917,7 +917,11 @@ let private tokenLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                     // source.GetAsyncEnumerator(ct);`, `var context = Pool.Get(ct);`) — but an
                     // AWAITED result (`var items = await repo.GetAllAsync(ct);`) is data the
                     // operation produced, a carrier only when typed to hold a token (a token,
-                    // a source, a type with a token member: Polly's ResilienceContext)
+                    // a source, a type with a token member: Polly's ResilienceContext). A
+                    // local built from a carrier, not from the token, carries it only as
+                    // another name for it (`var stepper = e;`), a token holder (`var token =
+                    // linked.Token;`) or a lambda that reads the carrier: `var ys =
+                    // xs.Where(…).ToList();` is data
                     let carriesToken (t: ITypeSymbol) =
                         let isToken (x: ITypeSymbol) =
                             not (isNull x)
@@ -954,7 +958,15 @@ let private tokenLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                                 declarators
                                 |> List.filter (fun v ->
                                     not (names.Contains v.Identifier.ValueText)
-                                    && names |> Set.exists (fun n -> Text.mentionsName n v.Initializer.Value))
+                                    && (Text.mentionsName name v.Initializer.Value
+                                        || (match v.Initializer.Value with
+                                            | :? IdentifierNameSyntax as alias -> names.Contains alias.Identifier.ValueText
+                                            | _ -> false)
+                                        || (names |> Set.exists (fun n -> Text.mentionsName n v.Initializer.Value)
+                                            && (v.Initializer.Value :? AnonymousFunctionExpressionSyntax
+                                                || (match model.GetDeclaredSymbol v with
+                                                    | :? ILocalSymbol as l -> carriesToken l.Type
+                                                    | _ -> false)))))
                                 |> List.map (fun v -> v.Identifier.ValueText)
 
                             if more.IsEmpty then
