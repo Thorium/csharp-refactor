@@ -1118,3 +1118,121 @@ let ``CR0189 puts the token on a line of its own when the arguments span lines``
     // a directive before the `)`: the token goes after it, so an argument under `#if` stays in place
     Assert.DoesNotContain("7, ct", fixedSource)
     Assert.Contains("#endif\n" + leadOf ", 9" fixedSource + ", ct);", fixedSource)
+
+[<Fact>]
+let ``CR0189 leaves an async iterator handed its token by WithCancellation and a stream over memory`` () =
+    let source =
+        csharp
+            """
+            using System.Collections.Generic;
+            using System.IO;
+            using System.IO.Compression;
+            using System.Runtime.CompilerServices;
+            using System.Threading;
+            using System.Threading.Tasks;
+            class C
+            {
+                readonly MemoryStream _buffer = new MemoryStream();
+                readonly Stream _zip;
+                readonly Stream _source;
+                C(Stream source)
+                {
+                    _source = source;
+                    _zip = Wrap(_buffer);
+                }
+                static Stream Wrap(Stream s) => new GZipStream(s, CompressionMode.Compress, true);
+                async IAsyncEnumerable<int> PageAsync([EnumeratorCancellation] CancellationToken ct = default)
+                {
+                    await Task.Yield();
+                    yield return 1;
+                }
+                async Task Pages(CancellationToken ct)
+                {
+                    await foreach (var p in PageAsync().WithCancellation(ct).ConfigureAwait(false)) { }
+                    await foreach (var p in PageAsync().ConfigureAwait(false).WithCancellation(ct)) { }
+                    await foreach (var p in PageAsync()) { }
+                }
+                async Task Streams(byte[] b, CancellationToken ct)
+                {
+                    var n = await _source.ReadAsync(b, 0, b.Length);
+                    await _zip.WriteAsync(b, 0, n);
+                    await _buffer.FlushAsync();
+                    await _zip.CopyToAsync(_source);
+                    Stream file = new GZipStream(File.OpenWrite("x"), CompressionMode.Compress);
+                    await file.WriteAsync(b, 0, n);
+                }
+            }
+            """
+
+    Assert.Equal<string list>(
+        [
+            "PageAsync()"
+            "_source.ReadAsync(b, 0, b.Length)"
+            "_zip.CopyToAsync(_source)"
+            "file.WriteAsync(b, 0, n)"
+        ],
+        firedText source (suggestCode "CR0189" source)
+    )
+
+[<Fact>]
+let ``CR0189 memory-stream guard keeps to Stream's own calls and to fields only the type writes`` () =
+    let source =
+        csharp
+            """
+            using System.IO;
+            using System.IO.Compression;
+            using System.Threading;
+            using System.Threading.Tasks;
+            static class Ext
+            {
+                public static Task UploadAsync(this Stream s, CancellationToken ct = default) => Task.CompletedTask;
+            }
+            class Upload : MemoryStream
+            {
+                public Task SendAsync(CancellationToken ct = default) => Task.CompletedTask;
+            }
+            class C
+            {
+                readonly MemoryStream _buffer = new MemoryStream();
+                readonly Upload _upload = new Upload();
+                protected Stream _open;
+                Stream _lazy;
+                Stream _pair;
+                Stream _cleared;
+                C()
+                {
+                    _open = new GZipStream(_buffer, CompressionMode.Compress);
+                    _cleared = new GZipStream(_buffer, CompressionMode.Compress);
+                    (_pair, _) = (File.OpenRead("x"), 1);
+                }
+                async Task Run(byte[] b, CancellationToken ct)
+                {
+                    await _buffer.UploadAsync();
+                    await _upload.SendAsync();
+                    await _open.WriteAsync(b, 0, 1);
+                    _lazy ??= new GZipStream(_buffer, CompressionMode.Compress);
+                    await _lazy.WriteAsync(b, 0, 2);
+                    _pair = new GZipStream(_buffer, CompressionMode.Compress);
+                    await _pair.WriteAsync(b, 0, 3);
+                    await _cleared.WriteAsync(b, 0, 4);
+                    _cleared = null;
+                    await foreach (var p in (Pages()).WithCancellation(ct)) { }
+                }
+                static async System.Collections.Generic.IAsyncEnumerable<int> Pages(
+                    [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+                {
+                    await Task.Yield();
+                    yield return 1;
+                }
+            }
+            """
+
+    Assert.Equal<string list>(
+        [
+            "_buffer.UploadAsync()"
+            "_upload.SendAsync()"
+            "_open.WriteAsync(b, 0, 1)"
+            "_pair.WriteAsync(b, 0, 3)"
+        ],
+        firedText source (suggestCode "CR0189" source)
+    )

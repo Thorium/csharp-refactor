@@ -3048,7 +3048,12 @@ to two); not a scheduler by symbol, however spelled
 (`Task.Run`, `TaskFactory.StartNew`, `ContinueWith`,
 `ContinueWhenAll`/`Any`: cancelled, the work or the cleanup never runs,
 silently), not a `params` call, no named arguments, the token not already
-among the arguments. A call starting work - a task, a value task, an async
+among the arguments; not an `IAsyncEnumerable` call followed by
+`.WithCancellation(…)`, through `ConfigureAwait` too (an async iterator's
+`[EnumeratorCancellation]` parameter already gets that token); not a `Stream` call of its own
+on a stream whose bytes stay in memory, handed no other stream - a
+`MemoryStream`, or a local or a field only its type can set, every value of which is `null` or made from
+memory streams alone (`new GZipStream(buffer, …)`): nothing there waits. A call starting work - a task, a value task, an async
 stream - gets the token only when that work is waited for: awaited
 (through `ConfigureAwait`), returned (also as a lambda's value, or an arm of a
 conditional that is waited for), `await foreach`'d, blocked on

@@ -1446,6 +1446,196 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
 
 // ---- CR0189 ----
 
+let private derivesFrom (name: string) (t: ITypeSymbol) =
+    let rec go (t: ITypeSymbol) =
+        not (isNull t)
+        && (t.OriginalDefinition.ToDisplayString() = name || go t.BaseType)
+
+    go t
+
+let private isMemoryStream (t: ITypeSymbol) =
+    derivesFrom "System.IO.MemoryStream" t
+    || derivesFrom "System.IO.UnmanagedMemoryStream" t
+
+let private isStream (t: ITypeSymbol) = derivesFrom "System.IO.Stream" t
+
+[<return: Struct>]
+let inline private (|IsStream|_|) input =
+    if isStream input then ValueSome input else ValueNone
+
+/// Every stream among these arguments keeps its bytes in memory, and there is one.
+let private memoryStreamsOnly (model: SemanticModel) (args: SeparatedSyntaxList<ArgumentSyntax>) =
+    let streams =
+        args
+        |> Seq.choose (fun a ->
+            match model.GetTypeInfo(a.Expression).Type with
+            | null -> None
+            | IsStream t -> Some t
+            | _ -> None)
+        |> List.ofSeq
+
+    not streams.IsEmpty && streams |> List.forall isMemoryStream
+
+/// `Stream`'s own method - `WriteAsync`, `CopyToAsync` - or an override of
+/// one: not an extension, not what a subclass adds.
+let private streamsOwn (m: IMethodSymbol) =
+    let rec root (m: IMethodSymbol) =
+        if isNull m.OverriddenMethod then
+            m
+        else
+            root m.OverriddenMethod
+
+    isNull m.ReducedFrom
+    && not m.IsStatic
+    && (root m.OriginalDefinition).ContainingType.ToDisplayString() = "System.IO.Stream"
+
+[<return: Struct>]
+let inline private (|IsMemoryStream|_|) input =
+    if isMemoryStream input then ValueSome input else ValueNone
+
+/// A `Stream` call on a stream whose bytes stay in memory, handed no other
+/// stream: a `MemoryStream`, or a local or a field only its type can set,
+/// every value of which is made from memory streams alone
+/// (`new GZipStream(buffer, …)`, `algorithm.GetCompressionStream(_buffer)`)
+/// or is `null`. Nothing there waits.
+let private onMemoryStream (model: SemanticModel) (m: IMethodSymbol) (inv: InvocationExpressionSyntax) =
+    let otherStreams () =
+        inv.ArgumentList.Arguments
+        |> Seq.exists (fun a ->
+            match model.GetTypeInfo(a.Expression).Type with
+            | null -> false
+            | t -> isStream t && not (isMemoryStream t))
+
+    match inv.Expression with
+    | :? MemberAccessExpressionSyntax as ma when streamsOwn m && not (otherStreams ()) ->
+        match model.GetTypeInfo(ma.Expression).Type with
+        | null -> false
+        | IsMemoryStream _ -> true
+        | t when isStream t ->
+            let target = model.GetSymbolInfo(ma.Expression).Symbol
+
+            // where every write is in sight
+            let roots: SyntaxNode list =
+                match target with
+                | :? IFieldSymbol as f when f.DeclaredAccessibility = Accessibility.Private || f.IsReadOnly ->
+                    f.ContainingType.DeclaringSyntaxReferences
+                    |> Seq.map (fun r -> r.GetSyntax())
+                    |> List.ofSeq
+                | :? ILocalSymbol as l ->
+                    l.DeclaringSyntaxReferences
+                    |> Seq.choose (fun r ->
+                        r.GetSyntax().Ancestors()
+                        |> Seq.tryFind (fun a -> a :? MemberDeclarationSyntax)
+                        // top-level statements share their locals
+                        |> Option.map (fun a -> if a :? GlobalStatementSyntax then a.Parent else a))
+                    |> List.ofSeq
+                | _ -> []
+
+            let named (e: ExpressionSyntax) =
+                match e with
+                | :? IdentifierNameSyntax as i -> i.Identifier.ValueText = target.Name
+                | :? MemberAccessExpressionSyntax as a -> a.Name.Identifier.ValueText = target.Name
+                | _ -> false
+
+            // a value written, or null where the write is not a plain one
+            let values =
+                roots
+                |> List.collect (fun root ->
+                    let rootModel =
+                        if root.SyntaxTree = model.SyntaxTree then
+                            model
+                        else
+                            model.Compilation.GetSemanticModel root.SyntaxTree
+
+                    let isTarget (e: ExpressionSyntax) =
+                        named e
+                        && (match rootModel.GetSymbolInfo(e).Symbol with
+                            | null -> false
+                            | s ->
+                                SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, target.OriginalDefinition))
+
+                    root.DescendantNodes()
+                    |> Seq.choose (fun n ->
+                        match n with
+                        | :? VariableDeclaratorSyntax as v when
+                            not (isNull v.Initializer)
+                            && v.Identifier.ValueText = target.Name
+                            && SymbolEqualityComparer.Default.Equals(rootModel.GetDeclaredSymbol v, target)
+                            ->
+                            Some v.Initializer.Value
+                        | :? AssignmentExpressionSyntax as a ->
+                            match a.Left with
+                            | :? TupleExpressionSyntax as t ->
+                                let deconstructed =
+                                    t.DescendantNodes()
+                                    |> Seq.exists (fun d ->
+                                        match d with
+                                        | :? ExpressionSyntax as e -> isTarget e
+                                        | _ -> false)
+
+                                if deconstructed then Some null else None
+                            | left when isTarget left ->
+                                Some(
+                                    if
+                                        a.IsKind SyntaxKind.SimpleAssignmentExpression
+                                        || a.IsKind SyntaxKind.CoalesceAssignmentExpression
+                                    then
+                                        a.Right
+                                    else
+                                        null
+                                )
+                            | _ -> None
+                        | :? ArgumentSyntax as a when
+                            not (a.RefKindKeyword.IsKind SyntaxKind.None) && isTarget a.Expression
+                            ->
+                            Some null
+                        | _ -> None)
+                    |> Seq.map (fun value -> rootModel, value)
+                    |> List.ofSeq)
+
+            let rec clears (e: ExpressionSyntax) =
+                match e with
+                | :? PostfixUnaryExpressionSyntax as p when p.IsKind SyntaxKind.SuppressNullableWarningExpression ->
+                    clears p.Operand
+                | :? LiteralExpressionSyntax as l ->
+                    l.IsKind SyntaxKind.NullLiteralExpression
+                    || l.IsKind SyntaxKind.DefaultLiteralExpression
+                | _ -> false
+
+            let streams =
+                values |> List.filter (fun (_, value) -> isNull value || not (clears value))
+
+            not streams.IsEmpty
+            && streams
+               |> List.forall (fun (valueModel, value) ->
+                   match value with
+                   | :? BaseObjectCreationExpressionSyntax as c when not (isNull c.ArgumentList) ->
+                       memoryStreamsOnly valueModel c.ArgumentList.Arguments
+                   | :? InvocationExpressionSyntax as i -> memoryStreamsOnly valueModel i.ArgumentList.Arguments
+                   | _ -> false)
+        | _ -> false
+    | _ -> false
+
+/// `Paginate().WithCancellation(ct)`, through a `ConfigureAwait` too: an
+/// async iterator's `[EnumeratorCancellation]` parameter already gets the token
+/// WithCancellation hands its enumerator.
+let private tokenViaEnumerator (m: IMethodSymbol) (inv: InvocationExpressionSyntax) =
+    let rec follows (e: ExpressionSyntax) =
+        match e.Parent with
+        | :? ParenthesizedExpressionSyntax as p -> follows p
+        | :? MemberAccessExpressionSyntax as ma when obj.ReferenceEquals(ma.Expression, e) ->
+            match ma.Parent with
+            | :? InvocationExpressionSyntax as next ->
+                match ma.Name.Identifier.ValueText with
+                | "WithCancellation" -> true
+                | "ConfigureAwait" -> follows next
+                | _ -> false
+            | _ -> false
+        | _ -> false
+
+    m.ReturnType.OriginalDefinition.ToDisplayString() = "System.Collections.Generic.IAsyncEnumerable<T>"
+    && follows inv
+
 /// CR0189 (correctness, fix): a call that omits the `CancellationToken` in
 /// scope, where the callee takes one - `await repo.GetAsync(id)` inside
 /// `Task Load(int id, CancellationToken ct)` - runs to the end whatever the
@@ -1465,8 +1655,10 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
 /// lambda answers to the lambda's parameters; work the call starts is
 /// waited for (`taskWaitedFor`), not fire-and-forget; not after a caught
 /// OperationCanceledException; not in a `try` whose `finally` touches the
-/// receiver (an acquire its `finally` releases); the call with the
-/// token binds to the method expected, by a speculative bind.
+/// receiver (an acquire its `finally` releases); not an `IAsyncEnumerable`
+/// call followed by `.WithCancellation(…)` (the iterator gets that token); not
+/// a call on a stream over memory (`onMemoryStream`: nothing waits); the call
+/// with the token binds to the method expected, by a speculative bind.
 /// Yields to CA2016.
 let private omittedTokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     tree.GetRoot().DescendantNodes()
@@ -1660,6 +1852,8 @@ let private omittedTokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion
                             || fireAndForget
                             || releasedInFinally
                             || afterCaughtCancel
+                            || tokenViaEnumerator m inv
+                            || onMemoryStream model m inv
                         then
                             None
                         else

@@ -2,6 +2,10 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
+## 0.1.30
+
+- CR0189 leaves an `IAsyncEnumerable` call followed by `.WithCancellation(ct)`, whose iterator already gets the token, and one of `Stream`'s own calls (`WriteAsync`, `CopyToAsync`) on a stream over memory: a `MemoryStream`, or a local or a private or readonly field every value of which is `null` or built from memory streams only, like aws's `GZipStream` over a buffer. The token changed nothing there; a method an extension or a `MemoryStream` subclass adds keeps it.
+
 ## 0.1.29
 
 - CR0152 converts a gate declared in one part of a partial type and locked only in the others: it counted the declaring file's uses alone, found none and stood down (v2rayN's `_speedtestGate`).
