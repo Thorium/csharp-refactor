@@ -10,6 +10,7 @@
     <MoreInfo>https://github.com/Thorium/csharp-refactor</MoreInfo>
     <License>LICENSE</License>
     <Icon>icon.png</Icon>
+    <Tags>csharp;C#;refactoring;analyzers;roslyn;roslyn analyzers;quick fix;code fix;static analysis;code quality;linter;functional;functional programming;linq;performance;security;async;cleanup;csharp-refactor;.NET</Tags>
   </Metadata>
   <Installation>
     <!-- 17.14 is the first Visual Studio whose Roslyn (4.14) loads the
