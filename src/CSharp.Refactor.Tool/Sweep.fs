@@ -44,6 +44,14 @@ let private heldByScope = Dictionary<string, int>()
 let private reportedFindings = ResizeArray<ReportedFinding>()
 let private reportedKeys = HashSet<string>()
 let private printedNotes = HashSet<string>()
+
+/// The notes recorded in the current framework's pass loop, by file: a later
+/// pass that re-analyses the file replaces them — its edits moved them (a
+/// `using` added above shifts every line) or removed them; kept, the report
+/// carried each note twice, once at a stale line.
+let private loopNotes =
+    Dictionary<string, ResizeArray<string * ReportedFinding>>(StringComparer.OrdinalIgnoreCase)
+
 /// The projects whose held public surface this run has announced.
 let private announcedHolds = HashSet<string>(StringComparer.OrdinalIgnoreCase)
 let mutable private runAppliedCount = 0
@@ -87,7 +95,8 @@ let private noteRuleFailure (name: string) (tree: SyntaxTree) (ex: exn) =
 let resetRun () =
     lock reportedFindings (fun () ->
         reportedFindings.Clear()
-        reportedKeys.Clear())
+        reportedKeys.Clear()
+        loopNotes.Clear())
 
     printedNotes.Clear()
     announcedHolds.Clear()
@@ -107,19 +116,45 @@ let resetRun () =
     runAnalysisMs <- 0L
     Rules.resetTimings ()
 
+let private fullLower (file: string) =
+    try
+        Path.GetFullPath(file).ToLowerInvariant()
+    with _ ->
+        file.ToLowerInvariant()
+
 let private recordForReport (finding: ReportedFinding) =
     lock reportedFindings (fun () ->
-        let file =
-            try
-                Path.GetFullPath(finding.File).ToLowerInvariant()
-            with _ ->
-                finding.File.ToLowerInvariant()
+        let file = fullLower finding.File
 
         let key =
             $"{finding.Code}|{file}|{finding.StartLine}|{finding.StartColumn}|{finding.Message}"
 
         if reportedKeys.Add key then
-            reportedFindings.Add finding)
+            reportedFindings.Add finding
+
+            if not finding.Fixable then
+                match loopNotes.TryGetValue file with
+                | true, notes -> notes.Add((key, finding))
+                | _ -> loopNotes.[file] <- ResizeArray [ key, finding ])
+
+/// Before a pass: a framework's first pass (no scope) starts a new loop; a
+/// later one drops the notes this loop recorded for the files it re-analyses.
+let private forgetLoopNotes (scope: HashSet<string> option) =
+    lock reportedFindings (fun () ->
+        match scope with
+        | None -> loopNotes.Clear()
+        | Some files ->
+            for f in files do
+                let file = fullLower f
+
+                match loopNotes.TryGetValue file with
+                | true, notes ->
+                    for key, finding in notes do
+                        reportedKeys.Remove key |> ignore
+                        reportedFindings.Remove finding |> ignore
+
+                    loopNotes.Remove file |> ignore
+                | _ -> ())
 
 // ---- files ----
 
@@ -598,6 +633,71 @@ let solutionPlatform (target: string) : string option =
             |> Option.orElse (List.tryHead platforms)
             |> Option.filter (legacyOnAnyCpu >> not))
 
+/// A solution file, or a directory holding exactly one: its own platforms rule.
+let private isSolutionTarget (target: string) =
+    let isSolution (p: string) =
+        p.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
+        || p.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
+
+    if Directory.Exists target then
+        (Directory.GetFiles(target, "*.sln").Length
+         + Directory.GetFiles(target, "*.slnx").Length)
+            =
+            1
+    else
+        isSolution target
+
+/// The platform a project outside a solution builds for, where its nearest
+/// `<Platforms>` (the project file, then each `Directory.Build.props` up to the
+/// repository root) does not list AnyCPU: PowerToys declares `x64;ARM64` in
+/// its root props, and as AnyCPU CsWin32 refuses to generate (PInvoke005) and
+/// no project reference has an output. x64 where listed, else the first.
+let projectPlatform (project: string) : string option =
+    let platformsIn (file: string) =
+        if File.Exists file then
+            let m =
+                Text.RegularExpressions.Regex.Match(File.ReadAllText file, @"<Platforms>\s*([^<$]+?)\s*</Platforms>")
+
+            if m.Success then Some m.Groups.[1].Value else None
+        else
+            None
+
+    let rec upward (dir: DirectoryInfo) =
+        if isNull dir then
+            None
+        else
+            match platformsIn (Path.Combine(dir.FullName, "Directory.Build.props")) with
+            | Some p -> Some p
+            | None when
+                Directory.Exists(Path.Combine(dir.FullName, ".git"))
+                || File.Exists(Path.Combine(dir.FullName, ".git"))
+                ->
+                None
+            | None -> upward dir.Parent
+
+    try
+        let full = Path.GetFullPath project
+
+        platformsIn full
+        |> Option.orElse (upward (DirectoryInfo(Path.GetDirectoryName full)))
+        |> Option.bind (fun value ->
+            let platforms =
+                value.Split([| ';' |], StringSplitOptions.RemoveEmptyEntries)
+                |> Array.map (fun p -> p.Trim())
+                |> List.ofArray
+
+            let named (name: string) (p: string) =
+                p.Replace(" ", "").Equals(name, StringComparison.OrdinalIgnoreCase)
+
+            if platforms.IsEmpty || platforms |> List.exists (named "AnyCPU") then
+                None
+            else
+                platforms
+                |> List.tryFind (named "x64")
+                |> Option.orElse (List.tryHead platforms))
+    with _ ->
+        None
+
 /// This run's `solutionPlatform`, passed to the workspace, every restore and
 /// every verification build.
 let mutable private runPlatform: string option = None
@@ -750,10 +850,25 @@ let private errorsOfAsync (compilation: Compilation) : Task<Diagnostic list> =
             | true, project -> suppressorsOf project
             | _ -> ImmutableArray.Empty
 
+        // CS1705 "uses 'X, Version=8.0.0.0' which has a higher version than referenced
+        // assembly 'X' with identity 'X, Version=1.0.0.0'" where X is a project of this
+        // run: its version comes from a build target (MinVer, Nerdbank.GitVersioning,
+        // GitVersion) the design-time load never runs, so the in-memory assembly is
+        // 1.0.0.0 while the real build stamps the right one (Polly's Snippets)
+        let versionArtefact (d: Diagnostic) =
+            (d.Id = "CS1705" || d.Id = "CS1704")
+            && (let m =
+                    Text.RegularExpressions.Regex.Match(
+                        d.GetMessage System.Globalization.CultureInfo.InvariantCulture,
+                        @"referenced assembly '([^']+)'"
+                    )
+
+                m.Success && projectsByAssembly.ContainsKey m.Groups.[1].Value)
+
         if suppressors.IsEmpty then
             return
                 compilation.GetDiagnostics()
-                |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error)
+                |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error && not (versionArtefact d))
                 |> List.ofSeq
         else
             let options =
@@ -770,7 +885,10 @@ let private errorsOfAsync (compilation: Compilation) : Task<Diagnostic list> =
 
             return
                 diagnostics
-                |> Seq.filter (fun d -> d.Severity = DiagnosticSeverity.Error && not d.IsSuppressed)
+                |> Seq.filter (fun d ->
+                    d.Severity = DiagnosticSeverity.Error
+                    && not d.IsSuppressed
+                    && not (versionArtefact d))
                 |> List.ofSeq
     }
 
@@ -820,10 +938,46 @@ let private capLanguage (solution: Solution) : Solution =
                 | _ -> s)
             solution
 
+/// The XAML compiler's pass-1 code-behind (`X.g.i.cs`) beside its pass-2 one
+/// (`X.g.cs`) in one project: a WinUI 3 design-time build hands both over, and
+/// every generated member is then defined twice (CS0102, CS0111, CS0756 in
+/// Files.App.Controls). The real build compiles `X.g.cs` only.
+let private dropXamlPassOneDuplicates (solution: Solution) : Solution =
+    solution.Projects
+    |> Seq.fold
+        (fun (s: Solution) (p: Project) ->
+            let paths =
+                HashSet<string>(
+                    p.Documents |> Seq.choose (fun d -> Option.ofObj d.FilePath),
+                    StringComparer.OrdinalIgnoreCase
+                )
+
+            // only when the pass-2 file holds code: a design-time build in a fresh
+            // tree writes `X.g.cs` empty and `X.g.i.cs` is then the only code-behind
+            // (PowerToys HostsUILib lost `InitializeComponent` without it)
+            let filled (path: string) =
+                try
+                    FileInfo(path).Exists && FileInfo(path).Length > 0L
+                with _ ->
+                    false
+
+            p.Documents
+            |> Seq.filter (fun d ->
+                not (isNull d.FilePath)
+                && d.FilePath.EndsWith(".g.i.cs", StringComparison.OrdinalIgnoreCase)
+                && (let passTwo =
+                        d.FilePath.Substring(0, d.FilePath.Length - ".g.i.cs".Length) + ".g.cs"
+
+                    paths.Contains passTwo && filled passTwo))
+            |> Seq.fold (fun (acc: Solution) d -> acc.RemoveDocument d.Id) s)
+        solution
+
 /// A loaded solution as the sweep works on it: the language capped (above),
-/// the run's defines added, in-tree analyzers shadow-copied.
+/// the run's defines added, in-tree analyzers shadow-copied, a XAML pass-1
+/// duplicate left out.
 let private prepareSolution (solution: Solution) : Solution =
-    let prepared = shadowAnalyzers (RunDefines.addToSolution (capLanguage solution))
+    let prepared =
+        shadowAnalyzers (RunDefines.addToSolution (capLanguage (dropXamlPassOneDuplicates solution)))
 
     // the projects behind the assembly names the run compiles (errorsOf)
     for p in prepared.Projects do
@@ -1492,11 +1646,13 @@ let private runPassWith
     for _, reported, _ in visible do
         recordForReport reported
 
-    // notes: printed once per run, or counted per category
+    // notes: printed once per run, or counted per category; keyed by the
+    // context fingerprint and the column, so a note a later pass finds at a
+    // shifted line is not printed again, and two notes on one line both are
     for f, reported, _ in visible do
         if not reported.Fixable then
             let key =
-                $"{reported.Code}|{reported.File}|{reported.StartLine}|{reported.StartColumn}|{reported.Message}"
+                $"{reported.Code}|{fullLower reported.File}|{reported.Fingerprint}|{reported.StartColumn}|{reported.Message}"
 
             if printedNotes.Add key then
                 if
@@ -2065,6 +2221,7 @@ let private runPass
         let sw = Diagnostics.Stopwatch.StartNew()
         let! findings = analyzeProject opts project compilation scope ct
         runAnalysisMs <- runAnalysisMs + sw.ElapsedMilliseconds
+        forgetLoopNotes scope
         return! runPassWith opts solution projectId onlyFile baselineErrors pass project compilation findings ct
     }
 
@@ -2478,7 +2635,14 @@ let private executeRunCore (opts: Options) : Task<int> =
             | Some platform ->
                 properties.["Platform"] <- platform
                 Out.dim $"  (the solution has no Any CPU platform: loading and building for {platform})"
-            | None -> ()
+            | None ->
+                // a project or glob target: the projects' own `<Platforms>`
+                match targets |> List.tryHead |> Option.bind (Targets.projectOf >> projectPlatform) with
+                | Some platform when not (isSolutionTarget opts.Target) ->
+                    runPlatform <- Some platform
+                    properties.["Platform"] <- platform
+                    Out.dim $"  (the project declares no Any CPU platform: loading and building for {platform})"
+                | _ -> ()
 
             use workspace = MSBuildWorkspace.Create properties
             workspace.SkipUnrecognizedProjects <- true

@@ -289,11 +289,17 @@ module Rules =
         |> List.sortByDescending snd
 
     /// The yields-to gate, applied centrally: a suggestion of a rule whose
-    /// Microsoft twin is enabled in the file's config is dropped here, so
-    /// no rule needs to ask.
-    let private notShadowed (ctx: RuleContext) (s: Suggestion) =
+    /// Microsoft twin is enabled in the file's config, or switched off at the
+    /// site by a `#pragma warning disable` naming the twin (the author looked
+    /// and decided: Polly's `CA2000` around a source its pipeline disposes), is
+    /// dropped here, so no rule needs to ask. A `#pragma warning disable` with
+    /// no ids names no twin: it silences the diagnostic itself, and the run
+    /// counts it among the silenced.
+    let private notShadowed (tree: SyntaxTree) (ctx: RuleContext) (s: Suggestion) =
         match RuleCatalog.tryFind s.Code with
-        | Some rule when not rule.YieldsTo.IsEmpty -> not (RuleContext.shadowedRuleOn ctx rule.YieldsTo)
+        | Some rule when not rule.YieldsTo.IsEmpty ->
+            not (RuleContext.shadowedRuleOn ctx rule.YieldsTo)
+            && not (Text.pragmaNamesOff tree s.Span.Start rule.YieldsTo)
         | _ -> true
 
     /// Where two rules read the same shape, the better spelling wins: a
@@ -336,7 +342,7 @@ module Rules =
                         // the index's build, or the wait for it, is not this rule's time
                         let own = sw.ElapsedTicks - (Index.threadInsideTicks () - insideIndexBefore)
                         timings.AddOrUpdate(name, own, (fun _ total -> total + own)) |> ignore)
-                |> List.filter (notShadowed ctx)
+                |> List.filter (notShadowed tree ctx)
 
         let kept =
             suggestions

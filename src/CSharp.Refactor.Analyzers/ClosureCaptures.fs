@@ -13,7 +13,8 @@
 /// is fresh per iteration); the closure sits in a statement of the loop
 /// body (one in the condition or incrementor is a note); a closure handed
 /// to an unknown callee is a note (the callee may run it at once); an
-/// awaited call consumed it; a `foreach` variable is fresh since C# 5.
+/// awaited call consumed it; `Parallel.For`/`ForEach`/`Invoke` run every body
+/// before they return; a `foreach` variable is fresh since C# 5.
 /// Outside a loop, a local written after an escaped closure's creation is
 /// a note only — late binding is sometimes the point.
 ///
@@ -280,7 +281,16 @@ let rec private fateOf (model: SemanticModel) (loopBody: SyntaxNode option) (hop
                         fateOf model loopBody hop inv
                     elif inv.Parent :? AwaitExpressionSyntax then
                         Stays
-                    elif m.ReturnType.OriginalDefinition.ToDisplayString().StartsWith "System.Threading.Tasks." then
+                    // `Parallel.For/ForEach/Invoke` return after every body has run;
+                    // `ParallelLoopResult` shares the namespace but is no task.
+                    // `Parallel.ForEachAsync`/`ForAsync` return the task: not awaited,
+                    // it holds the closure like any other
+                    elif
+                        m.ContainingType.OriginalDefinition.ToDisplayString() = "System.Threading.Tasks.Parallel"
+                        && not (AsyncShapes.isTaskLike m.ReturnType)
+                    then
+                        Stays
+                    elif AsyncShapes.isTaskLike m.ReturnType then
                         // a task-returning callee holds the closure until it runs
                         Escapes
                     elif

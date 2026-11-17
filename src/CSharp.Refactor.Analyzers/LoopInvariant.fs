@@ -30,7 +30,10 @@
 /// spelled nowhere in the member outside the block that declares it (a
 /// sibling scope's namesake would clash, a field's would be shadowed —
 /// another branch inside the loop included) and is written
-/// nowhere in the loop; the loop statement heads its line; no comment or
+/// nowhere in the loop — for a struct local, nor its fields, its address, a
+/// `ref`/`out`/`in` pass or a method call on it (Files' `MENUITEMINFOW mii`
+/// filled field by field and handed to `GetMenuItemInfo(&mii)`), and a
+/// `default`/`new S()` struct is no work to hoist; the loop statement heads its line; no comment or
 /// directive rides on the declaration; the speculative check re-binds.
 module CSharp.Refactor.LoopInvariant
 
@@ -279,6 +282,64 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
 
                 let nameOnlyHere = not (Text.mentionsNameOutside name member' ownScope.Span)
 
+                // a struct local is a fresh value per iteration: the loop writing its
+                // fields (`mii.cbSize = …`), taking its address (`&mii`), passing it by
+                // ref/out/in or calling a method on it changes it, and above the loop
+                // that change would carry into the next iteration; a `default`/`new S()`
+                // struct costs nothing to rebuild
+                let structMutated =
+                    match model.GetTypeInfo(decl.Declaration.Type).Type with
+                    | t when
+                        not (isNull t)
+                        && t.IsValueType
+                        && t.SpecialType = SpecialType.None
+                        && t.TypeKind <> TypeKind.Enum
+                        ->
+                        let rec rootedAtName (e: ExpressionSyntax) =
+                            match e with
+                            | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = name
+                            | :? MemberAccessExpressionSyntax as ma -> rootedAtName ma.Expression
+                            | :? ElementAccessExpressionSyntax as ea -> rootedAtName ea.Expression
+                            | :? ParenthesizedExpressionSyntax as p -> rootedAtName p.Expression
+                            | _ -> false
+
+                        let zeroInit =
+                            match init with
+                            | :? LiteralExpressionSyntax as l -> l.IsKind SyntaxKind.DefaultLiteralExpression
+                            | :? DefaultExpressionSyntax -> true
+                            | :? ObjectCreationExpressionSyntax as o ->
+                                (isNull o.ArgumentList || o.ArgumentList.Arguments.Count = 0)
+                                && isNull o.Initializer
+                            | :? ImplicitObjectCreationExpressionSyntax as o ->
+                                o.ArgumentList.Arguments.Count = 0 && isNull o.Initializer
+                            | _ -> false
+
+                        zeroInit
+                        || (bodyOf loop).DescendantNodes()
+                           |> Seq.exists (fun n ->
+                               match n with
+                               | :? AssignmentExpressionSyntax as a ->
+                                   (a.Left :? MemberAccessExpressionSyntax
+                                    || a.Left :? ElementAccessExpressionSyntax)
+                                   && rootedAtName a.Left
+                               | :? PrefixUnaryExpressionSyntax as u ->
+                                   u.IsKind SyntaxKind.AddressOfExpression && Text.mentionsName name u.Operand
+                                   || (u.IsKind SyntaxKind.PreIncrementExpression
+                                       || u.IsKind SyntaxKind.PreDecrementExpression)
+                                      && rootedAtName u.Operand
+                               | :? PostfixUnaryExpressionSyntax as u ->
+                                   (u.IsKind SyntaxKind.PostIncrementExpression
+                                    || u.IsKind SyntaxKind.PostDecrementExpression)
+                                   && rootedAtName u.Operand
+                               | :? ArgumentSyntax as arg ->
+                                   not (arg.RefKindKeyword.IsKind SyntaxKind.None) && rootedAtName arg.Expression
+                               | :? InvocationExpressionSyntax as inv ->
+                                   match inv.Expression with
+                                   | :? MemberAccessExpressionSyntax as ma -> rootedAtName ma.Expression
+                                   | _ -> false
+                               | _ -> false)
+                    | _ -> false
+
                 let loopHeadsLine =
                     text.Lines
                         .GetLineFromPosition(loop.SpanStart)
@@ -290,6 +351,7 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                     nameOnlyHere
                     && loopHeadsLine
                     && not (Text.assignsTo name (bodyOf loop))
+                    && not structMutated
                     // the loop must sit in a block: above an unbraced `if`/`else`
                     // body a declaration is no statement at all (CS1023)
                     && loop.Parent :? BlockSyntax

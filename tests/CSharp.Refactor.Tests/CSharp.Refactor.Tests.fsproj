@@ -49,6 +49,7 @@
     <Compile Include="ToolTests.fs" />
     <Compile Include="ReleaseAuditToolTests.fs" />
     <Compile Include="CorpusSweepTests.fs" />
+    <Compile Include="CorpusSweep1117Tests.fs" />
     <Compile Include="McpServerTests.fs" />
   </ItemGroup>
 

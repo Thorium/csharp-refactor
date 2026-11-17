@@ -2,6 +2,24 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
+## 0.1.31
+
+- CR0042 never awaits a twin that is a method the call sits in (also around a lambda or local function) or one it overrides: `return Execute(s);` inside `ExecuteAsync(s)` became `return await ExecuteAsync(s);` (ShareX, infinite recursion).
+- CR0042 leaves a call to a source method that starts a task and drops it without blocking (`Task.Run(() => SendAsync(…));`): awaiting its twin made the caller wait for analytics it meant to fire and forget (RevokeMsgPatcher).
+- CR0042 and CR0040 leave the synchronous branch of a dual sync/async method (the other branch of the `if`/`?:` awaits the twin, for CR0040 the same task, or the condition is an `async`/`isAsync` flag) and a statement whose comment says it is synchronous on purpose (opens with "sync"/"synchronous", or says "on purpose", "by design", "intentionally"; not "keep in sync with", nor a comment that asks for the change: a `TODO`, "fix later", "should be async"); CR0042 also skips Microsoft.Data.Sqlite, whose async methods run synchronously. About 20 Azure.Core policies had their `bool async` sync path awaited.
+- CR0040 reads a task as complete below `if (await Task.WhenAny(t, …) != t) return …;`, and as the antecedent of a continuation: `t.ContinueWith(a => a.Result)`, or the first parameter of a method handed over as a method group (`t.ContinueWith(Store, state)`), ran only once `t` completed.
+- CR0170 leaves a loop that reads the token through a local built from it and typed to hold one (a token, a source, a type with a token member: Polly's `ResilienceContext`; `await repo.GetAllAsync(ct)`'s result is not one), a loop inside a `catch` (a rollback after a cancelled copy), and a loop that passes `CancellationToken.None` explicitly; CR0055 keeps the explicit `None` of a compensation in a block that ends in `throw` (ShareX's S3 rename).
+- CR0160 reads `Parallel.For`/`ForEach`/`Invoke` as running every body before they return; only a task-typed callee holds the closure (`ParallelLoopResult` shares the namespace; `Parallel.ForEachAsync` returns a task, and holds it unless awaited).
+- CR0051 counts only the method's own `using`s: one inside the returned `Task.Run` lambda is disposed inside the task. CR0051 yields to CA2025.
+- CR0177 leaves a struct local whose fields, address, `ref` pass or methods the loop uses (Files' `MENUITEMINFOW`), and a `default`/`new S()` struct.
+- CR0164 leaves a field written anywhere besides the lazy site (`Array.Resize(ref f, n)`, a deserialised value, a reset) and a `string` field.
+- A rule with a Microsoft twin stands down where `#pragma warning disable <twin>` covers the site (Polly's CA2000 and CA2025 pragmas); a `#pragma warning disable` that names no warning is not one, and stays counted among the silenced findings. A tree's pragmas are read once, not per suggestion.
+- CR0069 trims a full-width `。！：；` before `, calling`. CR0109 says a static `Regex` call is looked up in the regex cache, not built, on every call.
+- Edit-mode reports keep each note once: a later pass that re-analyses a file replaces the notes the loop recorded for it (RevokeMsgPatcher's SARIF carried every note twice, once at a stale line); notes print once per context and column.
+- A project or glob target whose nearest `<Platforms>` lacks AnyCPU loads and builds for x64, or the first listed (PowerToys' `x64;ARM64`).
+- A WinUI 3 project's `X.g.i.cs` beside a non-empty `X.g.cs` is left out of the compilation (every generated member was defined twice in Files.App.Controls); where a design-time build wrote `X.g.cs` empty, `X.g.i.cs` stays as the only code-behind.
+- CS1705/CS1704 naming a project of the run as the lower version no longer counts as an error: its version comes from a build target (MinVer, Nerdbank.GitVersioning) the design-time load does not run (Polly's Snippets was skipped).
+
 ## 0.1.30
 
 - CR0189 leaves an `IAsyncEnumerable` call followed by `.WithCancellation(ct)`, whose iterator already gets the token, and one of `Stream`'s own calls (`WriteAsync`, `CopyToAsync`) on a stream over memory: a `MemoryStream`, or a local or a private or readonly field every value of which is `null` or built from memory streams only, like aws's `GZipStream` over a buffer. The token changed nothing there; a method an extension or a `MemoryStream` subclass adds keeps it.

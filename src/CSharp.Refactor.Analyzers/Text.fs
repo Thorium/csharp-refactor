@@ -54,11 +54,36 @@ let crossesDirective (node: SyntaxNode) : bool =
     && node.DescendantTrivia(descendIntoTrivia = true)
        |> Seq.exists (fun t -> t.IsDirective && node.Span.Contains t.Span)
 
-/// Has the author switched one of these compiler warnings off where the
-/// position is — a `#pragma warning disable` not restored before it, or
-/// the compilation's own setting (`NoWarn`)? A rule that reads the shape
-/// the warning is about stands down with it.
-let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list) : bool =
+/// The tree's `#pragma warning` directives in source order, read once per
+/// tree: the yields-to gate asks per suggestion, and a file with 1500
+/// findings rescanned its whole tree 1500 times.
+let private pragmasOf =
+    let cache =
+        System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, Syntax.PragmaWarningDirectiveTriviaSyntax[]>()
+
+    fun (tree: SyntaxTree) ->
+        cache.GetValue(
+            tree,
+            fun t ->
+                match t.GetRoot() with
+                | :? CSharpSyntaxNode as root when root.ContainsDirectives ->
+                    let rec walk (d: Syntax.DirectiveTriviaSyntax) acc =
+                        if isNull d then
+                            List.rev acc
+                        else
+                            walk
+                                (d.GetNextDirective())
+                                (match d with
+                                 | :? Syntax.PragmaWarningDirectiveTriviaSyntax as p -> p :: acc
+                                 | _ -> acc)
+
+                    walk (root.GetFirstDirective()) [] |> Array.ofList
+                | _ -> [||]
+        )
+
+/// A `#pragma warning disable` above the position, not restored before it.
+/// `blanket`: does one that lists no ids count as disabling these?
+let private pragmaState (blanket: bool) (tree: SyntaxTree) (position: int) (ids: string list) : bool =
     let numbers =
         ids
         |> List.choose (fun pid ->
@@ -78,22 +103,37 @@ let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list)
                 String.Equals(pid, name.Identifier.ValueText, StringComparison.OrdinalIgnoreCase))
         | _ -> false
 
-    let byPragma =
-        let root = model.SyntaxTree.GetRoot()
+    pragmasOf tree
+    |> Array.fold
+        (fun (off: bool) pragma ->
+            let disables = pragma.DisableOrRestoreKeyword.IsKind SyntaxKind.DisableKeyword
 
-        root.ContainsDirectives
-        && (root.DescendantNodes(descendIntoTrivia = true)
-            |> Seq.fold
-                (fun (off: bool) n ->
-                    match n with
-                    | :? Syntax.PragmaWarningDirectiveTriviaSyntax as pragma when
-                        pragma.SpanStart < position
-                        && (pragma.ErrorCodes.Count = 0 || pragma.ErrorCodes |> Seq.exists names)
-                        ->
-                        pragma.DisableOrRestoreKeyword.IsKind SyntaxKind.DisableKeyword
-                    | _ -> off)
-                false)
+            if pragma.SpanStart >= position then
+                off
+            elif pragma.ErrorCodes.Count = 0 then
+                (if disables then blanket || off else false)
+            elif pragma.ErrorCodes |> Seq.exists names then
+                disables
+            else
+                off)
+        false
 
+/// A `#pragma warning disable` of one of these ids above the position, not
+/// restored before it; one that lists no ids disables them all.
+let pragmaOff (tree: SyntaxTree) (position: int) (ids: string list) : bool = pragmaState true tree position ids
+
+/// A `#pragma warning disable` that NAMES one of these ids above the
+/// position, not restored before it: the author's decision about that
+/// warning at that spot. One that lists no ids says nothing about it, and
+/// silences this tool's own diagnostic there through the compiler, where
+/// the run counts it.
+let pragmaNamesOff (tree: SyntaxTree) (position: int) (ids: string list) : bool = pragmaState false tree position ids
+
+/// Has the author switched one of these compiler warnings off where the
+/// position is — a `#pragma warning disable` not restored before it, or
+/// the compilation's own setting (`NoWarn`)? A rule that reads the shape
+/// the warning is about stands down with it.
+let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list) : bool =
     let byOption =
         ids
         |> List.exists (fun pid ->
@@ -101,7 +141,7 @@ let compilerWarningOff (model: SemanticModel) (position: int) (ids: string list)
             | true, setting -> setting = ReportDiagnostic.Suppress
             | _ -> false)
 
-    byPragma || byOption
+    pragmaOff model.SyntaxTree position ids || byOption
 
 /// Is the node inside an expression tree — a lambda converted to
 /// `Expression<TDelegate>`, or a query expression over an `IQueryable`,

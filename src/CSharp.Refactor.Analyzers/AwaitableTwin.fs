@@ -26,7 +26,15 @@
 /// `StringReader` receiver or `Console.Out`/`Console.Error` (nothing behind
 /// the twin), EF Core's `Add`/`AddRange` (async only for database value
 /// generators, EF's documentation says), nor inside a member named for its
-/// synchronous work (`WriteTokenSyncReadingAsync`). The inserted `await`
+/// synchronous work (`WriteTokenSyncReadingAsync`), nor Microsoft.Data.Sqlite
+/// (its async methods run synchronously); never a twin that is the enclosing
+/// method or one it overrides (`return Execute(x);` inside `ExecuteAsync(x)`
+/// would call itself), a source method that starts a task and drops it without
+/// blocking (a fire-and-forget wrapper: awaiting its twin makes the caller
+/// wait), one branch of a dual sync/async method (the other branch of the
+/// `if`/`?:` awaits the twin, or the condition is an `async`/`isAsync` flag:
+/// Azure SDK's `bool async` policies), nor a statement whose comment says it
+/// is synchronous on purpose (`// Sync, it's already buffered`). The inserted `await`
 /// carries `.ConfigureAwait(false)` where the method's own awaits all use it,
 /// or, in a method with no other await, where CA2007 is configured
 /// (`AsyncShapes.configureAwaitSuffix`). Yields to CA1849.
@@ -191,9 +199,82 @@ let private inMemory (model: SemanticModel) (inv: InvocationExpressionSyntax) (m
         && (t.ContainingNamespace.ToDisplayString().StartsWith "Microsoft.EntityFrameworkCore"
             || efType t.BaseType)
 
+    // Microsoft.Data.Sqlite's async methods run synchronously (SQLite has no async I/O)
+    let sqlite =
+        not (isNull m.ContainingType)
+        && m.ContainingType.ContainingNamespace.ToDisplayString() = "Microsoft.Data.Sqlite"
+
     consoleWriter
     || within memoryTypes receiverType
     || ((m.Name = "Add" || m.Name = "AddRange") && efType m.ContainingType)
+    || sqlite
+
+/// The twin is a method the call sits in — the innermost, or one around the
+/// lambda or local function it sits in — or one such a method overrides or
+/// is overridden by: `return Execute(x);` inside `ExecuteAsync(x)`, or inside
+/// `Task.Run(() => Execute(x))` there, would call itself.
+let private callsItself (model: SemanticModel) (site: SyntaxNode) (twin: IMethodSymbol) =
+    let rec chain (s: IMethodSymbol) =
+        seq {
+            if not (isNull s) then
+                yield s.OriginalDefinition
+                yield! chain s.OverriddenMethod
+        }
+
+    let twins = chain twin |> List.ofSeq
+
+    site.Ancestors()
+    |> Seq.filter (fun a -> a :? MethodDeclarationSyntax || a :? LocalFunctionStatementSyntax)
+    |> Seq.exists (fun a ->
+        match model.GetDeclaredSymbol a with
+        | :? IMethodSymbol as own ->
+            chain own
+            |> Seq.exists (fun o -> twins |> List.exists (fun t -> SymbolEqualityComparer.Default.Equals(o, t)))
+        | _ -> false)
+
+/// A sync method declared in source that starts a task and drops it
+/// (`Task.Run(() => SendAsync(…));`, `_ = SendAsync(…);`) and never blocks on
+/// one: a fire-and-forget wrapper, not a blocking call — awaiting its twin
+/// makes the caller wait for what the author chose not to wait for.
+let private firesAndForgets (model: SemanticModel) (m: IMethodSymbol) =
+    let taskTyped (e: ExpressionSyntax) (sm: SemanticModel) =
+        AsyncShapes.isTaskLike (sm.GetTypeInfo(e).Type)
+
+    m.DeclaringSyntaxReferences
+    |> Seq.exists (fun r ->
+        let node = r.GetSyntax()
+
+        match node with
+        | :? MethodDeclarationSyntax as decl when
+            (not (isNull decl.Body && isNull decl.ExpressionBody))
+            && model.Compilation.ContainsSyntaxTree decl.SyntaxTree
+            ->
+            let sm = model.Compilation.GetSemanticModel(decl.SyntaxTree, true)
+            let body: SyntaxNode = if isNull decl.Body then decl.ExpressionBody else decl.Body
+
+            let dropped =
+                body.DescendantNodesAndSelf()
+                |> Seq.exists (fun n ->
+                    match n with
+                    | :? ExpressionStatementSyntax as s -> taskTyped s.Expression sm
+                    | :? ArrowExpressionClauseSyntax as a ->
+                        decl.ReturnType.ToString() = "void" && taskTyped a.Expression sm
+                    | :? AssignmentExpressionSyntax as a when a.Left.ToString() = "_" -> taskTyped a.Right sm
+                    | _ -> false)
+
+            let blocks =
+                body.DescendantNodes()
+                |> Seq.exists (fun n ->
+                    match n with
+                    | :? MemberAccessExpressionSyntax as ma ->
+                        let name = ma.Name.Identifier.ValueText
+
+                        (name = "Wait" || name = "GetResult" || name = "Result")
+                        && (taskTyped ma.Expression sm || ma.Expression.ToString().EndsWith "GetAwaiter()")
+                    | _ -> false)
+
+            dropped && not blocks
+        | _ -> false)
 
 /// A statement, a local's initializer, or an assignment's right side.
 let private bindablePosition (inv: InvocationExpressionSyntax) =
@@ -220,7 +301,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                         || a :? FinallyClauseSyntax
                         || a :? UnsafeStatementSyntax)
 
-                if noBind then
+                if noBind || AsyncShapes.syncByComment inv then
                     None
                 else
                     // `Thread.Sleep(n);` is `await Task.Delay(n);`
@@ -238,7 +319,12 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                             | :? IMethodSymbol as m -> m.ContainingType.ToDisplayString() = "System.Threading.Thread"
                             | _ -> false)
 
-                    if sleep then
+                    if
+                        sleep
+                        && AsyncShapes.dualPathBranch inv f.Node (AsyncShapes.awaitsCallNamed "Delay")
+                    then
+                        None
+                    elif sleep then
                         let edit =
                             Suggestion.replace
                                 inv.Span
@@ -267,6 +353,12 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
 
                             match twinOf model inv.SpanStart receiverType m with
                             | Some _ when syncOnPurpose f.Node || inMemory model inv m -> None
+                            | Some twin when
+                                callsItself model inv twin
+                                || firesAndForgets model m
+                                || AsyncShapes.dualPathBranch inv f.Node (AsyncShapes.awaitsCallNamed twin.Name)
+                                ->
+                                None
                             | Some twin ->
                                 let nameToken =
                                     match inv.Expression with

@@ -6,13 +6,14 @@
 /// uses it completes. The method becomes `async` and the return `return
 /// await DoAsync(x);`, so the `using` spans the work. Guards: the method
 /// is not `async` and returns `Task`/`Task<T>`/`ValueTask`; a `using`
-/// declaration or statement in the body binds a name the returned
+/// declaration or statement of the method itself (not of a lambda in it,
+/// which disposes inside the task) binds a name the returned
 /// expression mentions (as an argument or inside its lambda); the
 /// returned expression is typed as a task; every other return of the
 /// method binds too (`await`, `return;` for `Task.CompletedTask`, the
 /// value for `Task.FromResult(value)`), returns inside lambdas untouched;
 /// the message states the timing change (an exception while evaluating the arguments now faults the
-/// task instead of throwing synchronously).
+/// task instead of throwing synchronously). Yields to CA2025.
 ///
 /// CR0052 (correctness, note): `AppDomain.CurrentDomain.ProcessExit += (s,
 /// e) => this.Flush();` — a handler capturing `this` on a process-wide or
@@ -51,9 +52,16 @@ let private usingOutlivedByTask (tree: SyntaxTree) (model: SemanticModel) : Sugg
             && not (m.Modifiers |> Seq.exists (fun t -> t.IsKind SyntaxKind.AsyncKeyword))
             && AsyncShapes.isTaskLike (model.GetTypeInfo(m.ReturnType).Type)
             ->
-            // the names the body's usings bind
+            // the names the method's own usings bind: a `using` inside a lambda
+            // (`Task.Run(() => { using var bmp = …; })`) is disposed inside the task
+            let ownStatement (x: SyntaxNode) =
+                match AsyncShapes.enclosingFunction x with
+                | Some f -> obj.ReferenceEquals(f.Node, m)
+                | None -> false
+
             let usingNames =
                 m.Body.DescendantNodes()
+                |> Seq.filter ownStatement
                 |> Seq.collect (fun x ->
                     match x with
                     | :? LocalDeclarationStatementSyntax as d when not (d.UsingKeyword.IsKind SyntaxKind.None) ->

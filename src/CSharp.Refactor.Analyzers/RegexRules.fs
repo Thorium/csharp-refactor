@@ -741,17 +741,25 @@ let private hoists (hoistPerCall: bool) (tree: SyntaxTree) (model: SemanticModel
                             // the generator supplies the partial method's body (CS8795) once it runs
                             let allowed = if useGenerated then [ "CS8795" ] else []
 
+                            // `new Regex(p)` parses and builds per call; a static `Regex.IsMatch(s, p)`
+                            // finds it in the regex cache (15 entries) and runs the interpreter
+                            let cost =
+                                match n with
+                                | :? ObjectCreationExpressionSyntax
+                                | :? ImplicitObjectCreationExpressionSyntax -> "The regex is built on every call"
+                                | _ -> "The pattern is looked up in the regex cache on every call"
+
                             if Guards.speculativeCheckAllowing allowed model edits then
                                 Some
                                     {
                                         Code = HoistCode
                                         Message =
                                             (if not declarationEdits.IsEmpty && useGenerated then
-                                                 "The regex is built on every call: a [GeneratedRegex] compiles it once, at build time"
+                                                 $"{cost}: a [GeneratedRegex] compiles it once, at build time"
                                              elif not declarationEdits.IsEmpty then
-                                                 "The regex is built on every call: a static field builds it once"
+                                                 $"{cost}: a static field builds it once"
                                              else
-                                                 $"The regex is built on every call: '{reference}' already holds it")
+                                                 $"{cost}: '{reference}' already holds it")
                                         Span = n.Span
                                         Fixes = [ Suggestion.fix "Hoist the regex" HoistCode edits ]
                                     }

@@ -985,7 +985,8 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
                                 // interpolation holding the message (`$"…: {message}"`)
                                 || (match RuleContext.mentionsFor ctx tree with
                                     | Some m ->
-                                        m.Spelled lit.Token.Text || m.InTests(message.TrimEnd('.', '!', ':', ';', ' '))
+                                        m.Spelled lit.Token.Text
+                                        || m.InTests(message.TrimEnd('.', '!', ':', ';', ' ', '。', '！', '：', '；', '．'))
                                     | None -> false)
 
                             if elsewhere then
@@ -999,7 +1000,8 @@ let private messageContexts (tree: SyntaxTree) (model: SemanticModel) (ctx: Rule
 
                                 // the literal's own spelling, escapes intact, without its quotes
                                 let spelled = lit.Token.Text.Substring(1, lit.Token.Text.Length - 2)
-                                let trimmed = spelled.TrimEnd('.', '!', ':', ';', ' ')
+                                // full-width CJK punctuation too: `…资源项。` read `资源项。, calling`
+                                let trimmed = spelled.TrimEnd('.', '!', ':', ';', ' ', '。', '！', '：', '；', '．')
 
                                 let replacement =
                                     "$\""

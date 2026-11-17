@@ -20,7 +20,9 @@
 /// reference-typed field, outside any `lock` — two threads build two, a
 /// reader may see a half-published one. `LazyInitializer.EnsureInitialized
 /// (ref _x, () => new X())` publishes exactly one. Guards: the field is
-/// static, not `volatile`/`readonly`/`[ThreadStatic]`; the assignment is
+/// static, not `volatile`/`readonly`/`[ThreadStatic]`, and written only by
+/// lazy initialisations (another assignment, a reset, `Array.Resize(ref _x,
+/// n)` make the null test a fallback, not a cache); the assignment is
 /// the whole `if` body, or the shape is `_x ??= expr` or the older `_x ??
 /// (_x = expr)` as a value anywhere; `EnsureInitialized`
 /// only for an expression provably non-null (it throws on a null factory
@@ -52,8 +54,12 @@
 /// ever reading the token — the caller's cancellation is ignored for the
 /// loop's whole run. The fix puts `ct.ThrowIfCancellationRequested();` at
 /// the top of the loop body. Guards: the parameter is the function's own;
-/// the loop neither mentions the token nor sits inside another loop of
-/// the same function (the outer loop is the granularity); the body is a
+/// the loop neither mentions the token nor a local built from it (a
+/// `ResilienceContext` or linked source that carries it into the calls),
+/// passes no explicit `CancellationToken.None`/`default` (the author chose
+/// not to cancel there), and sits inside no other loop of the same function
+/// (the outer loop is the granularity), nor in a `catch` or `finally`
+/// (cleanup — a rollback after a cancelled copy — must not throw); the body is a
 /// block with at least one statement (an expression-bodied loop is a
 /// note); the body has an `await`, a `Thread.Sleep` or a block on a task.
 module CSharp.Refactor.GuardedRegions
@@ -316,6 +322,118 @@ let private releases (tree: SyntaxTree) (model: SemanticModel) : Suggestion list
 
 // ---- CR0164 ----
 
+/// Every write of the field is itself a lazy initialisation — the body of
+/// `if (f == null)`/`if (f is null)`, `f ??= x`, `f ?? (f = x)` — so the field
+/// is a cache. Another assignment, a reset, `Array.Resize(ref f, n)` or a
+/// deserialised value makes the null test a fallback (shadowsocks'
+/// `_Masterkey`, `_userSettings`). Scanned in the declaring type's trees; a
+/// write the compilation index counts beyond those (another type's) stands
+/// the rule down too.
+let private onlyLazyWrites (model: SemanticModel) (f: IFieldSymbol) =
+    let compilation = model.Compilation
+
+    let trees =
+        f.ContainingType.DeclaringSyntaxReferences
+        |> Seq.map (fun r -> r.SyntaxTree)
+        |> Seq.filter compilation.ContainsSyntaxTree
+        |> Seq.distinct
+        |> List.ofSeq
+
+    let isField (m: SemanticModel) (e: ExpressionSyntax) =
+        (match e with
+         | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = f.Name
+         | :? MemberAccessExpressionSyntax as ma -> ma.Name.Identifier.ValueText = f.Name
+         | _ -> false)
+        && SymbolEqualityComparer.Default.Equals(m.GetSymbolInfo(e).Symbol, f)
+
+    let rec bare (e: ExpressionSyntax) =
+        match e with
+        | :? ParenthesizedExpressionSyntax as p -> bare p.Expression
+        | _ -> e
+
+    let isNullTest (m: SemanticModel) (cond: ExpressionSyntax) =
+        match bare cond with
+        | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.EqualsExpression ->
+            (b.Right.IsKind SyntaxKind.NullLiteralExpression && isField m b.Left)
+            || (b.Left.IsKind SyntaxKind.NullLiteralExpression && isField m b.Right)
+        | :? IsPatternExpressionSyntax as p ->
+            (match p.Pattern with
+             | :? ConstantPatternSyntax as c -> c.Expression.IsKind SyntaxKind.NullLiteralExpression
+             | _ -> false)
+            && isField m p.Expression
+        | _ -> false
+
+    // a simple assignment that is a lazy site: an `if (f == null)` body (alone,
+    // or braced alone), or the right side of `f ?? (f = x)`
+    let lazyAssignment (m: SemanticModel) (a: AssignmentExpressionSyntax) =
+        let viaIf =
+            match a.Parent with
+            | :? ExpressionStatementSyntax as s ->
+                let owner: SyntaxNode =
+                    match s.Parent with
+                    | :? BlockSyntax as b when b.Statements.Count = 1 -> b.Parent
+                    | p -> p
+
+                match owner with
+                | :? IfStatementSyntax as ifs -> isNull ifs.Else && isNullTest m ifs.Condition
+                | _ -> false
+            | _ -> false
+
+        let viaCoalesce =
+            let rec up (n: SyntaxNode) =
+                match n.Parent with
+                | :? ParenthesizedExpressionSyntax as p -> up p
+                | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.CoalesceExpression ->
+                    obj.ReferenceEquals(bare b.Right, a) && isField m b.Left
+                | _ -> false
+
+            up a
+
+        viaIf || viaCoalesce
+
+    // every write in the declaring type's trees: true for a lazy site, false otherwise
+    let writes =
+        trees
+        |> List.collect (fun tree ->
+            let m = compilation.GetSemanticModel(tree, true)
+
+            tree.GetRoot().DescendantNodes()
+            |> Seq.choose (fun n ->
+                match n with
+                | :? AssignmentExpressionSyntax as a when isField m a.Left ->
+                    Some(
+                        a.IsKind SyntaxKind.CoalesceAssignmentExpression
+                        || (a.IsKind SyntaxKind.SimpleAssignmentExpression && lazyAssignment m a)
+                    )
+                | :? AssignmentExpressionSyntax as a when
+                    (a.Left :? TupleExpressionSyntax)
+                    && a.Left.DescendantNodes()
+                       |> Seq.exists (fun d -> d :? ExpressionSyntax && isField m (d :?> ExpressionSyntax))
+                    ->
+                    Some false
+                | :? ArgumentSyntax as arg when
+                    not (arg.RefKindKeyword.IsKind SyntaxKind.None) && isField m arg.Expression
+                    ->
+                    Some false
+                | :? PrefixUnaryExpressionSyntax as u when
+                    (u.IsKind SyntaxKind.PreIncrementExpression
+                     || u.IsKind SyntaxKind.PreDecrementExpression)
+                    && isField m u.Operand
+                    ->
+                    Some false
+                | :? PostfixUnaryExpressionSyntax as u when
+                    (u.IsKind SyntaxKind.PostIncrementExpression
+                     || u.IsKind SyntaxKind.PostDecrementExpression)
+                    && isField m u.Operand
+                    ->
+                    Some false
+                | _ -> None)
+            |> List.ofSeq)
+
+    List.forall id writes
+    && (f.DeclaredAccessibility = Accessibility.Private
+        || (Index.writesOf (Index.ofCompilation compilation) f).Length <= writes.Length)
+
 let private staticCacheField (model: SemanticModel) (e: ExpressionSyntax) : IFieldSymbol option =
     match e with
     | :? IdentifierNameSyntax
@@ -332,6 +450,7 @@ let private staticCacheField (model: SemanticModel) (e: ExpressionSyntax) : IFie
                 |> Seq.exists (fun a ->
                     not (isNull a.AttributeClass) && a.AttributeClass.Name = "ThreadStaticAttribute")
             )
+            && onlyLazyWrites model f
             ->
             Some f
         | _ -> None
@@ -786,11 +905,75 @@ let private tokenLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                 | Some p ->
                     let name = p.Identifier.ValueText
 
-                    // the outer loop is the granularity; a loop in a finally must not throw
+                    // the outer loop is the granularity; a loop in a finally or a catch is
+                    // cleanup (a rollback after a cancelled copy) and must not throw
                     let nestedInLoop =
                         loop.Ancestors()
                         |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, fn.Node)))
-                        |> Seq.exists (fun a -> (loopParts a).IsSome || a :? FinallyClauseSyntax)
+                        |> Seq.exists (fun a ->
+                            (loopParts a).IsSome || a :? FinallyClauseSyntax || a :? CatchClauseSyntax)
+
+                    // locals that carry the token: built from it (`var e =
+                    // source.GetAsyncEnumerator(ct);`, `var context = Pool.Get(ct);`) — but an
+                    // AWAITED result (`var items = await repo.GetAllAsync(ct);`) is data the
+                    // operation produced, a carrier only when typed to hold a token (a token,
+                    // a source, a type with a token member: Polly's ResilienceContext)
+                    let carriesToken (t: ITypeSymbol) =
+                        let isToken (x: ITypeSymbol) =
+                            not (isNull x)
+                            && (x.ToDisplayString() = "System.Threading.CancellationToken"
+                                || x.ToDisplayString() = "System.Threading.CancellationTokenSource")
+
+                        not (isNull t)
+                        && (isToken t
+                            || t.GetMembers()
+                               |> Seq.exists (fun m ->
+                                   match m with
+                                   | :? IPropertySymbol as p -> isToken p.Type
+                                   | :? IFieldSymbol as f -> isToken f.Type
+                                   | _ -> false))
+
+                    let carriers =
+                        let declarators =
+                            fn.Body.DescendantNodes()
+                            |> Seq.choose (fun d ->
+                                match d with
+                                | :? VariableDeclaratorSyntax as v when
+                                    not (isNull v.Initializer)
+                                    && (not (v.Initializer.Value :? AwaitExpressionSyntax)
+                                        || (match model.GetDeclaredSymbol v with
+                                            | :? ILocalSymbol as l -> carriesToken l.Type
+                                            | _ -> false))
+                                    ->
+                                    Some v
+                                | _ -> None)
+                            |> List.ofSeq
+
+                        let rec grow (names: Set<string>) =
+                            let more =
+                                declarators
+                                |> List.filter (fun v ->
+                                    not (names.Contains v.Identifier.ValueText)
+                                    && names |> Set.exists (fun n -> Text.mentionsName n v.Initializer.Value))
+                                |> List.map (fun v -> v.Identifier.ValueText)
+
+                            if more.IsEmpty then
+                                names
+                            else
+                                grow (Set.union names (set more))
+
+                        grow (set [ name ])
+
+                    // the author passes no token on purpose inside the loop
+                    let explicitlyUncancelled =
+                        body.DescendantNodes()
+                        |> Seq.exists (fun d ->
+                            match d with
+                            | :? MemberAccessExpressionSyntax as ma ->
+                                ma.Name.Identifier.ValueText = "None"
+                                && ma.Expression.ToString().EndsWith "CancellationToken"
+                            | :? DefaultExpressionSyntax as de -> de.Type.ToString().EndsWith "CancellationToken"
+                            | _ -> false)
 
                     // a loop that waits: an await, a sleep, or a block on a task —
                     // an in-memory loop over a user call is not long by itself
@@ -819,7 +1002,12 @@ let private tokenLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                                 ma.Name.Identifier.ValueText = "Result" && isTask ma.Expression
                             | _ -> false)
 
-                    if nestedInLoop || Text.mentionsName name loop || not works then
+                    if
+                        nestedInLoop
+                        || carriers |> Set.exists (fun n -> Text.mentionsName n loop)
+                        || explicitlyUncancelled
+                        || not works
+                    then
                         None
                     else
                         let message =

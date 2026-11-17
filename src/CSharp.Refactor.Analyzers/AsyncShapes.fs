@@ -26,8 +26,14 @@
 /// its own `IsCompleted` test — an `if`/`?:` branch or the right operand of
 /// `&&`/`||`, negation followed — or compared equal to the winner of
 /// `await Task.WhenAny(…, t, …)`, born of `Task.FromResult`/`CompletedTask`,
-/// after its own `Wait(timeout)` or `proc.WaitForExit()`) is a read, not a
-/// block; a body choreographed around a thread (a `Thread`, a signal,
+/// after its own `Wait(timeout)` or `proc.WaitForExit()`, or below an `if`
+/// that leaves unless it is complete — `if (await Task.WhenAny(t, delay) != t)
+/// return …;`, or the antecedent of a continuation: the first parameter of a
+/// lambda, or of a method this file hands as a method group, passed to a
+/// task's `ContinueWith`) is a read, not a block; one branch of a dual sync/async
+/// method (the other branch awaits, or the condition is an `async`/`isAsync`
+/// flag: `async ? await t : t.EnsureCompleted()`) and a statement whose
+/// comment says it is synchronous on purpose stay; a body choreographed around a thread (a `Thread`, a signal,
 /// `Interlocked`) gets the note only — a bind moves the continuation off
 /// the thread the wait kept it on; `Task.WaitAll(tasks, timeout)` stays;
 /// the spine of `Main` and top-level statements is the console's blocking
@@ -76,7 +82,8 @@
 /// `CancellationToken` parameter on the enclosing function; the call
 /// resolves to a method whose parameter at that position is a
 /// `CancellationToken`; never inside a `catch`/`finally` (a cancelled
-/// operation must still roll back); never on `Task.Run`, `StartNew`,
+/// operation must still roll back), nor in a block that ends in a `throw`
+/// (a compensation undoing half-done work before the failure); never on `Task.Run`, `StartNew`,
 /// `ContinueWith`, `ContinueWhenAll` or `ContinueWhenAny` by symbol, where the
 /// token is a scheduling condition and `None` means "always start the work";
 /// never where the token is already
@@ -90,6 +97,7 @@ open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.CSharp.Syntax
 open Microsoft.CodeAnalysis.Text
+open System.Text.RegularExpressions
 
 [<Literal>]
 let BlockingCode = "CR0040"
@@ -226,6 +234,122 @@ let enclosingFunction (node: SyntaxNode) : Function option =
                 }
         | _ -> None)
 
+/// An awaited expression that calls a method of this name (CR0042's twin).
+let awaitsCallNamed (name: string) (e: ExpressionSyntax) =
+    e.DescendantNodesAndSelf()
+    |> Seq.exists (fun x ->
+        match x with
+        | :? InvocationExpressionSyntax as inv ->
+            match inv.Expression with
+            | :? MemberAccessExpressionSyntax as ma -> ma.Name.Identifier.ValueText = name
+            | :? IdentifierNameSyntax as pid -> pid.Identifier.ValueText = name
+            | :? GenericNameSyntax as g -> g.Identifier.ValueText = name
+            | _ -> false
+        | _ -> false)
+
+let private awaitsTaskRegex = Regex @"\s+"
+
+/// An awaited expression that is this task, through `.ConfigureAwait(…)`
+/// (CR0040's drained receiver): `async ? await t.ConfigureAwait(false) : t.Result`.
+let awaitsTask (task: ExpressionSyntax) (e: ExpressionSyntax) =
+    let squeeze (x: SyntaxNode) =
+        awaitsTaskRegex.Replace(x.ToString(), "")
+
+    let target = squeeze task
+    let awaited = squeeze e
+    awaited = target || awaited.StartsWith(target + ".ConfigureAwait(")
+
+/// The site is one branch of a dual sync/async method: an `if`/`?:` whose
+/// other branch awaits what `awaited` accepts (CR0042: the twin by name;
+/// CR0040: the same task), or whose condition is a flag named for the choice
+/// (`async`, `isAsync`, `useAsync`, `runAsync`): `if (async) await
+/// ProcessNextAsync(…); else ProcessNext(…);`, `async ? await t : t.Result`.
+/// The synchronous branch is the point: awaiting there runs async code under
+/// the synchronous API (Azure SDK's `bool async` policies, Npgsql,
+/// MySqlConnector). An unrelated await in the other branch is not this.
+let dualPathBranch (site: SyntaxNode) (fnNode: SyntaxNode) (awaited: ExpressionSyntax -> bool) =
+    let flagNames =
+        set [ "async"; "isasync"; "useasync"; "runasync"; "doasync"; "asynchronous" ]
+
+    let rec flagCondition (c: ExpressionSyntax) =
+        match c with
+        | :? ParenthesizedExpressionSyntax as p -> flagCondition p.Expression
+        | :? PrefixUnaryExpressionSyntax as u when u.IsKind SyntaxKind.LogicalNotExpression -> flagCondition u.Operand
+        | :? IdentifierNameSyntax as pid ->
+            flagNames.Contains(pid.Identifier.ValueText.TrimStart('@', '_').ToLowerInvariant())
+        | :? MemberAccessExpressionSyntax as ma ->
+            flagNames.Contains(ma.Name.Identifier.ValueText.TrimStart('_').ToLowerInvariant())
+        | _ -> false
+
+    let awaitsHere (branch: SyntaxNode) =
+        not (isNull branch)
+        && branch.DescendantNodesAndSelf()
+           |> Seq.exists (fun n ->
+               match n with
+               | :? AwaitExpressionSyntax as a -> awaited a.Expression
+               | _ -> false)
+
+    site.Ancestors()
+    |> Seq.takeWhile (fun a -> not (obj.ReferenceEquals(a, fnNode)))
+    |> Seq.exists (fun a ->
+        match a with
+        | :? IfStatementSyntax as ifs ->
+            let elseBranch: SyntaxNode = if isNull ifs.Else then null else ifs.Else.Statement
+
+            let inThen = ifs.Statement.Span.Contains site.Span
+            let inElse = not (isNull elseBranch) && elseBranch.Span.Contains site.Span
+
+            (inThen || inElse)
+            && (flagCondition ifs.Condition
+                || (inThen && awaitsHere elseBranch)
+                || (inElse && awaitsHere ifs.Statement))
+        | :? ConditionalExpressionSyntax as c ->
+            let inTrue = c.WhenTrue.Span.Contains site.Span
+            let inFalse = c.WhenFalse.Span.Contains site.Span
+
+            (inTrue || inFalse)
+            && (flagCondition c.Condition
+                || (inTrue && awaitsHere c.WhenFalse)
+                || (inFalse && awaitsHere c.WhenTrue))
+        | _ -> false)
+
+/// A comment on the statement, or trailing its line, that says the call is
+/// synchronous on purpose: one that opens with the word (`// Sync, it's
+/// already buffered`, `// synchronous: …`), or pairs it with a decision
+/// (`sync on purpose`, `intentionally synchronous`, `by design`). `// keep in
+/// sync with X` is not one, nor is a comment that asks for the change (`//
+/// sync over async here, fix later`, a `TODO`, `should be async`).
+let syncByComment (site: SyntaxNode) =
+    let statement =
+        site.AncestorsAndSelf()
+        |> Seq.tryPick (fun a ->
+            match a with
+            | :? StatementSyntax as s -> Some s
+            | _ -> None)
+
+    match statement with
+    | None -> false
+    | Some s ->
+        Seq.append (s.GetLeadingTrivia()) (s.GetLastToken().TrailingTrivia)
+        |> Seq.filter (fun t ->
+            t.IsKind SyntaxKind.SingleLineCommentTrivia
+            || t.IsKind SyntaxKind.MultiLineCommentTrivia)
+        |> Seq.exists (fun t ->
+            let word = @"(sync|synchronous|synchronously)"
+
+            let decision =
+                @"(on purpose|by design|deliberately|intentionally|purposely|is intended|is fine)"
+
+            // the author wants it changed
+            let request =
+                @"\b(todo|fixme|hack|xxx|fix\s+(me|this|it|later)|for now|temporar(y|ily)|(should|must|needs?\s+to|has\s+to)\s+be\s+(made\s+)?(async|asynchronous|awaited)|make\s+(this\s+|it\s+)?(async|asynchronous))\b"
+
+            let text = t.ToString()
+            let options = RegexOptions.IgnoreCase
+
+            Regex.IsMatch(text, $@"^\s*(//+|/\*+)\s*{word}\b|\b{word}\s+{decision}\b|\b{decision}\s+{word}\b", options)
+            && not (Regex.IsMatch(text, request, options)))
+
 /// Inside a `lock`, a `catch` filter, a `finally`, an `unsafe` block —
 /// where `await` is illegal or wrong — below the given function.
 let private inNoBindZone (fn: Function) (node: SyntaxNode) =
@@ -344,10 +468,41 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
             | _ -> false
         | e -> bornComplete e
 
+    // the tasks of an `await Task.WhenAny(…, t, …)` (through `.ConfigureAwait(…)`)
+    let whenAnyOf (a: AwaitExpressionSyntax) : string seq =
+        let call =
+            match a.Expression with
+            | :? InvocationExpressionSyntax as ca when
+                (match ca.Expression with
+                 | :? MemberAccessExpressionSyntax as m -> m.Name.Identifier.ValueText = "ConfigureAwait"
+                 | _ -> false)
+                ->
+                (ca.Expression :?> MemberAccessExpressionSyntax).Expression
+            | e -> e
+
+        match call with
+        | :? InvocationExpressionSyntax as inv when inv.Expression.ToString() = "Task.WhenAny" ->
+            inv.ArgumentList.Arguments
+            |> Seq.collect (fun arg ->
+                match arg.Expression with
+                | :? ImplicitArrayCreationExpressionSyntax as arr -> arr.Initializer.Expressions |> Seq.map string
+                | :? ArrayCreationExpressionSyntax as arr when not (isNull arr.Initializer) ->
+                    arr.Initializer.Expressions |> Seq.map string
+                | :? CollectionExpressionSyntax as c ->
+                    c.Elements
+                    |> Seq.choose (fun e ->
+                        match e with
+                        | :? ExpressionElementSyntax as x -> Some(string x.Expression)
+                        | _ -> None)
+                | e -> Seq.singleton (string e))
+        | _ -> Seq.empty
+
     // `winner` of `var winner = await Task.WhenAny(…, t, …);`, never assigned
-    // again: `winner == t` proves `t` complete
-    let whenAnyArguments (winner: ExpressionSyntax) =
+    // again, or the awaited WhenAny itself: `winner == t` proves `t` complete
+    let rec whenAnyArguments (winner: ExpressionSyntax) =
         match winner with
+        | :? ParenthesizedExpressionSyntax as p -> whenAnyArguments p.Expression
+        | :? AwaitExpressionSyntax as a -> List.ofSeq (whenAnyOf a)
         | :? IdentifierNameSyntax as pid ->
             match model.GetSymbolInfo(pid).Symbol with
             | :? ILocalSymbol as l ->
@@ -367,36 +522,7 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
                         match r.GetSyntax() with
                         | :? VariableDeclaratorSyntax as v when not (isNull v.Initializer) ->
                             match v.Initializer.Value with
-                            | :? AwaitExpressionSyntax as a ->
-                                // `.ConfigureAwait(false)` sits on the WhenAny call
-                                let call =
-                                    match a.Expression with
-                                    | :? InvocationExpressionSyntax as ca when
-                                        (match ca.Expression with
-                                         | :? MemberAccessExpressionSyntax as m ->
-                                             m.Name.Identifier.ValueText = "ConfigureAwait"
-                                         | _ -> false)
-                                        ->
-                                        (ca.Expression :?> MemberAccessExpressionSyntax).Expression
-                                    | e -> e
-
-                                match call with
-                                | :? InvocationExpressionSyntax as inv when inv.Expression.ToString() = "Task.WhenAny" ->
-                                    inv.ArgumentList.Arguments
-                                    |> Seq.collect (fun arg ->
-                                        match arg.Expression with
-                                        | :? ImplicitArrayCreationExpressionSyntax as arr ->
-                                            arr.Initializer.Expressions |> Seq.map string
-                                        | :? ArrayCreationExpressionSyntax as arr when not (isNull arr.Initializer) ->
-                                            arr.Initializer.Expressions |> Seq.map string
-                                        | :? CollectionExpressionSyntax as c ->
-                                            c.Elements
-                                            |> Seq.choose (fun e ->
-                                                match e with
-                                                | :? ExpressionElementSyntax as x -> Some(string x.Expression)
-                                                | _ -> None)
-                                        | e -> Seq.singleton (string e))
-                                | _ -> Seq.empty
+                            | :? AwaitExpressionSyntax as a -> whenAnyOf a
                             | _ -> Seq.empty
                         | _ -> Seq.empty)
                     |> List.ofSeq
@@ -459,6 +585,23 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
                 proves b.Left b.Right false
             | _ -> false)
 
+    // an `if` that leaves (return, throw, break, continue) whenever the task is
+    // not complete: `if (await Task.WhenAny(t, Task.Delay(d)) != t) return …;`
+    let exitsUnlessComplete (s: StatementSyntax) =
+        let rec exits (st: StatementSyntax) =
+            match st with
+            | :? ReturnStatementSyntax
+            | :? ThrowStatementSyntax
+            | :? BreakStatementSyntax
+            | :? ContinueStatementSyntax -> true
+            | :? BlockSyntax as b -> b.Statements.Count > 0 && exits (Seq.last b.Statements)
+            | _ -> false
+
+        match s with
+        | :? IfStatementSyntax as ifs when isNull ifs.Else ->
+            exits ifs.Statement && List.contains text (snd (completionTests ifs.Condition))
+        | _ -> false
+
     // after its own `Wait(timeout)` or a `WaitForExit()` in the same block
     let waitedAbove =
         match
@@ -477,6 +620,7 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
                 // an `await t` or `await Task.WhenAll(…, t, …)` above completed it
                 (t.StartsWith(text + ".Wait(") && t.Trim() <> text + ".Wait();")
                 || t.Contains ".WaitForExit("
+                || exitsUnlessComplete s
                 || (s.DescendantNodesAndSelf()
                     |> Seq.exists (fun n ->
                         match n with
@@ -493,7 +637,77 @@ let private knownComplete (model: SemanticModel) (fn: Function) (receiver: Expre
                         | _ -> false)))
         | None -> false
 
-    declaredComplete || underCompletedTest || waitedAbove
+    // the antecedent of a continuation: `t.ContinueWith(a => a.Result)` runs
+    // once `t` completed, so the continuation's first parameter is a complete
+    // task — a lambda's, or that of a method or local function this file hands
+    // to `ContinueWith` as a method group (`t.ContinueWith(Store, state)`)
+    let antecedent =
+        // the first argument of a task's `ContinueWith`
+        let continuation (arg: ExpressionSyntax) =
+            let rec outer (n: SyntaxNode) =
+                match n.Parent with
+                | :? ParenthesizedExpressionSyntax
+                | :? CastExpressionSyntax -> outer n.Parent
+                | p -> p
+
+            match outer arg with
+            | :? ArgumentSyntax as a ->
+                match a.Parent with
+                | :? ArgumentListSyntax as list when obj.ReferenceEquals(list.Arguments.[0], a) ->
+                    match list.Parent with
+                    | :? InvocationExpressionSyntax as inv ->
+                        match model.GetSymbolInfo(inv).Symbol with
+                        | :? IMethodSymbol as m -> m.Name = "ContinueWith" && isTaskLike m.ContainingType
+                        | _ -> false
+                    | _ -> false
+                | _ -> false
+            | _ -> false
+
+        match receiver with
+        | :? IdentifierNameSyntax as pid ->
+            match model.GetSymbolInfo(pid).Symbol with
+            | :? IParameterSymbol as p when p.Ordinal = 0 ->
+                match p.ContainingSymbol with
+                | :? IMethodSymbol as owner when owner.MethodKind = MethodKind.AnonymousFunction ->
+                    owner.DeclaringSyntaxReferences
+                    |> Seq.exists (fun r ->
+                        match r.GetSyntax() with
+                        | :? AnonymousFunctionExpressionSyntax as l -> continuation l
+                        | _ -> false)
+                | :? IMethodSymbol as owner when
+                    owner.MethodKind = MethodKind.Ordinary
+                    || owner.MethodKind = MethodKind.LocalFunction
+                    ->
+                    model.SyntaxTree.GetRoot().DescendantNodes()
+                    |> Seq.exists (fun n ->
+                        match n with
+                        | :? InvocationExpressionSyntax as inv when
+                            inv.ArgumentList.Arguments.Count > 0
+                            && (match inv.Expression with
+                                | :? MemberAccessExpressionSyntax as ma ->
+                                    ma.Name.Identifier.ValueText = "ContinueWith"
+                                | _ -> false)
+                            ->
+                            let first = inv.ArgumentList.Arguments.[0].Expression
+
+                            (match first with
+                             | :? IdentifierNameSyntax as g -> g.Identifier.ValueText = owner.Name
+                             | :? MemberAccessExpressionSyntax as g -> g.Name.Identifier.ValueText = owner.Name
+                             | _ -> false)
+                            && (match model.GetSymbolInfo(first).Symbol with
+                                | :? IMethodSymbol as g ->
+                                    SymbolEqualityComparer.Default.Equals(
+                                        g.OriginalDefinition,
+                                        owner.OriginalDefinition
+                                    )
+                                | _ -> false)
+                            && continuation first
+                        | _ -> false)
+                | _ -> false
+            | _ -> false
+        | _ -> false
+
+    declaredComplete || underCompletedTest || waitedAbove || antecedent
 
 /// The `Main` spine or top-level statements: the console's blocking point.
 let private isConsoleSpine (fn: Function option) (node: SyntaxNode) =
@@ -862,7 +1076,16 @@ let private blocking (syncSwap: bool) (tree: SyntaxTree) (model: SemanticModel) 
         match fn with
         | _ when complete -> None
         | Some f when f.IsAsync ->
-            if inNoBindZone f site then
+            // a dual sync/async branch: the flag, or the other branch awaiting this task
+            let dual =
+                dualPathBranch
+                    site
+                    f.Node
+                    (match receiver with
+                     | Some r -> awaitsTask r
+                     | None -> fun _ -> false)
+
+            if inNoBindZone f site || dual || syncByComment site then
                 None
             elif underAggregateCatch f site then
                 Some(
@@ -1303,6 +1526,10 @@ let private schedulesWork (m: IMethodSymbol) =
         || m.Name = "ContinueWhenAll"
         || m.Name = "ContinueWhenAny")
 
+let private tokensRegex =
+    Regex
+        "^(Stop|Clean|Dispose|Close|Shut[Dd]own|Roll[Bb]ack|Abort|Kill|Release|Undo|Revert|Cancel|Terminate|Unlock|Unregister|Unsubscribe|Disconnect)(?![a-z])"
+
 let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
@@ -1359,18 +1586,24 @@ let private tokens (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                                     | _ -> false
                                 | _ -> false
 
-                            names || bestEffort
+                            // a compensation before a throw: `if (!await DeleteAsync(src, ct)) {
+                            // await DeleteAsync(copy, CancellationToken.None); throw …; }` undoes
+                            // the half-done work whatever the caller's token says
+                            let compensation =
+                                match s.Parent with
+                                | :? BlockSyntax as b when b.Statements.Count > 1 ->
+                                    (Seq.last b.Statements) :? ThrowStatementSyntax
+                                    && not (obj.ReferenceEquals(Seq.last b.Statements, s))
+                                | _ -> false
+
+                            names || bestEffort || compensation
                         | None -> false
 
                     // a callee named for cleanup (`StopCoreAsync`, `RollbackAsync`): its
                     // explicit `None` keeps it running after the caller's token has fired
                     let cleanup =
                         match model.GetSymbolInfo(inv).Symbol with
-                        | :? IMethodSymbol as m ->
-                            System.Text.RegularExpressions.Regex.IsMatch(
-                                m.Name,
-                                "^(Stop|Clean|Dispose|Close|Shut[Dd]own|Roll[Bb]ack|Abort|Kill|Release|Undo|Revert|Cancel|Terminate|Unlock|Unregister|Unsubscribe|Disconnect)(?![a-z])"
-                            )
+                        | :? IMethodSymbol as m -> tokensRegex.IsMatch m.Name
                         | _ -> false
 
                     match enclosingFunction arg with

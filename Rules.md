@@ -54,7 +54,7 @@ a section, and its category and default state match the code.
 | CR0048 | Correctness | v | | | | `Monitor.Enter(x); try { … } finally { Monitor.Exit(x); }` | `lock (x) { … }` |
 | CR0049 | Correctness | v | | | | `if (!cd.TryGetValue(k, out var v)) { v = Compute(); cd[k] = v; }` on a `ConcurrentDictionary` | the miss arm becomes `v = cd.GetOrAdd(k, _ => Compute());` |
 | CR0050 | Correctness | v | | | | `cd.GetOrAdd(k, factory)` with a `Task`/`ValueTask`/`Lazy` value | note: a faulted value stays cached |
-| CR0051 | Correctness | v | | | | `Task<T> M() { using var x = …; return DoAsync(x); }` | `async Task<T> M() { using var x = …; return await DoAsync(x); }` |
+| CR0051 | Correctness | v | | | CA2025 | `Task<T> M() { using var x = …; return DoAsync(x); }` | `async Task<T> M() { using var x = …; return await DoAsync(x); }` |
 | CR0052 | Correctness | v | | | | `AppDomain.CurrentDomain.ProcessExit += (s, e) => this.Flush();` never removed | note: the object lives as long as the publisher |
 | CR0053 | Correctness | v | | | VSTHRD101 | `list.ForEach(async x => …)`, `Parallel.ForEach(xs, async x => …)` | note: `async void` in disguise |
 | CR0054 | Performance | v | | | CA1842, CA1843 | `Task.WhenAll(new[] { t })`, `Task.WaitAll(new[] { t })` | note; editor: the task itself / `t.Wait()` |
@@ -595,7 +595,9 @@ or bare `catch` whose filter or body reads the wrapper (`InnerException`,
 not a block: under its own `IsCompleted` test, born of `Task.FromResult`/
 `CompletedTask` (through a local or a `readonly` field), after its own
 `Wait(timeout)`, an `await` of it or of a `Task.WhenAll` naming it, or a
-`WaitForExit()` in the same block; a body that
+`WaitForExit()` in the same block, or as the antecedent of a continuation
+(`t.ContinueWith(a => a.Result)`, or the first parameter of a method the
+file hands to `ContinueWith` as a method group); a body that
 choreographs a thread by hand (a `Thread`, a signal, `Interlocked`) gets the
 note only, since a bind moves the continuation off the thread the wait
 kept it on; `Task.WaitAll(tasks, timeout)` stays; the spine of `Main` and

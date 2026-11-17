@@ -133,6 +133,7 @@ let rules: Rule list =
         rule "CR0049" Category.Correctness "a check-then-store on a ConcurrentDictionary races: GetOrAdd"
         rule "CR0050" Category.Correctness "GetOrAdd with a Task or Lazy value caches a failure for good"
         rule "CR0051" Category.Correctness "a using disposes before the returned task completes"
+        |> yields [ "CA2025" ]
         rule "CR0052" Category.Correctness "a handler capturing this on a process-wide publisher, never removed"
         rule "CR0053" Category.Correctness "an async lambda handed to a void delegate is async void in disguise"
         |> yields [ "VSTHRD101" ]
