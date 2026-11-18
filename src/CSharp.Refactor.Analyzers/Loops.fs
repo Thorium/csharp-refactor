@@ -15,7 +15,9 @@
 /// on the very path the body indexes; `xs` is a local, parameter or
 /// `readonly` field (a property may hand out a fresh list per read, and
 /// the `for` reads it per iteration) typed as an array, `string`, a span,
-/// or a type implementing `IList<T>`/`IReadOnlyList<T>`; every use of `i`
+/// or a class or struct implementing `IList<T>`/`IReadOnlyList<T>` (an
+/// interface-typed list hands `foreach` a boxed enumerator and two interface
+/// calls per element, where the index made one); every use of `i`
 /// in the body is `xs[i]` (a use as a value wants `Select((x, i) => …)`
 /// and stays the author's call); no `xs[i]` is written, taken by `ref`,
 /// or passed `ref`/`out`; `xs` is not assigned, mutated through a known
@@ -129,7 +131,12 @@ let private enumerable (model: SemanticModel) (xs: ExpressionSyntax) =
                 | :? INamedTypeSymbol as n -> isList n
                 | _ -> false
 
-            if itself || t.AllInterfaces |> Seq.exists isList then
+            // an interface-typed list (`IReadOnlyList<T>`) hands `foreach` a boxed
+            // enumerator and two interface calls per element, where the index made one
+            if
+                t.TypeKind <> TypeKind.Interface
+                && (itself || t.AllInterfaces |> Seq.exists isList)
+            then
                 // a list guards its enumerator against modification
                 ValueSome(t, true)
             else

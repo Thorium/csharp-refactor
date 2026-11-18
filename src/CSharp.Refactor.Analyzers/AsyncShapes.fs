@@ -1726,11 +1726,139 @@ let private streamsOwn (m: IMethodSymbol) =
 let inline private (|IsMemoryStream|_|) input =
     if isMemoryStream input then ValueSome input else ValueNone
 
-/// A `Stream` call on a stream whose bytes stay in memory, handed no other
-/// stream: a `MemoryStream`, or a local or a field only its type can set,
-/// every value of which is made from memory streams alone
-/// (`new GZipStream(buffer, …)`, `algorithm.GetCompressionStream(_buffer)`)
-/// or is `null`. Nothing there waits.
+let private streamReadersWriters =
+    set
+        [
+            "System.IO.StreamWriter"
+            "System.IO.StreamReader"
+            "System.IO.BinaryWriter"
+            "System.IO.BinaryReader"
+        ]
+
+/// A reader or writer over a stream it is constructed with.
+let private wrapsStream (t: ITypeSymbol) =
+    let rec within (t: ITypeSymbol) =
+        not (isNull t)
+        && (streamReadersWriters.Contains(t.OriginalDefinition.ToDisplayString())
+            || within t.BaseType)
+
+    within t
+
+/// A stream whose bytes stay in memory: a `MemoryStream`, or a local or a
+/// field only its type can set, every value of which is made from memory
+/// streams alone (`new GZipStream(buffer, …)`,
+/// `algorithm.GetCompressionStream(_buffer)`) or is `null`. With `readers`, a
+/// `StreamWriter`/`StreamReader`/`BinaryWriter`/`BinaryReader` made the same
+/// way counts too.
+let memoryBacked (model: SemanticModel) (readers: bool) (receiver: ExpressionSyntax) =
+    match model.GetTypeInfo(receiver).Type with
+    | null -> false
+    | IsMemoryStream _ -> true
+    | t when isStream t || readers && wrapsStream t ->
+        let target = model.GetSymbolInfo(receiver).Symbol
+
+        // where every write is in sight
+        let roots: SyntaxNode list =
+            match target with
+            | :? IFieldSymbol as f when f.DeclaredAccessibility = Accessibility.Private || f.IsReadOnly ->
+                f.ContainingType.DeclaringSyntaxReferences
+                |> Seq.map (fun r -> r.GetSyntax())
+                |> List.ofSeq
+            | :? ILocalSymbol as l ->
+                l.DeclaringSyntaxReferences
+                |> Seq.choose (fun r ->
+                    r.GetSyntax().Ancestors()
+                    |> Seq.tryFind (fun a -> a :? MemberDeclarationSyntax)
+                    // top-level statements share their locals
+                    |> Option.map (fun a -> if a :? GlobalStatementSyntax then a.Parent else a))
+                |> List.ofSeq
+            | _ -> []
+
+        let named (e: ExpressionSyntax) =
+            match e with
+            | :? IdentifierNameSyntax as i -> i.Identifier.ValueText = target.Name
+            | :? MemberAccessExpressionSyntax as a -> a.Name.Identifier.ValueText = target.Name
+            | _ -> false
+
+        // a value written, or null where the write is not a plain one
+        let values =
+            roots
+            |> List.collect (fun root ->
+                let rootModel =
+                    if root.SyntaxTree = model.SyntaxTree then
+                        model
+                    else
+                        model.Compilation.GetSemanticModel root.SyntaxTree
+
+                let isTarget (e: ExpressionSyntax) =
+                    named e
+                    && (match rootModel.GetSymbolInfo(e).Symbol with
+                        | null -> false
+                        | s -> SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, target.OriginalDefinition))
+
+                root.DescendantNodes()
+                |> Seq.choose (fun n ->
+                    match n with
+                    | :? VariableDeclaratorSyntax as v when
+                        not (isNull v.Initializer)
+                        && v.Identifier.ValueText = target.Name
+                        && SymbolEqualityComparer.Default.Equals(rootModel.GetDeclaredSymbol v, target)
+                        ->
+                        Some v.Initializer.Value
+                    | :? AssignmentExpressionSyntax as a ->
+                        match a.Left with
+                        | :? TupleExpressionSyntax as t ->
+                            let deconstructed =
+                                t.DescendantNodes()
+                                |> Seq.exists (fun d ->
+                                    match d with
+                                    | :? ExpressionSyntax as e -> isTarget e
+                                    | _ -> false)
+
+                            if deconstructed then Some null else None
+                        | left when isTarget left ->
+                            Some(
+                                if
+                                    a.IsKind SyntaxKind.SimpleAssignmentExpression
+                                    || a.IsKind SyntaxKind.CoalesceAssignmentExpression
+                                then
+                                    a.Right
+                                else
+                                    null
+                            )
+                        | _ -> None
+                    | :? ArgumentSyntax as a when
+                        not (a.RefKindKeyword.IsKind SyntaxKind.None) && isTarget a.Expression
+                        ->
+                        Some null
+                    | _ -> None)
+                |> Seq.map (fun value -> rootModel, value)
+                |> List.ofSeq)
+
+        let rec clears (e: ExpressionSyntax) =
+            match e with
+            | :? PostfixUnaryExpressionSyntax as p when p.IsKind SyntaxKind.SuppressNullableWarningExpression ->
+                clears p.Operand
+            | :? LiteralExpressionSyntax as l ->
+                l.IsKind SyntaxKind.NullLiteralExpression
+                || l.IsKind SyntaxKind.DefaultLiteralExpression
+            | _ -> false
+
+        let streams =
+            values |> List.filter (fun (_, value) -> isNull value || not (clears value))
+
+        not streams.IsEmpty
+        && streams
+           |> List.forall (fun (valueModel, value) ->
+               match value with
+               | :? BaseObjectCreationExpressionSyntax as c when not (isNull c.ArgumentList) ->
+                   memoryStreamsOnly valueModel c.ArgumentList.Arguments
+               | :? InvocationExpressionSyntax as i -> memoryStreamsOnly valueModel i.ArgumentList.Arguments
+               | _ -> false)
+    | _ -> false
+
+/// A `Stream` call on a stream whose bytes stay in memory (`memoryBacked`),
+/// handed no other stream. Nothing there waits.
 let private onMemoryStream (model: SemanticModel) (m: IMethodSymbol) (inv: InvocationExpressionSyntax) =
     let otherStreams () =
         inv.ArgumentList.Arguments
@@ -1741,112 +1869,7 @@ let private onMemoryStream (model: SemanticModel) (m: IMethodSymbol) (inv: Invoc
 
     match inv.Expression with
     | :? MemberAccessExpressionSyntax as ma when streamsOwn m && not (otherStreams ()) ->
-        match model.GetTypeInfo(ma.Expression).Type with
-        | null -> false
-        | IsMemoryStream _ -> true
-        | t when isStream t ->
-            let target = model.GetSymbolInfo(ma.Expression).Symbol
-
-            // where every write is in sight
-            let roots: SyntaxNode list =
-                match target with
-                | :? IFieldSymbol as f when f.DeclaredAccessibility = Accessibility.Private || f.IsReadOnly ->
-                    f.ContainingType.DeclaringSyntaxReferences
-                    |> Seq.map (fun r -> r.GetSyntax())
-                    |> List.ofSeq
-                | :? ILocalSymbol as l ->
-                    l.DeclaringSyntaxReferences
-                    |> Seq.choose (fun r ->
-                        r.GetSyntax().Ancestors()
-                        |> Seq.tryFind (fun a -> a :? MemberDeclarationSyntax)
-                        // top-level statements share their locals
-                        |> Option.map (fun a -> if a :? GlobalStatementSyntax then a.Parent else a))
-                    |> List.ofSeq
-                | _ -> []
-
-            let named (e: ExpressionSyntax) =
-                match e with
-                | :? IdentifierNameSyntax as i -> i.Identifier.ValueText = target.Name
-                | :? MemberAccessExpressionSyntax as a -> a.Name.Identifier.ValueText = target.Name
-                | _ -> false
-
-            // a value written, or null where the write is not a plain one
-            let values =
-                roots
-                |> List.collect (fun root ->
-                    let rootModel =
-                        if root.SyntaxTree = model.SyntaxTree then
-                            model
-                        else
-                            model.Compilation.GetSemanticModel root.SyntaxTree
-
-                    let isTarget (e: ExpressionSyntax) =
-                        named e
-                        && (match rootModel.GetSymbolInfo(e).Symbol with
-                            | null -> false
-                            | s ->
-                                SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, target.OriginalDefinition))
-
-                    root.DescendantNodes()
-                    |> Seq.choose (fun n ->
-                        match n with
-                        | :? VariableDeclaratorSyntax as v when
-                            not (isNull v.Initializer)
-                            && v.Identifier.ValueText = target.Name
-                            && SymbolEqualityComparer.Default.Equals(rootModel.GetDeclaredSymbol v, target)
-                            ->
-                            Some v.Initializer.Value
-                        | :? AssignmentExpressionSyntax as a ->
-                            match a.Left with
-                            | :? TupleExpressionSyntax as t ->
-                                let deconstructed =
-                                    t.DescendantNodes()
-                                    |> Seq.exists (fun d ->
-                                        match d with
-                                        | :? ExpressionSyntax as e -> isTarget e
-                                        | _ -> false)
-
-                                if deconstructed then Some null else None
-                            | left when isTarget left ->
-                                Some(
-                                    if
-                                        a.IsKind SyntaxKind.SimpleAssignmentExpression
-                                        || a.IsKind SyntaxKind.CoalesceAssignmentExpression
-                                    then
-                                        a.Right
-                                    else
-                                        null
-                                )
-                            | _ -> None
-                        | :? ArgumentSyntax as a when
-                            not (a.RefKindKeyword.IsKind SyntaxKind.None) && isTarget a.Expression
-                            ->
-                            Some null
-                        | _ -> None)
-                    |> Seq.map (fun value -> rootModel, value)
-                    |> List.ofSeq)
-
-            let rec clears (e: ExpressionSyntax) =
-                match e with
-                | :? PostfixUnaryExpressionSyntax as p when p.IsKind SyntaxKind.SuppressNullableWarningExpression ->
-                    clears p.Operand
-                | :? LiteralExpressionSyntax as l ->
-                    l.IsKind SyntaxKind.NullLiteralExpression
-                    || l.IsKind SyntaxKind.DefaultLiteralExpression
-                | _ -> false
-
-            let streams =
-                values |> List.filter (fun (_, value) -> isNull value || not (clears value))
-
-            not streams.IsEmpty
-            && streams
-               |> List.forall (fun (valueModel, value) ->
-                   match value with
-                   | :? BaseObjectCreationExpressionSyntax as c when not (isNull c.ArgumentList) ->
-                       memoryStreamsOnly valueModel c.ArgumentList.Arguments
-                   | :? InvocationExpressionSyntax as i -> memoryStreamsOnly valueModel i.ArgumentList.Arguments
-                   | _ -> false)
-        | _ -> false
+        memoryBacked model false ma.Expression
     | _ -> false
 
 /// `Paginate().WithCancellation(ct)`, through a `ConfigureAwait` too: an

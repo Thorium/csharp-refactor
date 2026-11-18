@@ -33,7 +33,9 @@
 /// nowhere in the loop — for a struct local, nor its fields, its address, a
 /// `ref`/`out`/`in` pass or a method call on it (Files' `MENUITEMINFOW mii`
 /// filled field by field and handed to `GetMenuItemInfo(&mii)`), and a
-/// `default`/`new S()` struct is no work to hoist; the loop statement heads its line; no comment or
+/// `default`/`new S()` struct is no work to hoist; no local of any type whose
+/// address the loop takes (`uint bytes = 0;` handed to `Receive(&bytes)` in a
+/// retry loop); the loop statement heads its line; no comment or
 /// directive rides on the declaration; the speculative check re-binds.
 module CSharp.Refactor.LoopInvariant
 
@@ -340,6 +342,16 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                                | _ -> false)
                     | _ -> false
 
+                // any local whose address the loop takes (`Receive(&bytesReceived)`): a
+                // write through the pointer would carry into the next iteration
+                let addressTaken =
+                    (bodyOf loop).DescendantNodes()
+                    |> Seq.exists (fun n ->
+                        match n with
+                        | :? PrefixUnaryExpressionSyntax as u ->
+                            u.IsKind SyntaxKind.AddressOfExpression && Text.mentionsName name u.Operand
+                        | _ -> false)
+
                 let loopHeadsLine =
                     text.Lines
                         .GetLineFromPosition(loop.SpanStart)
@@ -352,6 +364,7 @@ let find (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
                     && loopHeadsLine
                     && not (Text.assignsTo name (bodyOf loop))
                     && not structMutated
+                    && not addressTaken
                     // the loop must sit in a block: above an unbraced `if`/`else`
                     // body a declaration is no statement at all (CS1023)
                     && loop.Parent :? BlockSyntax

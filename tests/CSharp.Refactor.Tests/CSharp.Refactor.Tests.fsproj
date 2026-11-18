@@ -50,6 +50,9 @@
     <Compile Include="ReleaseAuditToolTests.fs" />
     <Compile Include="CorpusSweepTests.fs" />
     <Compile Include="CorpusSweep1117Tests.fs" />
+    <Compile Include="DotnetSweep1118Tests.fs" />
+    <Compile Include="DotnetTwin1118Tests.fs" />
+    <Compile Include="DotnetTwinPerf1118Tests.fs" />
     <Compile Include="McpServerTests.fs" />
   </ItemGroup>
 
@@ -61,6 +64,8 @@
          workspace, so it needs the same Roslyn the analyzer was built
          against (or newer) -->
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.12.0" />
+    <!-- the netstandard2.0 reference assembly the old-framework tests compile against -->
+    <PackageDownload Include="NETStandard.Library" Version="[2.0.3]" />
   </ItemGroup>
 
   <ItemGroup>

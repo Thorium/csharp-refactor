@@ -130,10 +130,36 @@ type CSharpRefactorCodeFixProvider() =
                         Rules.allUntil context.CancellationToken tree model ctx
                         |> Flavors.narrowestOnly narrower offered tree
 
+                // a file other projects compile too (a linked file): only the
+                // fixes each of them offers on its own copy, asked for the
+                // findings being fixed alone
+                let linkedContext (other: Project) (compilation: Compilation) (theirTree: SyntaxTree) =
+                    let theirOptions =
+                        try
+                            Some(other.AnalyzerOptions.AnalyzerConfigOptionsProvider.GetOptions theirTree)
+                        with _ -> // no .editorconfig options readable: the rules run on their defaults; fsharpanalyzer: ignore-line FR0055
+                            None
+
+                    { Context.forTree theirOptions compilation theirTree false with
+                        References = Some(References.oracle other.Solution theirTree)
+                        ConsumerStructHostile = Some(References.consumerStructHostile other.Solution other)
+                        Mentions = Some(References.mentions other.Solution other)
+                    }
+
                 for diagnostic in context.Diagnostics do
                     let matching =
                         suggestions
                         |> List.filter (fun s -> s.Code = diagnostic.Id && s.Span = diagnostic.Location.SourceSpan)
+                        |> fun found ->
+                            if isNull model then
+                                found
+                            else
+                                Linked.everyCompilation
+                                    linkedContext
+                                    context.CancellationToken
+                                    document.Project.Solution
+                                    tree
+                                    found
 
                     for s in matching do
                         for fix in s.Fixes do

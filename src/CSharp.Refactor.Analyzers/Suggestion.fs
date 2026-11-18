@@ -180,6 +180,30 @@ module RuleContext =
         | true, oracle -> Some oracle
         | _ -> None
 
+    /// The other compilations of the host's solution that compile this tree's
+    /// file too (a `<Compile Include="..\Shared\X.cs" />` link several
+    /// projects share), lent by tree with the reference oracle. A change to a
+    /// declaration there must hold in each: their own files use it, and their
+    /// target framework, language version and global usings are not this
+    /// compilation's. Only trees that have such a twin are registered.
+    let private hostLinked = ConditionalWeakTable<SyntaxTree, Lazy<Compilation list>>()
+
+    let registerLinked (tree: SyntaxTree) (linked: Lazy<Compilation list>) =
+        lock hostLinked (fun () ->
+            hostLinked.Remove tree |> ignore
+            hostLinked.Add(tree, linked))
+
+    /// Does another compilation of the host's solution compile this file?
+    let isLinked (tree: SyntaxTree) : bool =
+        lock hostLinked (fun () -> fst (hostLinked.TryGetValue tree))
+
+    /// The other compilations that compile this file; none where no host lent
+    /// them (the compiler, an editor without a solution).
+    let linkedCompilations (tree: SyntaxTree) : Compilation list =
+        match lock hostLinked (fun () -> hostLinked.TryGetValue tree) with
+        | true, linked -> linked.Value
+        | _ -> []
+
     /// The solution's literals a host lends the analyzer, by tree, as the
     /// reference oracle above.
     let private hostMentions = ConditionalWeakTable<SyntaxTree, TextMentions>()

@@ -741,22 +741,25 @@ let speculativeCheck (model: SemanticModel) (edits: TextEdit list) : bool = spec
 /// The speculative check over many candidates of one file at once: the
 /// candidates whose edits pass. All are patched into one fork first — a
 /// fork is a re-bind of the file, and a file of forty properties checked
-/// one by one is forty re-binds — and only when that fork carries a new
-/// error is each candidate tried alone. Sound for independent edits: an
+/// one by one is forty re-binds — and a fork that carries a new error is
+/// halved and each half asked again, so one bad edit among a hundred costs
+/// a re-bind per halving, not a hundred. Sound for independent edits: an
 /// edit that errors alone errors with the rest in place too, so a clean
 /// batch clears every member; a batch that fails may hold one bad edit
-/// among good ones, and the retry finds which.
+/// among good ones, and the halving finds which.
 let speculativeCheckEach (model: SemanticModel) (candidates: ('a * TextEdit list) list) : 'a list =
-    match candidates with
-    | [] -> []
-    | [ (candidate, edits) ] -> if speculativeCheck model edits then [ candidate ] else []
-    | _ ->
-        if speculativeCheck model (candidates |> List.collect snd) then
-            candidates |> List.map fst
-        else
-            candidates
-            |> List.filter (fun (_, edits) -> speculativeCheck model edits)
-            |> List.map fst
+    let rec passing (batch: ('a * TextEdit list) list) : 'a list =
+        match batch with
+        | [] -> []
+        | [ (candidate, edits) ] -> if speculativeCheck model edits then [ candidate ] else []
+        | _ ->
+            if speculativeCheck model (batch |> List.collect snd) then
+                batch |> List.map fst
+            else
+                let first, second = List.splitAt (batch.Length / 2) batch
+                passing first @ passing second
+
+    passing candidates
 
 /// The speculative check for a cross-file edit set: every touched tree of
 /// the SAME compilation is patched into one fork, so a renamed method and

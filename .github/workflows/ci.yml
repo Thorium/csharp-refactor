@@ -31,7 +31,13 @@ jobs:
         run: dotnet build -c Release
 
       - name: Test
-        run: dotnet test -c Release --no-build
+        run: dotnet test -c Release --no-build --filter "Category!=Timing"
+
+      # The tests that time a rule (`Category=Timing`) run after the rest, in
+      # a process of their own: beside the whole suite a clock measures the
+      # machine's load, not the rule.
+      - name: Timing tests
+        run: dotnet test tests/CSharp.Refactor.Tests -c Release --no-build --filter "Category=Timing"
 
       # fsharplint reaches MSBuild through Ionide.ProjInfo, whose assemblies
       # want the SDK's runtime; launched through `dotnet exec --roll-forward

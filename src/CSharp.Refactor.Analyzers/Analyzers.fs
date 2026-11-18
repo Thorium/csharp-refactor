@@ -5,6 +5,7 @@
 namespace CSharp.Refactor.Roslyn
 
 open System.Collections.Immutable
+open System.Threading
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.Diagnostics
@@ -254,7 +255,7 @@ module Rules =
     /// take them from whatever runs beside the run - a test class in parallel
     /// with one driving the tool. It flows into the tasks the run starts
     /// (Roslyn's analyzer driver among them) and nowhere else.
-    let private restriction = System.Threading.AsyncLocal<Set<string> option>()
+    let private restriction = AsyncLocal<Set<string> option>()
 
     let restrictTo (codes: Set<string> option) = restriction.Value <- codes
 
@@ -311,7 +312,7 @@ module Rules =
     /// compilation full of unresolved references is a tree of error types
     /// no rule was written against.
     let private collect
-        (cancellation: System.Threading.CancellationToken)
+        (cancellation: CancellationToken)
         (tree: SyntaxTree)
         (model: SemanticModel)
         (ctx: RuleContext)
@@ -364,7 +365,7 @@ module Rules =
         (model: SemanticModel)
         (ctx: RuleContext)
         : Suggestion list * (string * exn) list =
-        collect System.Threading.CancellationToken.None tree model ctx
+        collect CancellationToken.None tree model ctx
 
     /// Who hears of a rule that threw inside the analyzer, where there is
     /// no one to return the failure to: nobody, unless a host asks. The
@@ -377,7 +378,7 @@ module Rules =
     /// Every rule's suggestions for a host that may give the pass up:
     /// `cancellation` is observed between rule modules.
     let allUntil
-        (cancellation: System.Threading.CancellationToken)
+        (cancellation: CancellationToken)
         (tree: SyntaxTree)
         (model: SemanticModel)
         (ctx: RuleContext)
@@ -390,7 +391,36 @@ module Rules =
         suggestions
 
     let all (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
-        allUntil System.Threading.CancellationToken.None tree model ctx
+        allUntil CancellationToken.None tree model ctx
+
+    /// The suggestions of these codes alone, from the rule modules that
+    /// declare one of them: what another compilation of a file offers for
+    /// the findings a host already holds, without running every rule there.
+    /// A rule that throws offers nothing.
+    let forCodes
+        (cancellation: CancellationToken)
+        (codes: Set<string>)
+        (tree: SyntaxTree)
+        (model: SemanticModel)
+        (ctx: RuleContext)
+        : Suggestion list =
+        if Text.isGeneratedFile tree then
+            []
+        else
+            typedNamed
+            |> List.filter (fun (name, _) ->
+                runs name
+                && (match moduleCodes.Value.TryFind name with
+                    | Some declared when not declared.IsEmpty -> declared |> Set.exists codes.Contains
+                    | _ -> true))
+            |> List.collect (fun (_, rule) ->
+                cancellation.ThrowIfCancellationRequested()
+
+                try
+                    rule tree model ctx
+                with _ -> // a rule that throws there offers nothing; fsharpanalyzer: ignore-line FR0055
+                    [])
+            |> List.filter (fun s -> codes.Contains s.Code && notShadowed tree ctx s)
 
 [<DiagnosticAnalyzer(LanguageNames.CSharp)>]
 type CSharpRefactorAnalyzer() =

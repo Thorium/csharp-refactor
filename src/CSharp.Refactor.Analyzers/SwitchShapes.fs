@@ -18,8 +18,10 @@
 ///
 /// 3. Unfinished branch (CR0012, correctness, fix): an arm that SAYS it is
 ///    unfinished — a comment between the label and its value reading
-///    "not supported", "not implemented", "unsupported", "not yet", "NYI",
-///    "stub", "placeholder", "unfinished", "TBD" — and returns a stand-in
+///    "not implemented", "not yet", "NYI", "stub", "placeholder",
+///    "unfinished", "TBD", or "not supported"/"unsupported" beside a word
+///    that makes it temporary ("yet", "for now", "TODO", "later") — and
+///    returns a stand-in
 ///    (`null`, `default`, `false`, `0`, `-1`, `""`, `string.Empty`, an
 ///    empty collection) becomes `throw new NotImplementedException()`, so
 ///    the gap reports itself instead of reaching callers as a real-looking
@@ -321,8 +323,6 @@ let private mergeArms (root: SyntaxNode) (text: SourceText) (wrapColumn: int) (o
 
 let private stubPhrases =
     [
-        "not supported"
-        "unsupported"
         "not implemented"
         "unimplemented"
         "not yet"
@@ -348,9 +348,23 @@ let private looksLikeCode (comment: string) =
     || body.Contains ";"
     || wRegex.IsMatch body
 
+/// "Unsupported" alone describes the input as often as the code: `//
+/// Unknown/unsupported method.` above `return default;` is the documented
+/// answer for that input. It says "unfinished" only beside a word that
+/// makes the gap temporary.
+let private supportPhrases = [ "not supported"; "unsupported" ]
+
+let private temporaryMarkers =
+    [ "yet"; "for now"; "todo"; "fixme"; "later" ]
+    |> List.map (fun marker -> Regex($@"\b{Regex.Escape marker}\b"))
+
 let private saysUnfinished (comment: string) =
     let lower = comment.ToLowerInvariant()
-    not (looksLikeCode comment) && stubPhrases |> List.exists lower.Contains
+    let temporary = temporaryMarkers |> List.exists (fun r -> r.IsMatch lower)
+
+    not (looksLikeCode comment)
+    && (stubPhrases |> List.exists lower.Contains
+        || temporary && (supportPhrases |> List.exists lower.Contains))
 
 /// A value that stands in for a result — only a comment turns it into
 /// evidence.

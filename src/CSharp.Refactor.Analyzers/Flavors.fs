@@ -210,3 +210,71 @@ module Flavors =
                             |> List.forall (fun p ->
                                 not (fix.Edits |> List.exists (compiledIn p)) || offeredBy p s fix))
                 })
+
+/// A file several projects compile (a `<Compile Include="..\Shared\X.cs" />`
+/// link) is one text under as many compilations: each has its own target
+/// framework, language version, global usings and files that use the
+/// file's declarations. A rule sees one of them. A fix there holds only
+/// where every other project compiling the file offers the same fix for the
+/// same finding on its own copy; otherwise the finding stays as a note.
+module Linked =
+    /// The other projects compiling the tree's file, narrowest framework
+    /// first: the one likeliest to refuse answers first.
+    let projectsOf (solution: Solution) (tree: SyntaxTree) : Project list =
+        References.linkedTo solution tree
+        |> List.sortBy (Flavors.frameworkOf >> Flavors.rank)
+
+    /// What `project` offers for its own copy of the file at `path`, from
+    /// the rules reporting `codes`; `context` is the host's rule context for
+    /// a tree of that project.
+    let offeredIn
+        (context: Project -> Compilation -> SyntaxTree -> RuleContext)
+        (cancellation: Threading.CancellationToken)
+        (path: string)
+        (codes: Set<string>)
+        (project: Project)
+        : Suggestion list =
+        project.Solution.GetDocumentIdsWithFilePath path
+        |> Seq.tryFind (fun pid -> pid.ProjectId = project.Id)
+        |> Option.map (fun pid ->
+            let tree =
+                project.GetDocument(pid).GetSyntaxTreeAsync(cancellation).GetAwaiter().GetResult()
+
+            let compilation = project.GetCompilationAsync(cancellation).GetAwaiter().GetResult()
+
+            if isNull tree || isNull compilation then
+                []
+            else
+                Rules.forCodes
+                    cancellation
+                    codes
+                    tree
+                    (compilation.GetSemanticModel(tree, false))
+                    (context project compilation tree))
+        |> Option.defaultValue []
+
+    /// The suggestions with only the fixes every other project compiling
+    /// the file offers too. A file no other project compiles, and one with
+    /// no fix, cost nothing; the other compilations are asked for the codes
+    /// that carry a fix, and a fix whose edits all sit in code a project
+    /// leaves out (`#if`) is not that project's to refuse.
+    let everyCompilation
+        (context: Project -> Compilation -> SyntaxTree -> RuleContext)
+        (cancellation: Threading.CancellationToken)
+        (solution: Solution)
+        (tree: SyntaxTree)
+        (suggestions: Suggestion list)
+        : Suggestion list =
+        let codes =
+            suggestions
+            |> List.filter (fun s -> not s.Fixes.IsEmpty)
+            |> List.map (fun s -> s.Code)
+            |> Set.ofList
+
+        if codes.IsEmpty then
+            suggestions
+        else
+            match projectsOf solution tree with
+            | [] -> suggestions
+            | linked ->
+                Flavors.narrowestOnly linked (offeredIn context cancellation tree.FilePath codes) tree suggestions

@@ -9,7 +9,9 @@
 /// an invoked member or property read whose result is a plain value
 /// (void, a primitive, a string, an array or tuple of those), a
 /// comparison operand, or a local bound to such a value; nothing pending
-/// (a task or a lazy sequence obtained through it) outlives the scope.
+/// (a task or a lazy sequence obtained through it) outlives the scope, and
+/// no view into its buffer (`ArraySegment<T>`, `Memory<T>` from a pooled
+/// builder) is kept.
 ///
 /// NOTHING when an escape is an ownership transfer: returned (also inside
 /// a tuple or a wrapper), handed to another disposable's constructor
@@ -38,7 +40,7 @@
 /// reads them back after the send); `MemoryStream`,
 /// `StringReader`, `StringWriter` (own nothing); a wrapper over a foreign
 /// resource (`new StreamReader(parameter)`, or over a local that itself
-/// escapes); an object built with a `null!`/`default!` argument (its
+/// escapes: returned, yielded or stored); an object built with a `null!`/`default!` argument (its
 /// `Dispose` may dereference it); a value already under `using` (also
 /// `await using (x.ConfigureAwait(false))`); an `IAsyncDisposable`-only
 /// type (v2: `await using`). Under `Main` or top-level statements only a
@@ -142,12 +144,28 @@ let private plainValue (t: ITypeSymbol) =
 
 let private isTaskLike (t: ITypeSymbol) = AsyncShapes.isTaskLike t
 
+let private bufferViews =
+    set
+        [
+            "System.ArraySegment<T>"
+            "System.Memory<T>"
+            "System.ReadOnlyMemory<T>"
+            "System.Buffers.ReadOnlySequence<T>"
+        ]
+
+/// A struct that points into the object's own buffer: it reads freed or
+/// re-rented memory once the object is disposed.
+let private bufferView (t: ITypeSymbol) =
+    not (isNull t) && bufferViews.Contains(t.OriginalDefinition.ToDisplayString())
+
 /// A value reached through the binder that is evaluated and done: a plain
 /// value, or an object that is neither disposable, nor pending work, nor a
-/// lazy sequence (one that runs when enumerated, after the scope).
+/// lazy sequence (one that runs when enumerated, after the scope), nor a view
+/// into its buffer.
 let private settled (t: ITypeSymbol) =
-    plainValue t
+    not (bufferView t) && plainValue t
     || (not (isDisposable t)
+        && not (bufferView t)
         && not (isTaskLike t)
         && not (Linq.isGenericEnumerable t && not (Linq.isCollection t)))
 
@@ -333,7 +351,11 @@ let rec private resultFate
         match arg.Parent.Parent with
         | :? InvocationExpressionSyntax as inv ->
             match model.GetSymbolInfo(inv).Symbol with
-            | :? IMethodSymbol as callee when readsOnly callee -> Stays
+            // a view into the object's buffer is kept by whatever takes it (`list.Add(segment)`)
+            | :? IMethodSymbol as callee when
+                readsOnly callee && not (bufferView (model.GetTypeInfo(arg.Expression).Type))
+                ->
+                Stays
             | :? IMethodSymbol as callee when wraps model callee (model.GetTypeInfo(arg.Expression).Type) ->
                 resultFate model tree scope $"{what}, wrapped by '{Linq.nameOf inv}'," dropped returned inv
             | _ -> Escape $"{what} is handed to '{Linq.nameOf inv}'"
@@ -673,6 +695,53 @@ let private wrapsForeign (model: SemanticModel) (init: ExpressionSyntax) =
         | _ -> false
     | _ -> false
 
+/// A wrapper over a disposable local of the scope that the scope returns or
+/// stores (`var w = new StreamWriter(stream); … return stream;`): disposing
+/// the wrapper closes what leaves. The local leaves as itself or inside
+/// what is returned (`return (Stream)stream;`, `return new Result(stream);`,
+/// `return ok ? stream : null;`); a member read off it
+/// (`return stream.ToArray();`) hands on a value, not the stream.
+let private wrapsLeavingLocal (model: SemanticModel) (init: ExpressionSyntax) (rest: StatementSyntax list) =
+    match init with
+    | :? BaseObjectCreationExpressionSyntax as c when not (isNull c.ArgumentList) ->
+        let wrapped =
+            c.ArgumentList.Arguments
+            |> Seq.choose (fun a ->
+                match model.GetSymbolInfo(a.Expression).Symbol with
+                | :? ILocalSymbol as l when isDisposable l.Type -> Some(l :> ISymbol)
+                | _ -> None)
+            |> List.ofSeq
+
+        let isReceiver (pid: IdentifierNameSyntax) =
+            match pid.Parent with
+            | :? MemberAccessExpressionSyntax as ma -> obj.ReferenceEquals(ma.Expression, pid)
+            | :? ConditionalAccessExpressionSyntax as ca -> obj.ReferenceEquals(ca.Expression, pid)
+            | :? ElementAccessExpressionSyntax as ea -> obj.ReferenceEquals(ea.Expression, pid)
+            | _ -> false
+
+        let isWrapped (e: ExpressionSyntax) =
+            not (isNull e)
+            && e.DescendantNodesAndSelf()
+               |> Seq.exists (fun n ->
+                   match n with
+                   | :? IdentifierNameSyntax as pid when not (isReceiver pid) ->
+                       match model.GetSymbolInfo(pid).Symbol with
+                       | null -> false
+                       | s -> wrapped |> List.exists (fun w -> SymbolEqualityComparer.Default.Equals(s, w))
+                   | _ -> false)
+
+        not wrapped.IsEmpty
+        && rest
+           |> List.exists (fun s ->
+               s.DescendantNodesAndSelf()
+               |> Seq.exists (fun n ->
+                   match n with
+                   | :? ReturnStatementSyntax as r -> isWrapped r.Expression
+                   | :? YieldStatementSyntax as y -> isWrapped y.Expression
+                   | :? AssignmentExpressionSyntax as a -> isWrapped a.Right
+                   | _ -> false))
+    | _ -> false
+
 let private selfActive
     (model: SemanticModel)
     (t: ITypeSymbol)
@@ -722,7 +791,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Sugge
 
                 let scopeText = rest |> List.map (fun s -> s.ToString()) |> String.concat "\n"
 
-                if selfActive model t init block name then
+                if selfActive model t init block name || wrapsLeavingLocal model init rest then
                     None
                 else
                     let symbol = model.GetDeclaredSymbol v

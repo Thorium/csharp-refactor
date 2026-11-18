@@ -645,6 +645,27 @@ let private frozenCollections (tree: SyntaxTree) (model: SemanticModel) (ctx: Ru
 
 // ---- CR0152 ----
 
+/// A compilation where `System.Threading.Lock` exists and C# 13 binds `lock` to it.
+let private lockCompiles (c: Compilation) =
+    not (isNull (c.GetTypeByMetadataName "System.Threading.Lock"))
+    && (match c with
+        | :? CSharpCompilation as cs -> int cs.LanguageVersion >= 1300
+        | _ -> false)
+
+/// Does the file itself import the namespace — a `using` directive of its
+/// own, not a project's global or implicit one?
+let private fileImports (tree: SyntaxTree) (ns: string) =
+    tree.GetRoot().DescendantNodes(fun n -> not (n :? MemberDeclarationSyntax) || n :? BaseNamespaceDeclarationSyntax)
+    |> Seq.exists (fun n ->
+        match n with
+        | :? UsingDirectiveSyntax as u ->
+            u.GlobalKeyword.IsKind SyntaxKind.None
+            && u.StaticKeyword.IsKind SyntaxKind.None
+            && isNull u.Alias
+            && not (isNull u.Name)
+            && u.Name.ToString() = ns
+        | _ -> false)
+
 let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     if
         not (RuleContext.languageAtLeast ctx 13)
@@ -716,17 +737,34 @@ let private lockObjects (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleCont
                                     && elsewhere |> List.forall (fun (pid, _) -> lockOperand pid)
                                 | ValueNone -> false)
 
-                    if not onlyLocked then
+                    // another compilation of a linked file: Lock must exist there too, and
+                    // its global usings are not this project's - a bare `Lock` that binds
+                    // here through one is spelled out unless the file imports it itself
+                    let linked = RuleContext.linkedCompilations tree
+
+                    let spelling =
+                        if linked.IsEmpty || fileImports tree "System.Threading" then
+                            "Lock"
+                        else
+                            "System.Threading.Lock"
+
+                    if not (onlyLocked && List.forall lockCompiles linked) then
                         None
                     else
                         // no `using` that makes the bare `Lock` System.Threading's: no fix
-                        match Usings.importEdit model tree fd.SpanStart "System.Threading" "Lock" with
+                        let imports =
+                            if spelling = "Lock" then
+                                Usings.importEdit model tree fd.SpanStart "System.Threading" "Lock"
+                            else
+                                Some []
+
+                        match imports with
                         | None -> None
                         | Some usingEdits ->
                             let edits =
                                 usingEdits
                                 @ [
-                                    Suggestion.replace fd.Declaration.Type.Span "Lock"
+                                    Suggestion.replace fd.Declaration.Type.Span spelling
                                     Suggestion.replace v.Initializer.Value.Span "new()"
                                 ]
 

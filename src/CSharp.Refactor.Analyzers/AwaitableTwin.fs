@@ -23,8 +23,10 @@
 /// implements the async query interface runs it — an in-memory
 /// `AsQueryable()` source, a test fake, throws at the call); `Thread.Sleep(0)` and
 /// `Sleep(1)` are thread yields and stay; never a `MemoryStream`/`StringWriter`/
-/// `StringReader` receiver or `Console.Out`/`Console.Error` (nothing behind
-/// the twin), EF Core's `Add`/`AddRange` (async only for database value
+/// `StringReader` receiver, a `StreamWriter`/`StreamReader` made over memory
+/// streams alone, or `Console.Out`/`Console.Error` (nothing behind
+/// the twin), a test that awaits the twin on the same receiver too (it covers
+/// both overloads), EF Core's `Add`/`AddRange` (async only for database value
 /// generators, EF's documentation says), nor inside a member named for its
 /// synchronous work (`WriteTokenSyncReadingAsync`), nor Microsoft.Data.Sqlite
 /// (its async methods run synchronously); never a twin that is the enclosing
@@ -206,8 +208,40 @@ let private inMemory (model: SemanticModel) (inv: InvocationExpressionSyntax) (m
 
     consoleWriter
     || within memoryTypes receiverType
+    // a StreamWriter/StreamReader every value of which is made over memory streams
+    || (match receiver with
+        | Some r -> AsyncShapes.memoryBacked model true r
+        | None -> false)
     || ((m.Name = "Add" || m.Name = "AddRange") && efType m.ContainingType)
     || sqlite
+
+/// A test that calls the sync method and awaits its twin on one receiver
+/// (`writer.WriteLine(); await writer.WriteLineAsync();`) covers both
+/// overloads on purpose.
+let private besideTwinInTest
+    (model: SemanticModel)
+    (inv: InvocationExpressionSyntax)
+    (fn: SyntaxNode)
+    (twin: IMethodSymbol)
+    =
+    match inv.Expression with
+    | :? MemberAccessExpressionSyntax as ma when Text.isTestFileIn model.Compilation inv.SyntaxTree ->
+        fn.DescendantNodes()
+        |> Seq.exists (fun n ->
+            match n with
+            | :? AwaitExpressionSyntax as a ->
+                a.Expression.DescendantNodesAndSelf()
+                |> Seq.exists (fun x ->
+                    match x with
+                    | :? InvocationExpressionSyntax as other ->
+                        match other.Expression with
+                        | :? MemberAccessExpressionSyntax as twinAccess ->
+                            twinAccess.Name.Identifier.ValueText = twin.Name
+                            && Guards.sameReference model twinAccess.Expression ma.Expression
+                        | _ -> false
+                    | _ -> false)
+            | _ -> false)
+    | _ -> false
 
 /// The twin is a method the call sits in — the innermost, or one around the
 /// lambda or local function it sits in — or one such a method overrides or
@@ -356,6 +390,7 @@ let analyze (tree: SyntaxTree) (model: SemanticModel) (_ctx: RuleContext) : Sugg
                             | Some twin when
                                 callsItself model inv twin
                                 || firesAndForgets model m
+                                || besideTwinInTest model inv f.Node twin
                                 || AsyncShapes.dualPathBranch inv f.Node (AsyncShapes.awaitsCallNamed twin.Name)
                                 ->
                                 None

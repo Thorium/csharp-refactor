@@ -41,7 +41,10 @@
 /// `IsWhiteSpace` set); the null test leads — a `Trim()` spelling that
 /// leads throws on null today, so that order is editor-only;
 /// `string.IsNullOrEmpty(x.Trim())` is `IsNullOrWhiteSpace(x)` editor-only
-/// for the same reason; never inside an expression tree.
+/// for the same reason; never inside an expression tree; under nullable
+/// warnings, never where the framework's `IsNullOrEmpty` carries no
+/// `[NotNullWhen(false)]` (netstandard2.0, .NET Framework: the spelled-out
+/// null test is what proves the subject non-null after it).
 module CSharp.Refactor.StringShapes
 
 open System
@@ -679,6 +682,20 @@ let private classify (model: SemanticModel) (e: ExpressionSyntax) : (Test * bool
         | _ -> None
     | _ -> None
 
+/// Under nullable warnings, `string.IsNullOrEmpty(x)` narrows `x` only where
+/// the framework marks its parameter `[NotNullWhen(false)]` (.NET Core 3.0
+/// on; not netstandard2.0 or .NET Framework): without it the spelled-out test
+/// is what proves `x` non-null after it (CS8777, CS8602 otherwise).
+let private narrowsLikeTheTest (model: SemanticModel) (name: string) (position: int) =
+    not (NullableContextExtensions.WarningsEnabled(model.GetNullableContext position))
+    || model.Compilation.GetSpecialType(SpecialType.System_String).GetMembers name
+       |> Seq.exists (fun m ->
+           match m with
+           | :? IMethodSymbol as m when m.Parameters.Length = 1 ->
+               m.Parameters.[0].GetAttributes()
+               |> Seq.exists (fun a -> not (isNull a.AttributeClass) && a.AttributeClass.Name = "NotNullWhenAttribute")
+           | _ -> false)
+
 let private emptiness (tree: SyntaxTree) (model: SemanticModel) : Suggestion list =
     tree.GetRoot().DescendantNodes()
     |> Seq.choose (fun n ->
@@ -704,6 +721,7 @@ let private emptiness (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                     | _ -> None
 
                 match combine left right with
+                | Some(name, _, _) when not (narrowsLikeTheTest model name b.SpanStart) -> None
                 | Some(name, subject, editorOnly) ->
                     let call = "string." + name + "(" + subject.ToString() + ")"
                     let replacement = if ln then "!" + call else call

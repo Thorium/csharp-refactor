@@ -258,32 +258,35 @@ let private subscribed (model: SemanticModel) (target: IMethodSymbol) =
 
 /// Is the method named anywhere other than as the callee of an invocation —
 /// a method group handed on, a delegate built from it, `nameof`? A changed
-/// signature would silently change what such a mention means.
+/// signature would silently change what such a mention means. A mention in
+/// code an `#if` leaves out counts too: another framework's build calls the
+/// method there, and its call site is not rewritten.
 let private mentionedAsGroup (model: SemanticModel) (target: IMethodSymbol) =
-    model.Compilation.SyntaxTrees
-    |> Seq.exists (fun t ->
-        let m = model.Compilation.GetSemanticModel t
+    Text.mentionedInDisabledCodeOf model.Compilation target.Name
+    || model.Compilation.SyntaxTrees
+       |> Seq.exists (fun t ->
+           let m = model.Compilation.GetSemanticModel t
 
-        lookup (nameIndexOf t).Names target.Name
-        |> Seq.exists (fun id ->
-            let info = m.GetSymbolInfo id
+           lookup (nameIndexOf t).Names target.Name
+           |> Seq.exists (fun id ->
+               let info = m.GetSymbolInfo id
 
-            let refers =
-                Seq.append (Option.toList (Option.ofObj info.Symbol)) info.CandidateSymbols
-                |> Seq.exists (fun s ->
-                    SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, target.OriginalDefinition))
+               let refers =
+                   Seq.append (Option.toList (Option.ofObj info.Symbol)) info.CandidateSymbols
+                   |> Seq.exists (fun s ->
+                       SymbolEqualityComparer.Default.Equals(s.OriginalDefinition, target.OriginalDefinition))
 
-            refers
-            && (let callee =
-                    match id.Parent with
-                    | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = id.Span
-                    | :? MemberAccessExpressionSyntax as ma when ma.Name.Span = id.Span ->
-                        match ma.Parent with
-                        | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = ma.Span
-                        | _ -> false
-                    | _ -> false
+               refers
+               && (let callee =
+                       match id.Parent with
+                       | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = id.Span
+                       | :? MemberAccessExpressionSyntax as ma when ma.Name.Span = id.Span ->
+                           match ma.Parent with
+                           | :? InvocationExpressionSyntax as inv -> inv.Expression.Span = ma.Span
+                           | _ -> false
+                       | _ -> false
 
-                not callee)))
+                   not callee)))
 
 let private returnTypeText (m: MethodDeclarationSyntax) (model: SemanticModel) =
     let t = model.GetTypeInfo(m.ReturnType).Type
@@ -776,6 +779,11 @@ let private testTasks (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                         || foreignDrains > 0
                         || not (ownDrains |> List.forall (AsyncShapes.bindable model fn))
                         || touchesSharedState model m
+                        // the author silenced xUnit's own blocking-call warning there: the
+                        // synchronous read is what the test is about
+                        || drains
+                           |> List.exists (fun d ->
+                               Text.pragmaNamesOff tree (fst (AsyncShapes.drainSite d)).SpanStart [ "xUnit1031" ])
                     then
                         None
                     else
@@ -790,19 +798,20 @@ let private testTasks (tree: SyntaxTree) (model: SemanticModel) : Suggestion lis
                                     Suggestion.replace inv.Span ($"await {head}(() => {task})")
                             ]
 
-                        if Guards.speculativeCheck model edits then
-                            Some
-                                {
-                                    Code = TestTaskCode
-                                    Message =
-                                        "A test blocking on a task holds a worker thread for its whole run: return a Task and await"
-                                    Span = m.Identifier.Span
-                                    Fixes = [ Suggestion.fix "Make the test async" TestTaskCode edits ]
-                                }
-                        else
-                            None
+                        Some(
+                            {
+                                Code = TestTaskCode
+                                Message =
+                                    "A test blocking on a task holds a worker thread for its whole run: return a Task and await"
+                                Span = m.Identifier.Span
+                                Fixes = [ Suggestion.fix "Make the test async" TestTaskCode edits ]
+                            },
+                            edits
+                        )
             | _ -> None)
         |> List.ofSeq
+        // a test class of a hundred blocking tests is one re-bind, not a hundred
+        |> Guards.speculativeCheckEach model
 
 let analyze (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
     taskify tree model ctx @ asyncVoids tree model ctx @ testTasks tree model

@@ -483,6 +483,18 @@ let private tiedFiles (file: string) =
 /// reports them and leaves them be, instead of trying them again.
 let private rejectedFixes = HashSet<string>()
 
+/// The fixes in a linked file that another project compiling the file did
+/// not offer, by the file's text: each project compiling it would otherwise
+/// ask every other one again, pass after pass.
+let private linkedRefusals =
+    Collections.Concurrent.ConcurrentDictionary<string, bool>()
+
+let private linkedKey (path: string) (text: SourceText) (s: Suggestion) (fix: Fix) =
+    let checksum =
+        text.GetChecksum() |> Seq.map (fun b -> b.ToString "x2") |> String.concat ""
+
+    $"{path.ToUpperInvariant()}|{checksum}|{s.Code}|{s.Span.Start}|{s.Span.Length}|{fix.Key}"
+
 /// The framework flavors this run swept: a wider flavor of the same project
 /// leaves the code they compile to them (Flavors).
 let private sweptFlavors = HashSet<ProjectId>()
@@ -1358,6 +1370,49 @@ let private analyzeProject
         // public surface too: it is held, flag or no flag
         let held = not heldFor.IsEmpty
 
+        // the rule context of another project compiling one of this project's
+        // files (a linked file), as that project's own sweep would build it
+        let linkedContexts =
+            Collections.Concurrent.ConcurrentDictionary<ProjectId, Lazy<Compilation -> SyntaxTree -> RuleContext>>()
+
+        let linkedContext (other: Project) (theirs: Compilation) (theirTree: SyntaxTree) : RuleContext =
+            let make =
+                linkedContexts.GetOrAdd(
+                    other.Id,
+                    fun _ ->
+                        lazy
+                            (let theirHeldFor = publicSurfaceHeldFor opts other
+                             let theirOptions = runAnalyzerOptions opts theirHeldFor other.AnalyzerOptions
+                             let theirsHeld = not theirHeldFor.IsEmpty
+
+                             let referenced =
+                                 other.Solution.Projects
+                                 |> Seq.exists (fun p ->
+                                     p.Id <> other.Id
+                                     && p.ProjectReferences |> Seq.exists (fun r -> r.ProjectId = other.Id))
+
+                             let hostile = References.consumerStructHostile other.Solution other
+                             let theirMentions = References.mentions other.Solution other
+
+                             fun (c: Compilation) (t: SyntaxTree) ->
+                                 let ctx =
+                                     Context.forTree
+                                         (Some(theirOptions.AnalyzerConfigOptionsProvider.GetOptions t))
+                                         c
+                                         t
+                                         opts.ApiChanges
+
+                                 { ctx with
+                                     IsLeaf = ctx.IsLeaf && not referenced && not theirsHeld
+                                     ApiChanges = ctx.ApiChanges && not theirsHeld
+                                     References = Some(solutionOracle t)
+                                     ConsumerStructHostile = Some hostile
+                                     Mentions = Some theirMentions
+                                 })
+                )
+
+            make.Value theirs theirTree
+
         // the rules again, per file, for the fixes the diagnostics do not carry:
         // `--jobs` files at once, as fsharp-refactor typechecks them. The results
         // keep the files' order, and so does everything printed from them
@@ -1395,6 +1450,45 @@ let private analyzeProject
 
                 // a fix in code a narrower framework compiles too is that sweep's
                 let suggestions = Flavors.narrowestOnly narrower (fun _ -> []) tree suggestions
+
+                // a file other projects compile too (a linked file): only the
+                // fixes each of them offers on its own copy. Asked for the fixes
+                // this run would apply, and not again for one already refused
+                let suggestions =
+                    if opts.ParseOnly then
+                        suggestions
+                    else
+                        let known (s: Suggestion) =
+                            { s with
+                                Fixes =
+                                    s.Fixes
+                                    |> List.filter (fun fix ->
+                                        not (linkedRefusals.ContainsKey(linkedKey tree.FilePath text s fix)))
+                            }
+
+                        let suggestions = suggestions |> List.map known
+
+                        let asked =
+                            suggestions
+                            |> List.filter (fun s -> not s.Fixes.IsEmpty && ruleOnFor tree s.Code)
+
+                        if asked.IsEmpty then
+                            suggestions
+                        else
+                            let answered =
+                                List.zip asked (Linked.everyCompilation linkedContext ct project.Solution tree asked)
+
+                            for before, after in answered do
+                                for fix in before.Fixes do
+                                    if not (after.Fixes |> List.exists (fun kept -> kept.Key = fix.Key)) then
+                                        linkedRefusals.[linkedKey tree.FilePath text before fix] <- true
+
+                            suggestions
+                            |> List.map (fun s ->
+                                answered
+                                |> List.tryFind (fun (before, _) -> obj.ReferenceEquals(before, s))
+                                |> Option.map snd
+                                |> Option.defaultValue s)
 
                 computed.[i] <- Some(document, text, suggestions, failures)
 
@@ -2596,6 +2690,7 @@ let private executeRunCore (opts: Options) : Task<int> =
     Rules.observeFailures noteRuleFailure
     appliedCodes.Clear()
     rejectedFixes.Clear()
+    linkedRefusals.Clear()
     sweptFlavors.Clear()
     fileUnits.Clear()
     advisedIds.Clear()

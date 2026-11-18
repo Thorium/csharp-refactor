@@ -12,7 +12,8 @@
 /// reference to `Nullable<T>`), not compared with or assigned `null`, not
 /// the operand of `as`/`??`/`?.`, not a `class`-constrained type argument
 /// (the index reads every file of the compilation), not boxed to
-/// `object`/an interface, not `lock`ed, not the element of an expression
+/// `object`/an interface (a local or parameter passed as `object` too), not
+/// named in a `typeof` (reflection sees the kind change), not `lock`ed, not the element of an expression
 /// tree lambda (`IQueryable` providers translate struct members
 /// differently); the scope gate. The fix inserts `readonly … struct`
 /// around the `record` keyword and nothing else.

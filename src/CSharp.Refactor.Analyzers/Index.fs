@@ -377,6 +377,8 @@ let private build (compilation: Compilation) : CompilationIndex =
                 let t = typeOf m l.Expression
                 addType identity t
                 addType hostile t
+            // `typeof(R)`: handed to reflection, which sees a class or a struct
+            | :? TypeOfExpressionSyntax as t -> addType hostile (typeOf m t.Type)
             | :? NullableTypeSyntax as nt -> addType hostile (typeOf m nt.ElementType)
             | :? InterpolationSyntax as hole -> addType formatted (typeOf m hole.Expression)
             | :? BinaryExpressionSyntax as b when b.IsKind SyntaxKind.AddExpression ->
@@ -439,9 +441,23 @@ let private build (compilation: Compilation) : CompilationIndex =
                 | _ -> ()
             | _ -> ()
 
-            // a boxing conversion or an expression-tree position of any expression
+            // a boxing conversion or an expression-tree position of any expression; a
+            // name is a TypeSyntax too, and an expression unless it stands where only a
+            // type can. The member name of `a.b` is not asked: the conversion sits on
+            // the access, and names after a dot are half the names of a file
+            let memberName (e: ExpressionSyntax) =
+                match e.Parent with
+                | :? MemberAccessExpressionSyntax as ma -> obj.ReferenceEquals(ma.Name, e)
+                | :? MemberBindingExpressionSyntax -> true
+                | _ -> false
+
             match n with
-            | :? ExpressionSyntax as e when not (e :? TypeSyntax) ->
+            | :? ExpressionSyntax as e when
+                not (e :? TypeSyntax)
+                || (e :? SimpleNameSyntax
+                    && not (memberName e)
+                    && not (SyntaxFacts.IsInTypeOnlyContext e))
+                ->
                 let info = m.GetTypeInfo e
 
                 if not (isNull info.Type) && info.Type.TypeKind <> TypeKind.Error then

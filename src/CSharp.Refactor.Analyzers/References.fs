@@ -2,16 +2,22 @@
 /// reference to a symbol outside the file being analysed, found by
 /// `SymbolFinder` across every project of the solution, C# and VB alike.
 /// A site in a C# document the host may write is `Editable`; a VB site is
-/// read only, so a rule that would have to rewrite it stands down. The
-/// compiler has no solution and never builds one of these.
+/// read only, so a rule that would have to rewrite it stands down. A file
+/// other projects compile too (a linked `<Compile Include>`) declares its
+/// symbols once per compilation: the references of each are the symbol's,
+/// and the tree's other compilations are lent to the rules
+/// (`RuleContext.linkedCompilations`). The compiler has no solution and never
+/// builds one of these.
 namespace CSharp.Refactor.Roslyn
 
 open System
 open System.Collections.Generic
 open System.Collections.Concurrent
+open System.Text.RegularExpressions
 open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.FindSymbols
+open Microsoft.CodeAnalysis.Text
 open CSharp.Refactor
 
 module References =
@@ -61,8 +67,7 @@ module References =
         let sites =
             ConcurrentDictionary<ISymbol, Lazy<(string * ReferenceSite) list>>(SymbolEqualityComparer.Default)
 
-        // every site of the symbol, the asking file's included
-        let search (symbol: ISymbol) : (string * ReferenceSite) list =
+        let sitesFound (symbol: ISymbol) : (string * TextSpan * ReferenceSite) list =
             SymbolFinder.FindReferencesAsync(symbol, solution).Result
             |> Seq.collect (fun r -> r.Locations)
             |> Seq.choose (fun location ->
@@ -78,6 +83,7 @@ module References =
 
                     Some(
                         document.FilePath,
+                        location.Location.SourceSpan,
                         {
                             Tree = root.SyntaxTree
                             Model = modelOf document
@@ -86,6 +92,57 @@ module References =
                         }
                     ))
             |> List.ofSeq
+
+        // the other C# projects compiling one of these files, by path: a linked
+        // `<Compile Include>`. A multi-targeted project's flavors share its
+        // assembly name, and their sites are its own
+        let linkedProjects (paths: string seq) (ownAssembly: string) : Project list =
+            paths
+            |> Seq.filter (String.IsNullOrEmpty >> not)
+            |> Seq.collect solution.GetDocumentIdsWithFilePath
+            |> Seq.map (fun d -> d.ProjectId)
+            |> Seq.distinct
+            |> Seq.map solution.GetProject
+            |> Seq.filter (fun p -> p.Language = LanguageNames.CSharp && p.AssemblyName <> ownAssembly)
+            |> List.ofSeq
+
+        // the same declaration in each other compilation of its file: its own
+        // symbol there, which a search for this one does not reach
+        let linkedTwins (symbol: ISymbol) : ISymbol list =
+            match DocumentationCommentId.CreateDeclarationId symbol with
+            | null -> []
+            | pid when not (isNull symbol.ContainingAssembly) ->
+                let paths =
+                    symbol.Locations
+                    |> Seq.filter (fun l -> l.IsInSource)
+                    |> Seq.map (fun l -> l.SourceTree.FilePath)
+
+                linkedProjects paths symbol.ContainingAssembly.Name
+                |> List.choose (fun p ->
+                    match p.GetCompilationAsync().Result with
+                    | null -> None
+                    | c -> Option.ofObj (DocumentationCommentId.GetFirstSymbolForDeclarationId(pid, c)))
+            | _ -> []
+
+        // every site of the symbol, the asking file's included, and of its
+        // twins in the other compilations of its file
+        let search (symbol: ISymbol) : (string * ReferenceSite) list =
+            let own = sitesFound symbol
+
+            let twins =
+                match linkedTwins symbol with
+                | [] -> []
+                | twins ->
+                    let seen =
+                        HashSet<string * TextSpan>(
+                            own |> Seq.map (fun (path, span, _) -> path.ToUpperInvariant(), span)
+                        )
+
+                    twins
+                    |> List.collect sitesFound
+                    |> List.filter (fun (path, span, _) -> seen.Add((path.ToUpperInvariant(), span)))
+
+            own @ twins |> List.map (fun (path, _, site) -> path, site)
 
         // None when the search failed: a task that faulted or was cancelled
         // (the wait wraps either in an AggregateException), a location the
@@ -100,28 +157,58 @@ module References =
             | :? InvalidOperationException
             | :? NotSupportedException -> None
 
-        fun (tree: SyntaxTree) (symbol: ISymbol) ->
-            match sitesOf symbol with
-            | Some sites ->
-                sites
-                |> List.choose (fun (path, site) ->
-                    if String.Equals(path, tree.FilePath, StringComparison.OrdinalIgnoreCase) then
-                        None
-                    else
-                        Some site)
-            | None ->
-                // an oracle that cannot answer holds the fix: one unreadable site
-                [
-                    {
-                        Tree = tree
-                        Model = null
-                        Node = null
-                        Editable = false
-                    }
-                ]
+        fun (tree: SyntaxTree) ->
+            // the rules ask, for a fix to a declaration of a linked file, what
+            // the other compilations of the file are
+            match solution.GetDocumentId tree with
+            | null -> ()
+            | own ->
+                match linkedProjects [ tree.FilePath ] (solution.GetProject own.ProjectId).AssemblyName with
+                | [] -> ()
+                | projects ->
+                    RuleContext.registerLinked
+                        tree
+                        (lazy (projects |> List.choose (fun p -> Option.ofObj (p.GetCompilationAsync().Result))))
+
+            fun (symbol: ISymbol) ->
+                match sitesOf symbol with
+                | Some sites ->
+                    sites
+                    |> List.choose (fun (path, site) ->
+                        if String.Equals(path, tree.FilePath, StringComparison.OrdinalIgnoreCase) then
+                            None
+                        else
+                            Some site)
+                | None ->
+                    // an oracle that cannot answer holds the fix: one unreadable site
+                    [
+                        {
+                            Tree = tree
+                            Model = null
+                            Node = null
+                            Editable = false
+                        }
+                    ]
 
     /// The oracle for one tree of one solution.
     let oracle (solution: Solution) (tree: SyntaxTree) : ISymbol -> ReferenceSite list = solutionOracle solution tree
+
+    /// The other C# projects of the solution compiling the tree's file (a
+    /// linked `<Compile Include>`). The flavors of the tree's own project
+    /// share its assembly name and are not among them.
+    let linkedTo (solution: Solution) (tree: SyntaxTree) : Project list =
+        match solution.GetDocumentId tree with
+        | null -> []
+        | _ when String.IsNullOrEmpty tree.FilePath -> []
+        | own ->
+            let assembly = (solution.GetProject own.ProjectId).AssemblyName
+
+            solution.GetDocumentIdsWithFilePath tree.FilePath
+            |> Seq.map (fun d -> d.ProjectId)
+            |> Seq.distinct
+            |> Seq.map solution.GetProject
+            |> Seq.filter (fun p -> p.Language = LanguageNames.CSharp && p.AssemblyName <> assembly)
+            |> List.ofSeq
 
     /// One file's string literals: their spellings, and the text each string
     /// holds (an interpolation's pieces each), read when the file is a test.
@@ -163,6 +250,9 @@ module References =
                     Texts = lazy (stringTokens tree |> Seq.map (fun t -> t.ValueText) |> Array.ofSeq)
                 }
         )
+
+    /// A run of letters and digits.
+    let private words = Regex(@"[\p{L}\p{N}]+", RegexOptions.Compiled)
 
     /// The solution's literals beyond `project`'s own files: whether another
     /// project, a test above all, reads a text back. Read on the first
@@ -208,6 +298,31 @@ module References =
                  | :? OperationCanceledException
                  | :? InvalidOperationException -> None)
 
+        // the test files' strings, and by every word they hold the strings
+        // holding it: built once, where a scan per question costs questions x corpus
+        let tests =
+            lazy
+                (files.Value
+                 |> Option.map (fun files ->
+                     let texts =
+                         files
+                         |> Array.filter (fun (_, isTest, _) -> isTest)
+                         |> Array.collect (fun (_, _, f) -> f.Texts.Value)
+
+                     let byWord = Dictionary<string, ResizeArray<int>>(StringComparer.Ordinal)
+
+                     texts
+                     |> Array.iteri (fun i t ->
+                         let distinct =
+                             words.Matches t |> Seq.cast<Match> |> Seq.map (fun m -> m.Value) |> Seq.distinct
+
+                         for w in distinct do
+                             match byWord.TryGetValue w with
+                             | true, holders -> holders.Add i
+                             | false, _ -> byWord.[w] <- ResizeArray [ i ])
+
+                     texts, byWord))
+
         {
             Spelled =
                 fun spelling ->
@@ -218,12 +333,26 @@ module References =
                     | None -> true
             InTests =
                 fun text ->
-                    match files.Value with
-                    | Some files ->
-                        files
-                        |> Array.exists (fun (_, isTest, f) ->
-                            isTest
-                            && f.Texts.Value
-                               |> Array.exists (fun t -> t.IndexOf(text, StringComparison.Ordinal) >= 0))
+                    match tests.Value with
+                    | Some(texts, byWord) ->
+                        let holds (i: int) =
+                            texts.[i].IndexOf(text, StringComparison.Ordinal) >= 0
+
+                        // a word of the text with a non-word character on both sides
+                        // is a whole word of any string holding the text: only the
+                        // strings holding the rarest such word can
+                        let inner =
+                            words.Matches text
+                            |> Seq.cast<Match>
+                            |> Seq.filter (fun m -> m.Index > 0 && m.Index + m.Length < text.Length)
+                            |> Seq.map (fun m ->
+                                match byWord.TryGetValue m.Value with
+                                | true, holders -> holders
+                                | false, _ -> ResizeArray())
+                            |> List.ofSeq
+
+                        match inner with
+                        | [] -> Seq.init texts.Length id |> Seq.exists holds
+                        | holders -> holders |> List.minBy (fun h -> h.Count) |> Seq.exists holds
                     | None -> true
         }

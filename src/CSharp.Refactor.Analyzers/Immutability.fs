@@ -221,12 +221,15 @@ let private shapeOpen (ctx: RuleContext) (s: ISymbol) =
 /// analyzer for this tree. The lent one answers sites of the solution's own
 /// compilation, not the analyzer's copy: only their syntax and assembly are
 /// read here, never their symbols compared with this model's.
+///
+/// A file other projects compile too (a linked `<Compile Include>`) shows
+/// its internal members to those projects' own files: asked as well.
 let private consumerSites (ctx: RuleContext) (tree: SyntaxTree) (s: ISymbol) : ReferenceSite list option =
     let visibleOutside =
         match effective s with
         | Accessibility.Private -> false
         | Accessibility.Internal
-        | Accessibility.ProtectedAndInternal -> ctx.HasFriends
+        | Accessibility.ProtectedAndInternal -> ctx.HasFriends || RuleContext.isLinked tree
         | _ -> true
 
     if not visibleOutside then
@@ -310,20 +313,42 @@ let private writesAreConstruction (model: SemanticModel) (property: IPropertySym
     let index = Index.ofCompilation model.Compilation
     let writes = Index.writesOf index property
 
+    // where a bare `Port = 443` can be this property: the files of its type
+    // and of every type derived from it
+    let ownTrees () =
+        let rec family (seen: Set<string>) (t: ITypeSymbol) : ITypeSymbol list =
+            let name = t.ToDisplayString()
+
+            if seen.Contains name then
+                []
+            else
+                t
+                :: (Index.derivedTypesOf index t |> List.collect (fun d -> family (seen.Add name) d))
+
+        family Set.empty property.ContainingType
+        |> Seq.collect (fun t -> t.DeclaringSyntaxReferences)
+        |> Seq.map (fun r -> r.SyntaxTree)
+
     not writes.IsEmpty
     && writes |> List.forall (fun w -> w <> Index.Elsewhere)
     && not (Index.namedByNameOf index property)
+    // another framework's `#if` branch writing it (`o.Port = 443`) is CS8852 in that build
+    && not (Text.memberWrittenInDisabledCodeOf model.Compilation (ownTrees ()) property.Name)
 
-let private isExternalInitAvailable (model: SemanticModel) =
-    not (isNull (model.Compilation.GetTypeByMetadataName "System.Runtime.CompilerServices.IsExternalInit"))
+/// `init` compiles here and in every other compilation of the file (a linked
+/// file a net462 or netstandard2.0 project compiles has no `IsExternalInit`).
+let private initCompiles (tree: SyntaxTree) (model: SemanticModel) =
+    model.Compilation :: RuleContext.linkedCompilations tree
+    |> List.forall (fun c ->
+        not (isNull (c.GetTypeByMetadataName "System.Runtime.CompilerServices.IsExternalInit"))
+        && (match c with
+            | :? CSharpCompilation as cs -> cs.LanguageVersion >= LanguageVersion.CSharp9
+            | _ -> false))
 
 // ---- CR0083 ----
 
 let private initOnly (tree: SyntaxTree) (model: SemanticModel) (ctx: RuleContext) : Suggestion list =
-    if
-        ctx.LanguageVersion < LanguageVersion.CSharp9
-        || not (isExternalInitAvailable model)
-    then
+    if ctx.LanguageVersion < LanguageVersion.CSharp9 || not (initCompiles tree model) then
         []
     else
         tree.GetRoot().DescendantNodes()

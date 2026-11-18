@@ -960,7 +960,8 @@ let private tokenLoops (tree: SyntaxTree) (model: SemanticModel) : Suggestion li
                                     not (names.Contains v.Identifier.ValueText)
                                     && (Text.mentionsName name v.Initializer.Value
                                         || (match v.Initializer.Value with
-                                            | :? IdentifierNameSyntax as alias -> names.Contains alias.Identifier.ValueText
+                                            | :? IdentifierNameSyntax as alias ->
+                                                names.Contains alias.Identifier.ValueText
                                             | _ -> false)
                                         || (names |> Set.exists (fun n -> Text.mentionsName n v.Initializer.Value)
                                             && (v.Initializer.Value :? AnonymousFunctionExpressionSyntax

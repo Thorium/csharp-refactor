@@ -6,6 +6,8 @@ open Microsoft.CodeAnalysis
 open Microsoft.CodeAnalysis.CSharp
 open Microsoft.CodeAnalysis.Text
 open System
+open System.Runtime.CompilerServices
+open System.Text.RegularExpressions
 
 /// Does the list carry only these attributes (short names, with or without the suffix)? Rules that rewrite a declaration
 /// read an attribute they don't know as a reason to leave it alone.
@@ -59,7 +61,7 @@ let crossesDirective (node: SyntaxNode) : bool =
 /// findings rescanned its whole tree 1500 times.
 let private pragmasOf =
     let cache =
-        System.Runtime.CompilerServices.ConditionalWeakTable<SyntaxTree, Syntax.PragmaWarningDirectiveTriviaSyntax[]>()
+        ConditionalWeakTable<SyntaxTree, Syntax.PragmaWarningDirectiveTriviaSyntax[]>()
 
     fun (tree: SyntaxTree) ->
         cache.GetValue(
@@ -181,25 +183,61 @@ let mentionsName (name: string) (node: SyntaxNode) : bool =
 /// here (Newtonsoft.Json's `hasIgnoreDataMemberAttribute`), and "nothing writes
 /// it" holds for this flavor only. Disabled text is not parsed, so the shapes
 /// are read off the text: `name =`, `name += …` and the other compound
-/// assignments, `name++`, `--name`, `ref name`, `out name`. A read there
-/// (`Use(name)`) is no write.
+/// assignments, `name++`, `--name`, `ref name`, `out name`, `&name`, an
+/// element of a deconstruction (`(name, _) = …`, nested too) and a
+/// parenthesised store (`(name) = …`); the name may be verbatim (`@name`). A
+/// read there (`Use(name)`) is no write.
+///
+/// Whose name it is decides what may stand before it: a local or the type's
+/// own member (`name`, `this.name`); a member, bare or behind any receiver
+/// (`name = …`, `o.name = …`); or a member behind a receiver only
+/// (`o.name = …`, `Make().name++`, `(o.name, _) = …`), where a bare
+/// `name = …` is another type's object initializer, an attribute argument or
+/// a local.
+[<RequireQualifiedAccess>]
+type private Written =
+    | Own
+    | Member
+    | ThroughReceiver
+
+let private writePattern (name: string) (written: Written) =
+    let n = @"@?" + Regex.Escape name
+    let chain = @"(?:[\w@]+\s*\??\.\s*)"
+
+    // the name where the write starts with it (`name = …`, `name++`), and
+    // where a prefix leads (`++name`, `ref name`, `&name`, `(name, _) = …`).
+    // Never after `:` or a quote: `xmlns:json="…"` inside a string literal of
+    // the disabled text, a named argument `json: …`
+    let first, after =
+        match written with
+        | Written.Own -> @"(?<![\w.:""'@])(?:this\.)?" + n, @"(?:this\.)?" + n
+        | Written.Member -> $@"(?<![\w:""'@]){chain}*{n}", $"{chain}*{n}"
+        | Written.ThroughReceiver -> @"(?<=\.\s*)" + n, $"{chain}+{n}"
+
+    Regex(
+        first
+        + @"\s*(?:(?:[-+*/%&|^]|<<|>>|\?\?)?=(?![=>])|\+\+|--)"
+        + @"|(?:\+\+|--)\s*"
+        + after
+        + @"\b|\b(?:ref|out)\s+"
+        + after
+        + @"\b|(?:[=(,{]|\breturn)\s*&\s*"
+        + after
+        + @"\b|[(,]\s*"
+        + after
+        + @"\s*[,)](?:[^;=]*\))?\s*=(?![=>])"
+    )
+
+/// Does the text spell the name at all? The cheap question before a
+/// pattern is run over it: a megabyte of disabled text is scanned for a
+/// substring a thousand times faster than for a write.
+let private spells (name: string) (text: string) =
+    text.IndexOf(name, StringComparison.Ordinal) >= 0
+
 let writtenInDisabledCode (name: string) (node: SyntaxNode) : bool =
     not (isNull node)
     && node.ContainsDirectives
-    && (let n = System.Text.RegularExpressions.Regex.Escape name
-
-        let write =
-            System.Text.RegularExpressions.Regex(
-                // not after `:` or a quote: `xmlns:json="…"` inside a string literal of
-                // the disabled text, a named argument `json: …`
-                @"(?<![\w.:""'])(?:this\.)?"
-                + n
-                + @"\s*(?:(?:[-+*/%&|^]|<<|>>|\?\?)?=(?!=)|\+\+|--)|(?:\+\+|--)\s*"
-                + n
-                + @"\b|\b(?:ref|out)\s+"
-                + n
-                + @"\b"
-            )
+    && (let write = lazy (writePattern name Written.Own)
 
         // inside the node: its leading trivia is the code before it (a whole
         // disabled method above, with locals of its own)
@@ -207,7 +245,80 @@ let writtenInDisabledCode (name: string) (node: SyntaxNode) : bool =
         |> Seq.exists (fun t ->
             t.IsKind SyntaxKind.DisabledTextTrivia
             && node.Span.Contains t.Span
-            && write.IsMatch(t.ToString())))
+            && (let text = t.ToString()
+                spells name text && write.Value.IsMatch text)))
+
+/// The text every `#if` of the compilation leaves out — code another target
+/// framework or configuration compiles — one entry per disabled region with
+/// the tree it sits in, read once per compilation.
+let private disabledTexts =
+    ConditionalWeakTable<Compilation, (SyntaxTree * string)[]>()
+
+let private disabledTextOf (compilation: Compilation) : (SyntaxTree * string)[] =
+    disabledTexts.GetValue(
+        compilation,
+        fun c ->
+            c.SyntaxTrees
+            |> Seq.collect (fun t ->
+                let root = t.GetRoot()
+
+                if root.ContainsDirectives then
+                    root.DescendantTrivia()
+                    |> Seq.filter (fun tr -> tr.IsKind SyntaxKind.DisabledTextTrivia)
+                    |> Seq.map (fun tr -> t, tr.ToString())
+                else
+                    Seq.empty)
+            |> Array.ofSeq
+    )
+
+/// Does code an `#if` leaves out of the compilation spell the name at all? A
+/// method another framework's branch calls is called: a changed signature
+/// breaks that build, unseen here.
+let mentionedInDisabledCodeOf (compilation: Compilation) (name: string) : bool =
+    match disabledTextOf compilation with
+    | [||] -> false
+    | texts ->
+        let mention = lazy (Regex(@"(?<![\w@])@?" + Regex.Escape name + @"\b"))
+
+        texts
+        |> Array.exists (fun (_, text) -> spells name text && mention.Value.IsMatch text)
+
+/// Whether disabled code of the compilation writes a member of a name through
+/// a receiver, by name: many properties share one (`Name`, `Id`), and each
+/// is asked about once per candidate.
+let private receiverWrites =
+    ConditionalWeakTable<Compilation, System.Collections.Concurrent.ConcurrentDictionary<string, bool>>()
+
+/// Does code an `#if` leaves out of the compilation write a member of this
+/// name? Through a receiver anywhere (`o.name = …`, `o.name++`,
+/// `(o.name, _) = …`: the name alone says whose member it is, so any type's
+/// counts); bare (`name = …`) only in `own`, the trees declaring the
+/// member's type and the types derived from it, where a bare name can be
+/// that member. A bare `name = …` elsewhere is an object initializer or a
+/// `with` (construction, which `init` allows), an attribute argument, or
+/// another type's member.
+let memberWrittenInDisabledCodeOf (compilation: Compilation) (own: SyntaxTree seq) (name: string) : bool =
+    match disabledTextOf compilation with
+    | [||] -> false
+    | texts ->
+        let throughReceiver =
+            receiverWrites
+                .GetValue(compilation, (fun _ -> System.Collections.Concurrent.ConcurrentDictionary()))
+                .GetOrAdd(
+                    name,
+                    fun name ->
+                        let write = lazy (writePattern name Written.ThroughReceiver)
+
+                        texts
+                        |> Array.exists (fun (_, text) -> spells name text && write.Value.IsMatch text)
+                )
+
+        throughReceiver
+        || (let own = System.Collections.Generic.HashSet own
+            let write = lazy (writePattern name Written.Member)
+
+            texts
+            |> Array.exists (fun (tree, text) -> own.Contains tree && spells name text && write.Value.IsMatch text))
 
 /// Does an identifier token in the scope, outside the span, spell the name?
 /// A variable whose scope a fix widens to the scope clashes with, or
@@ -478,7 +589,7 @@ let globalUsingNames (trees: SyntaxTree seq) : Set<string> =
     |> Set.ofSeq
 
 let private compilationGlobalUsings =
-    System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, Set<string>>()
+    ConditionalWeakTable<Compilation, Set<string>>()
 
 /// The compilation's global usings, read once per compilation.
 let globalUsings (compilation: Compilation) : Set<string> =

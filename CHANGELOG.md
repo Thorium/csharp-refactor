@@ -2,9 +2,23 @@
 
 The analyzers package, the `csharp-refactor` tool and both editor extensions share one version.
 
-## Unreleased
+## 0.1.32
 
 - CR0170 reads a local built from a token carrier as carrying the token only where it is another name for it, a token holder (`var token = linked.Token;`) or a lambda reading it: `var xs = Compute(ct); var ys = xs.Where(…).ToList();` is data, and a loop over `ys` that never reads the token is reported again.
+- CR0012 reads "not supported"/"unsupported" as unfinished only beside a word that makes it temporary ("yet", "for now", "TODO", "later"): `default: // Unknown/unsupported method. return default;` is the documented answer and stays (aspnetcore RouteUsageDetector).
+- CR0171 leaves a mutation followed by more statements before the `break`/`return`/`throw` (`tags.Remove(tag); tags.Add(…); break;`) unless one of them can `continue` or `goto` past it (aspnetcore MetricsExtensions).
+- CR0042 leaves a `StreamWriter`/`StreamReader`/`BinaryWriter`/`BinaryReader` made over memory streams (aspnetcore BlobLoggerProvider), and a sync call in a test that also awaits its twin on the same receiver (aspnetcore ViewBufferTextWriterTest).
+- CR0060 leaves a wrapper over a local the scope returns or stores, as itself or inside what is returned (`new StreamWriter(stream)` … `return stream;`, `return new Result(stream);`; aspnetcore DownloadFilesController), and a builder whose `ArraySegment`/`Memory` view is kept (`Diffs.Add(builder.ToSegment(…))`, aspnetcore CapturedBatch).
+- CR0081 sees a record passed as `object` through a plain name (`stack.Push(model)`; names were skipped by the boxing scan, which CR0080 and CR0082 share; aspnetcore ValidationStackTest) and a record named in `typeof(…)` (aspnetcore ParameterBindingMethodCacheTests).
+- CR0015 leaves an indexed loop over an interface-typed list (`IReadOnlyList<T>`, `IList<T>`): `foreach` there boxes the enumerator and makes two interface calls per element (aspnetcore matcher policies, DefaultHubDispatcher).
+- CR0177 never hoists a local whose address the loop takes (`uint bytes = 0;` handed to `Receive(&bytes)` in a retry loop, aspnetcore HttpSys ClientCertLoader).
+- CR0104 keeps the spelled-out null test under nullable warnings where `string.IsNullOrEmpty` carries no `[NotNullWhen(false)]` (netstandard2.0, .NET Framework: CS8777 in aspnetcore ArgumentThrowHelper).
+- A file other projects compile too (a linked `<Compile Include>`) is checked against each of them: the reference search finds the same declaration's uses in their files, CR0083 keeps a setter one of them assigns or one built without `IsExternalInit` or C# 9 (aspnetcore src/Shared, CS8852/CS0518), and CR0152 needs `Lock` in each and spells it `System.Threading.Lock` where only this project's global using imported it (CS0246).
+- Any fix in such a file is kept only where every project compiling it offers the same fix on its own copy, in the tool and the editor alike: CR0104 offered under net10.0 is dropped where a netstandard2.0 project links the file, CR0083 where another project's part of a partial type assigns the setter. A refusal is remembered for the run.
+- CR0041 and CR0043 leave a method whose name code under an inactive `#if` mentions; CR0083 keeps a setter written there through a receiver (`o.Port = …`) anywhere, or bare (`Port = …`) in a file of its type or of a type derived from it. The scan looks for the name before it runs a pattern (346 ms per property on 5 MB of inactive code before).
+- CR0172 and CR0180 read `&x`, a deconstruction element, `(x) = …` and verbatim `@x` in inactive `#if` code as writes; `x => …` is no longer one.
+- CR0045 leaves a test whose task read sits under `#pragma warning disable xUnit1031`, and checks a file's tests in one speculative re-bind (it was one per test); a batch that fails is halved, not retried one by one.
+- CR0069's test-mention search indexes the test strings by word once: a message is looked up in the strings holding its rarest whole word, not in every test string.
 
 ## 0.1.31
 

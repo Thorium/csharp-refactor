@@ -234,7 +234,10 @@ in matches)`. Guards: `i` starts at literal `0`, steps by one
 `i <= xs.Length - 1` on the very expression the body indexes; `xs` is a
 local, parameter or `readonly` field (a property may hand out a fresh list
 per read, and the `for` read it per iteration) typed as an array, `string`,
-a span, or a type implementing `IList<T>`/`IReadOnlyList<T>`; every use of
+a span, or a class or struct implementing `IList<T>`/`IReadOnlyList<T>`
+(not the interface itself: an `IReadOnlyList<T>` parameter would hand
+`foreach` a boxed enumerator and two interface calls per element on what
+may be a hot path); every use of
 `i` in the body is `xs[i]` (an index used as a value wants
 `Select((x, i) => …)` and stays the author's call); no `xs[i]` is written,
 incremented, taken by `ref` or passed `ref`/`out`, and no element of a list is
@@ -629,7 +632,9 @@ no override, virtual or interface implementation, no recursion, no `ref
 struct` local, no mention as a method group anywhere in the compilation
 (a delegate built from it would silently carry a Task); no member of the
 type already carries the new name; one
-unconvertible caller vetoes everything; the speculative check re-binds
+unconvertible caller vetoes everything; a mention of the name in code an
+inactive `#if` leaves out vetoes too (another framework's build calls it
+there, and that call site is not rewritten); the speculative check re-binds
 the file. F# twin: FR0049 (taskify).
 
 ### CR0042 — correctness
@@ -655,8 +660,10 @@ or writer settings opted in with `Async = true`), nor a LINQ twin over
 implements the async query interface runs it, and an in-memory
 `AsQueryable()` source — a test fake — throws at the call); `Thread.Sleep(0)` and
 `Sleep(1)` are thread yields and stay; nor a `MemoryStream`/`StringWriter`/
-`StringReader` or `Console.Out`/`Console.Error` receiver (nothing behind the
-twin), EF Core's `Add`/`AddRange` (async only for database value generators,
+`StringReader`, a `StreamWriter`/`StreamReader` made over memory streams alone,
+or a `Console.Out`/`Console.Error` receiver (nothing behind the twin), nor a
+call in a test that also awaits the twin on the same receiver (the test covers
+both overloads), EF Core's `Add`/`AddRange` (async only for database value generators,
 EF's documentation says), nor a call inside a member named for its synchronous
 I/O (`WriteTokenSyncReadingAsync`; `Sync` as a noun, `RunDataSyncJobAsync`, is not
 that). The inserted `await` carries
@@ -680,7 +687,8 @@ fire-and-forget, and a method with no caller in sight is called by the
 framework, reflection or another assembly, which would get a Task nobody
 awaits, so either vetoes the fix and the rule notes instead; the scope
 gate (a public or protected method needs the public shape open, an
-internal one the friend check). Yields to VSTHRD100.
+internal one the friend check); no mention of the name in code an inactive
+`#if` leaves out (a caller there is not seen). Yields to VSTHRD100.
 
 ### CR0045 — performance
 
@@ -699,7 +707,9 @@ process-global (`Environment.CurrentDirectory`,
 keeps its blocking shape since an awaited test may overlap another; a
 file that installs global state by reflection (`BindingFlags`) converts no
 test; `Assert.Throws<AggregateException>(() => t.Wait())` asserts the
-wrapper and stays. F# twin: FR0142.
+wrapper and stays; a drain under `#pragma warning disable xUnit1031` is
+the synchronous read the test is about, and the test stays. A file's
+candidates share one speculative re-bind. F# twin: FR0142.
 
 ### CR0044 — correctness
 
@@ -885,7 +895,9 @@ scope: every mention is an invoked member or property read whose result
 is a plain value (void, a primitive, a string, an array or tuple of
 those), a comparison operand, or a local bound to such a value; nothing
 pending — a task or a lazy sequence obtained through it — outlives the
-scope (an awaited, `.Wait()`ed or `.Result`ed task is done). NOTHING when
+scope (an awaited, `.Wait()`ed or `.Result`ed task is done), and no view
+into its buffer (`ArraySegment<T>`, `Memory<T>`, `ReadOnlyMemory<T>` from a
+pooled builder) is kept. NOTHING when
 an escape is an ownership transfer: returned (also inside a tuple, a
 collection or an initializer), handed to another disposable's constructor
 (`new StreamReader(stream)` adopts it, unless `leaveOpen: true`), stored
@@ -908,7 +920,8 @@ would stop it on the way out); the no-ownership types (`HttpClient`,
 and a test's handler mock reads them back after the send —
 `MemoryStream`, `StringReader`/`StringWriter`, `SemaphoreSlim`); a wrapper
 over a foreign resource (`new StreamReader(parameter)`, a field, a
-property); an object built with a `null!`/`default!` argument (a test
+property) or over a local the scope returns or stores (`new
+StreamWriter(stream)` … `return stream;`: disposing the writer closes it); an object built with a `null!`/`default!` argument (a test
 constructing only what it exercises: its `Dispose` may dereference what it
 was never given); a value already under `using`, `await using
 (x.ConfigureAwait(false))` included; an `IAsyncDisposable`-only type
@@ -1124,7 +1137,9 @@ record, nothing deriving from it, no interface beyond the compiler's
 `Nullable<T>`), not compared with or assigned `null`, not the operand of
 `as`, `??` or `?.`, not a type argument for a `class`-constrained
 parameter — in any file of the compilation — not converted to `object` or an
-interface (boxing), not `lock`ed, not inside an expression-tree lambda
+interface (boxing: a local or parameter passed as `object` too, where a
+`ReferenceEqualityComparer` set would never find it again), not named in a
+`typeof` (reflection sees a struct), not `lock`ed, not inside an expression-tree lambda
 (`IQueryable` providers translate struct members differently); the scope
 gate of CR0080. F# twin: FR0070.
 
@@ -1187,7 +1202,13 @@ members. The tool lends the analyzer its solution-wide reference search;
 where a host has none (the compiler, an editor without a solution) such a
 member is left as it is. Another project writing the property outside an object
 initializer or a `with` keeps the setter (`filter.Currency = x` is CS8852 on
-an `init` one).
+an `init` one). A file other projects compile too (a linked `<Compile
+Include>`) shows even its internal members to their files: those are asked
+as well, and each of those compilations must have `IsExternalInit` and C# 9.
+A write through a receiver in code an inactive `#if` leaves out (`o.P = 1`)
+keeps the setter, and so does a bare one (`P = 1`) in a file of the type or
+of a type derived from it; a bare `P = 1` elsewhere is an object
+initializer, an attribute argument or another type's member.
 
 A type XAML may set keeps its setters: a public type where WinUI, UWP, WPF,
 MAUI or Avalonia is referenced, and any type declared in a `.xaml.cs` file.
@@ -1358,7 +1379,10 @@ null test leads — a `Trim()` spelling that leads throws on null today, so
 that order is editor-only; `string.IsNullOrEmpty(x.Trim())` is
 `IsNullOrWhiteSpace(x)` editor-only for the same reason; never inside an
 expression tree (the translator may know `||` and `==` but not
-`IsNullOrEmpty`). F# twin: FR0138.
+`IsNullOrEmpty`); under nullable warnings, never where the framework's
+`IsNullOrEmpty`/`IsNullOrWhiteSpace` carries no `[NotNullWhen(false)]`
+(netstandard2.0, .NET Framework: the spelled-out null test is what proves
+the subject non-null after it, CS8777 otherwise). F# twin: FR0138.
 
 ### CR0105 — correctness
 
@@ -1816,8 +1840,10 @@ other returns `null`). F# twin: FR0012.
 ### CR0012 — correctness
 
 An arm that says it is unfinished — a comment between the label and its
-value reading "not supported", "unsupported", "not implemented", "not
-yet", "NYI", "stub", "placeholder", "unfinished", "TBD" — and returns a
+value reading "not implemented", "not yet", "NYI", "stub", "placeholder",
+"unfinished", "TBD", or "not supported"/"unsupported" beside a word that
+makes the gap temporary ("yet", "for now", "TODO", "later"; alone it
+describes the input, as `// Unknown/unsupported method.` does) — and returns a
 stand-in (`null`, `default`, `false`, `0`, `-1`, `""`, `string.Empty`, an
 empty collection) becomes `throw new NotImplementedException()`, so the
 gap reports itself instead of reaching callers as a real-looking result.
@@ -2135,7 +2161,10 @@ _gate = new();` (C# 13, .NET 9): the dedicated type skips the
 object-header path, and the `lock` statement binds to its scope.
 `Monitor.*`, passing, comparing or storing it vetoes — in every part of
 a partial type, the other files included; `System.Threading.Lock`
-resolves, and its `using` is added.
+resolves, and its `using` is added. A file other projects compile too (a
+linked `<Compile Include>`) needs `Lock` and C# 13 in each of them, and is
+spelled `System.Threading.Lock` unless the file imports the namespace
+itself: a global using of this project is not theirs.
 
 ### CR0153 — idiom
 
@@ -2476,7 +2505,9 @@ version, so `foreach (var k in d.Keys) d.Add(…)` throws just the same and
 the reference watched is `d`, the snapshot `d.Keys.ToList()`); the mutating call is on the same
 reference by symbol, outside nested closures; a mutation followed by
 `break`, `return` or `throw` never reaches the next `MoveNext` and is the
-accepted mutate-and-leave idiom; `Dictionary.Remove`/`Clear` tolerate enumeration
+accepted mutate-and-leave idiom, also with further statements before the
+leave (`Remove(x); Add(y); break;`) as long as none can `continue` or
+`goto` past it; `Dictionary.Remove`/`Clear` tolerate enumeration
 since .NET Core 3.0, an overwriting `Dictionary` indexer set and
 `HashSet.Remove`/`Clear` since .NET 5 (those still throw on 3.1), and none is
 reported in a compilation targeting that runtime or later, read off its
@@ -2510,8 +2541,10 @@ assignment, a compound assignment, `++`/`--`, a `ref`/`out`/`in`
 argument, `&`, a `ref` local or return, a deconstruction target; a `var`
 is replaced by the constant's type; `using`, `ref`, `scoped` and
 already-`const` declarations, and one holding a comment or directive,
-are left alone, and so is a name code behind an inactive `#if` mentions
-(another target framework compiles that code and may write it); the
+are left alone, and so is a name code behind an inactive `#if` writes —
+read off its text: an assignment, `++`/`--`, `ref`/`out`, `&`, a
+deconstruction element, the verbatim `@name` alike (another target
+framework compiles that code); the
 speculative re-bind settles the rest.
 
 ### CR0173 — idiom
@@ -2659,7 +2692,9 @@ literal), `?:`, and an interpolated string whose holes
 are such reads of primitives or strings; every local or parameter it reads
 is assigned nowhere in the member but its own declaration, and declared
 outside the loop; the hoisted name is spelled nowhere in the member
-outside the loop and written nowhere in the loop; the loop statement
+outside the loop and written nowhere in the loop, its address not taken
+there (`uint bytes = 0;` handed to `Receive(&bytes)` in a retry loop: the
+next round would start from the last value, not 0); the loop statement
 heads its line; no comment or directive rides on the declaration; the
 speculative check re-binds. F# twin: FR0071.
 

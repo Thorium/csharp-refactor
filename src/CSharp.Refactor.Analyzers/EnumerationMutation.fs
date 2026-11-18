@@ -82,20 +82,34 @@ let private mutators =
             "Reverse"
         ]
 
+let private isLeave (s: StatementSyntax) =
+    match s with
+    | :? BreakStatementSyntax
+    | :? ReturnStatementSyntax
+    | :? ThrowStatementSyntax -> true
+    | _ -> false
+
+/// A statement that may skip a later leave of its block: a `continue` or a
+/// `goto` anywhere in it, outside a lambda or local function.
+let private mayJump (s: StatementSyntax) =
+    s.DescendantNodesAndSelf(fun n -> not (n :? AnonymousFunctionExpressionSyntax || n :? LocalFunctionStatementSyntax))
+    |> Seq.exists (fun n -> n :? ContinueStatementSyntax || n :? GotoStatementSyntax)
+
 /// Is the statement holding the mutation followed by a leave — so the
-/// enumerator never moves again?
+/// enumerator never moves again? The leave may come after further
+/// statements of the same block (`Remove(x); Add(y); break;`) that cannot
+/// jump past it.
 [<TailCall>]
 let rec private leavesAfter (s: StatementSyntax) =
     match s.Parent with
     | :? BlockSyntax as b ->
         let i = b.Statements.IndexOf s
+        let rest = b.Statements |> Seq.skip (i + 1) |> List.ofSeq
 
-        if i + 1 < b.Statements.Count then
-            match b.Statements.[i + 1] with
-            | :? BreakStatementSyntax
-            | :? ReturnStatementSyntax
-            | :? ThrowStatementSyntax -> true
-            | _ -> false
+        if not rest.IsEmpty then
+            match rest |> List.tryFindIndex isLeave with
+            | Some leave -> rest |> List.take leave |> List.forall (mayJump >> not)
+            | None -> false
         else
             match b.Parent with
             | :? IfStatementSyntax as parentIf -> leavesAfter parentIf
